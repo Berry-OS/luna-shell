@@ -7,7 +7,7 @@
  */
 
 use super::vt::VtSession;
-use super::{Backend, Framebuffer, InputEvent};
+use super::{probe_render_node, Backend, Framebuffer, InputEvent};
 use crate::input::evdev::EvdevInput;
 use libc::{c_void, ioctl, mmap, munmap, open, MAP_FAILED, MAP_SHARED, O_CLOEXEC, O_RDWR, PROT_READ, PROT_WRITE};
 use std::ffi::CString;
@@ -148,21 +148,92 @@ const DRM_MODE_CONNECTED: u32 = 1;
 
 pub struct DriBackend {
   fd: i32,
-  map: *mut u8,
-  map_len: usize,
-  pitch: u32,
+  /// Dual scanout buffers.  We always draw into `bufs[1 - front]`, then flip
+  /// with SetCrtc so the front buffer is never rewritten mid-scanout (the
+  /// single-buffer path tore / flickered on every software-cursor move).
+  bufs: [ScanoutBuf; 2],
+  front: usize,
   width: u32,
   height: u32,
   connector_id: u32,
   crtc_id: u32,
-  fb_id: u32,
-  handle: u32,
   mode: ModeInfo,
   saved_crtc: ModeCrtc,
   active: bool,
   master: bool,
   vt: VtSession,
   input: Option<EvdevInput>,
+  /// `dev_t` of the render node (`/dev/dri/renderD*`) that belongs to the very
+  /// card this backend drives, or `None` when the card exposes no usable render
+  /// node.  Advertised to clients as `zwp_linux_dmabuf_v1.main_device`.
+  render_dev: Option<u64>,
+}
+
+struct ScanoutBuf {
+  map: *mut u8,
+  map_len: usize,
+  pitch: u32,
+  fb_id: u32,
+  handle: u32,
+}
+
+impl ScanoutBuf {
+  fn empty() -> Self {
+    Self {
+      map: std::ptr::null_mut(),
+      map_len: 0,
+      pitch: 0,
+      fb_id: 0,
+      handle: 0,
+    }
+  }
+
+  unsafe fn release(&mut self, fd: RawFd) {
+    if !self.map.is_null() {
+      munmap(self.map as *mut c_void, self.map_len);
+      self.map = std::ptr::null_mut();
+    }
+    remove_fb(fd, self.fb_id);
+    destroy_dumb(fd, self.handle);
+    self.fb_id = 0;
+    self.handle = 0;
+    self.map_len = 0;
+    self.pitch = 0;
+  }
+}
+
+/// Resolve the render node that belongs to the card behind `card_fd`.
+///
+/// The card is identified by its own `dev_t` rather than by a hard-coded name:
+/// on a multi-GPU machine `/dev/dri/card1` pairs with `renderD129`, not with
+/// `renderD128`, and pointing clients at the wrong GPU is precisely what makes
+/// Mesa's Wayland dmabuf path allocate nothing and hand a NULL image to
+/// `create_wl_buffer()`.
+///
+/// `/sys/dev/char/<major>:<minor>/device/drm/` lists every node of the physical
+/// device, so the render sibling is found there and then verified by opening it
+/// — an unopenable node is worse than no node at all.
+fn render_node_of(card_fd: i32) -> Option<u64> {
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  if unsafe { libc::fstat(card_fd, &mut st) } != 0 {
+    return None;
+  }
+  let (major, minor) = (libc::major(st.st_rdev), libc::minor(st.st_rdev));
+  let drm_dir = format!("/sys/dev/char/{}:{}/device/drm", major, minor);
+  let entries = std::fs::read_dir(&drm_dir).ok()?;
+  for entry in entries.flatten() {
+    let name = entry.file_name().to_string_lossy().into_owned();
+    if !name.starts_with("renderD") {
+      continue;
+    }
+    let path = format!("/dev/dri/{}", name);
+    if let Some(dev) = probe_render_node(&path) {
+      eprintln!("[luna-compositor] dri: dmabuf main_device = {}", path);
+      return Some(dev);
+    }
+  }
+  eprintln!("[luna-compositor] dri: no usable render node under {}; dmabuf disabled", drm_dir);
+  None
 }
 
 impl DriBackend {
@@ -210,7 +281,10 @@ impl DriBackend {
     };
     match unsafe { Self::setup(fd, vt, input) } {
       Some(b) => {
-        eprintln!("[luna-compositor] dri: {} ready ({}x{}, pitch={})", path, b.width, b.height, b.pitch);
+        eprintln!(
+          "[luna-compositor] dri: {} ready ({}x{}, pitch={}, double-buf)",
+          path, b.width, b.height, b.bufs[0].pitch
+        );
         Some(b)
       }
       None => {
@@ -263,85 +337,145 @@ impl DriBackend {
       }
       let mode = modes[0];
 
-      let mut enc = ModeGetEncoder::default();
-      enc.encoder_id = conn.encoder_id;
-      if ioctl(fd, iowr::<ModeGetEncoder>(0xA6), &mut enc) != 0 || enc.crtc_id == 0 {
-        continue;
+      /* Resolve encoder + CRTC.  conn.encoder_id is the currently-active
+       * encoder (0 on a fresh boot before any compositor has run).  When it
+       * is 0, or when the active encoder has no current CRTC, fall back to
+       * searching conn_encs: try each encoder and pick the first CRTC its
+       * possible_crtcs bitmask allows. */
+      let crtc_id: u32;
+      {
+        let mut found: Option<u32> = None;
+        let mut enc_candidates: Vec<u32> = Vec::new();
+        if conn.encoder_id != 0 {
+          enc_candidates.push(conn.encoder_id);
+        }
+        for &eid in &conn_encs {
+          if eid != conn.encoder_id {
+            enc_candidates.push(eid);
+          }
+        }
+        'outer: for eid in enc_candidates {
+          let mut enc = ModeGetEncoder::default();
+          enc.encoder_id = eid;
+          if ioctl(fd, iowr::<ModeGetEncoder>(0xA6), &mut enc) != 0 {
+            continue;
+          }
+          if enc.crtc_id != 0 {
+            found = Some(enc.crtc_id);
+            break 'outer;
+          }
+          for (j, &crtc_candidate) in crtcs.iter().enumerate() {
+            if enc.possible_crtcs & (1u32 << j) != 0 {
+              found = Some(crtc_candidate);
+              break 'outer;
+            }
+          }
+        }
+        match found {
+          Some(id) => crtc_id = id,
+          None => continue,
+        }
       }
       let mut saved_crtc = ModeCrtc::default();
-      saved_crtc.crtc_id = enc.crtc_id;
-      if ioctl(fd, iowr::<ModeCrtc>(0xA1), &mut saved_crtc) != 0 {
-        continue;
-      }
+      saved_crtc.crtc_id = crtc_id;
+      /* Best-effort save; on a fresh boot there may be nothing to restore. */
+      let _ = ioctl(fd, iowr::<ModeCrtc>(0xA1), &mut saved_crtc);
 
       let w = mode.hdisplay as u32;
       let h = mode.vdisplay as u32;
 
-      let mut create = ModeCreateDumb::default();
-      create.width = w;
-      create.height = h;
-      create.bpp = 32;
-      if ioctl(fd, iowr::<ModeCreateDumb>(0xB2), &mut create) != 0 {
-        continue;
-      }
+      let mut bufs = [ScanoutBuf::empty(), ScanoutBuf::empty()];
+      let mut ok = true;
+      for buf in &mut bufs {
+        let mut create = ModeCreateDumb::default();
+        create.width = w;
+        create.height = h;
+        create.bpp = 32;
+        if ioctl(fd, iowr::<ModeCreateDumb>(0xB2), &mut create) != 0 {
+          ok = false;
+          break;
+        }
 
-      let mut fbcmd = ModeFbCmd::default();
-      fbcmd.width = w;
-      fbcmd.height = h;
-      fbcmd.bpp = 32;
-      fbcmd.depth = 24;
-      fbcmd.pitch = create.pitch;
-      fbcmd.handle = create.handle;
-      if ioctl(fd, iowr::<ModeFbCmd>(0xAE), &mut fbcmd) != 0 {
-        destroy_dumb(fd, create.handle);
-        continue;
-      }
+        let mut fbcmd = ModeFbCmd::default();
+        fbcmd.width = w;
+        fbcmd.height = h;
+        fbcmd.bpp = 32;
+        fbcmd.depth = 24;
+        fbcmd.pitch = create.pitch;
+        fbcmd.handle = create.handle;
+        if ioctl(fd, iowr::<ModeFbCmd>(0xAE), &mut fbcmd) != 0 {
+          destroy_dumb(fd, create.handle);
+          ok = false;
+          break;
+        }
 
-      let mut mapreq = ModeMapDumb::default();
-      mapreq.handle = create.handle;
-      if ioctl(fd, iowr::<ModeMapDumb>(0xB3), &mut mapreq) != 0 {
-        remove_fb(fd, fbcmd.fb_id);
-        destroy_dumb(fd, create.handle);
-        continue;
+        let mut mapreq = ModeMapDumb::default();
+        mapreq.handle = create.handle;
+        if ioctl(fd, iowr::<ModeMapDumb>(0xB3), &mut mapreq) != 0 {
+          remove_fb(fd, fbcmd.fb_id);
+          destroy_dumb(fd, create.handle);
+          ok = false;
+          break;
+        }
+        let ptr = mmap(
+          std::ptr::null_mut(),
+          create.size as usize,
+          PROT_READ | PROT_WRITE,
+          MAP_SHARED,
+          fd,
+          mapreq.offset as i64,
+        );
+        if ptr == MAP_FAILED {
+          remove_fb(fd, fbcmd.fb_id);
+          destroy_dumb(fd, create.handle);
+          ok = false;
+          break;
+        }
+        buf.map = ptr as *mut u8;
+        buf.map_len = create.size as usize;
+        buf.pitch = create.pitch;
+        buf.fb_id = fbcmd.fb_id;
+        buf.handle = create.handle;
       }
-      let ptr = mmap(std::ptr::null_mut(), create.size as usize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mapreq.offset as i64);
-      if ptr == MAP_FAILED {
-        remove_fb(fd, fbcmd.fb_id);
-        destroy_dumb(fd, create.handle);
+      if !ok {
+        unsafe {
+          bufs[0].release(fd);
+          bufs[1].release(fd);
+        }
         continue;
       }
 
       let mut crtc = ModeCrtc::default();
-      crtc.crtc_id = enc.crtc_id;
-      crtc.fb_id = fbcmd.fb_id;
+      crtc.crtc_id = crtc_id;
+      crtc.fb_id = bufs[0].fb_id;
       crtc.mode = mode;
       crtc.mode_valid = 1;
       crtc.count_connectors = 1;
       crtc.set_connectors_ptr = &cid as *const u32 as u64;
       if ioctl(fd, iowr::<ModeCrtc>(0xA2), &mut crtc) != 0 {
-        munmap(ptr, create.size as usize);
-        remove_fb(fd, fbcmd.fb_id);
-        destroy_dumb(fd, create.handle);
+        unsafe {
+          bufs[0].release(fd);
+          bufs[1].release(fd);
+        }
         continue;
       }
 
+      eprintln!("[luna-compositor] dri: double-buffered scanout {}x{}", w, h);
       return Some(DriBackend {
         fd,
-        map: ptr as *mut u8,
-        map_len: create.size as usize,
-        pitch: create.pitch,
+        bufs,
+        front: 0,
         width: w,
         height: h,
         connector_id: cid,
-        crtc_id: enc.crtc_id,
-        fb_id: fbcmd.fb_id,
-        handle: create.handle,
+        crtc_id,
         mode,
         saved_crtc,
         active: true,
         master: true,
         vt,
         input,
+        render_dev: render_node_of(fd),
       });
     }
     None
@@ -355,19 +489,29 @@ impl Backend for DriBackend {
     if !self.active {
       return;
     }
-    // ARGB → XRGB8888 little-endian for scanout buffer
-    let copy_w = fb.width.min(self.width);
-    let copy_h = fb.height.min(self.height);
+    // Draw into the back buffer, then flip.  Never rewrite the front buffer
+    // while the CRTC is scanning it out (that was the window flicker).
+    let back = 1 - self.front;
+    let copy_w = fb.width.min(self.width) as usize;
+    let copy_h = fb.height.min(self.height) as usize;
+    let src_stride = fb.width as usize;
+    let pitch = self.bufs[back].pitch as usize;
+    let dst_base = self.bufs[back].map;
     for y in 0..copy_h {
-      let dst_row = unsafe { self.map.add((y * self.pitch) as usize) as *mut u32 };
-      let src_row = &fb.pixels[(y * fb.width) as usize..];
-      for x in 0..copy_w {
-        unsafe { *dst_row.add(x as usize) = src_row[x as usize] };
+      let dst = unsafe { dst_base.add(y * pitch) as *mut u32 };
+      let src = &fb.pixels[y * src_stride..y * src_stride + copy_w];
+      unsafe {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), dst, copy_w);
       }
+    }
+    if unsafe { self.flip_to(back) } {
+      self.front = back;
     }
   }
 
   fn take_input_channel(&mut self) -> Option<(mpsc::Receiver<InputEvent>, RawFd)> { self.input.as_mut().and_then(EvdevInput::take_channel) }
+
+  fn drm_render_device(&self) -> Option<u64> { self.render_dev }
 
   fn deactivate(&mut self) {
     if !self.active {
@@ -432,10 +576,14 @@ impl DriBackend {
   }
 
   unsafe fn set_luna_crtc(&mut self) -> bool {
+    self.flip_to(self.front)
+  }
+
+  unsafe fn flip_to(&mut self, idx: usize) -> bool {
     let cid = self.connector_id;
     let mut crtc = ModeCrtc::default();
     crtc.crtc_id = self.crtc_id;
-    crtc.fb_id = self.fb_id;
+    crtc.fb_id = self.bufs[idx].fb_id;
     crtc.mode = self.mode;
     crtc.mode_valid = 1;
     crtc.count_connectors = 1;
@@ -453,12 +601,8 @@ impl Drop for DriBackend {
       if self.active && self.master {
         self.restore_crtc();
       }
-      if !self.map.is_null() {
-        munmap(self.map as *mut c_void, self.map_len);
-        self.map = std::ptr::null_mut();
-      }
-      remove_fb(self.fd, self.fb_id);
-      destroy_dumb(self.fd, self.handle);
+      self.bufs[0].release(self.fd);
+      self.bufs[1].release(self.fd);
       if self.master {
         ioctl(self.fd, io(0x1f));
         self.master = false;

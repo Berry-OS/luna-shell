@@ -34,6 +34,9 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; }
 }
 
+/* ── Background layer container (groups all wallpaper for layer-shell surface) ── */
+#bg_layer { position: absolute; inset: 0; }
+
 /* ── Wallpaper: Luna night sky (default = night theme) ── */
 #wallpaper {
   position: absolute; left: 0; top: 0; width: 100%; height: 100%;
@@ -106,7 +109,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 /* ── Menu bar ── */
 #menubar {
   position: absolute; left: 0; top: 0; width: 100%; height: 28px;
-  background-color: rgba(10, 10, 24, 0.62);
+  /* Slightly more opaque: layer-shell chrome cannot blur the desktop under it. */
+  background-color: rgba(10, 10, 24, 0.82);
   backdrop-filter: blur(24px) saturate(1.5);
   -webkit-backdrop-filter: blur(24px) saturate(1.5);
   border-bottom: 1px solid rgba(255, 255, 255, 0.09);
@@ -115,7 +119,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   padding: 0 10px;
   z-index: 400; border-radius: 0;
 }
-#mb_left  { display: flex; flex-direction: row; align-items: center; gap: 2px; background-color: transparent; height: 28px; width: 80px; flex: 0 0 80px; }
+#mb_left  { display: flex; flex-direction: row; align-items: center; gap: 2px; background-color: transparent; height: 28px; width: auto; flex: 0 0 auto; min-width: 80px; max-width: 220px; }
 #mb_center {
   flex: 1 1 auto; display: flex; flex-direction: row; align-items: center; justify-content: center;
   height: 28px; min-width: 0; padding: 0 12px; background-color: transparent;
@@ -133,26 +137,34 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .mb_item:hover { background-color: rgba(255, 255, 255, 0.12); }
 #mb_logo    { width: 36px; position: relative; }
+#mb_app, .mb_app_name {
+  font-weight: 600; font-size: 13px; letter-spacing: 0.01em;
+  max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+  color: rgba(248, 248, 255, 0.95); cursor: default;
+}
+#mb_app:hover { background-color: transparent; }
 #logo_disc  { position: absolute; left: 10px; top: 3px; width: 16px; height: 16px; border-radius: 8px; background: radial-gradient(circle at 32% 30%, #ffffff, #f0ecff 60%, var(--luna-accent-2) 130%); box-shadow: 0 0 6px rgba(var(--luna-accent-rgb), 0.55); }
 #logo_bite  { position: absolute; left: 17px; top: 1px; width: 14px; height: 14px; border-radius: 7px; background-color: #08091a; }
 .mb_status  { font-size: 12px; color: rgba(210, 218, 248, 0.72); }
 #mb_bat     { min-width: 40px; }
 #mb_wifi    { min-width: 58px; }
-#mb_cc      { width: 30px; font-size: 16px; }
+#mb_clip    { min-width: 28px; font-size: 13px; }
+#mb_cc      { width: 30px; font-size: 14px; }
 #mb_clock   { min-width: 132px; font-size: 12px; text-align: center; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
 
-/* Window list (center of menubar) */
+/* Window list (center of menubar) — fixed-size chips; never crush as count grows */
 #win_list {
-  display: flex; flex-direction: row; align-items: center; justify-content: center;
-  gap: 4px; max-width: 100%; height: 24px; overflow: hidden;
+  display: flex; flex-direction: row; align-items: center; justify-content: flex-start;
+  gap: 5px; max-width: 100%; height: 24px; overflow: hidden;
   background-color: transparent;
 }
 .win_item {
   display: flex; flex-direction: row; align-items: center;
-  max-width: 168px; height: 22px; padding: 0 10px;
+  flex: 0 0 auto; flex-shrink: 0;
+  width: auto; min-width: 56px; max-width: 132px; height: 22px; padding: 0 10px;
   border-radius: 6px; cursor: pointer;
-  background-color: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background-color: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.06);
   transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 .win_item:hover { background-color: rgba(255, 255, 255, 0.14); border-color: rgba(255, 255, 255, 0.12); }
@@ -163,9 +175,9 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .win_item.minimized { opacity: 0.55; }
 .win_label {
-  color: rgba(236, 238, 255, 0.92); font-size: 11px; font-weight: 500;
+  color: rgba(236, 238, 255, 0.92); font-size: 12px; font-weight: 500;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  max-width: 148px;
+  max-width: 112px; flex-shrink: 0;
 }
 
 /* System tray (right side of menubar) */
@@ -182,16 +194,17 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .tray_item:hover { background-color: rgba(255, 255, 255, 0.12); }
 .tray_item.active { background-color: rgba(var(--luna-accent-rgb), 0.24); }
-.tray_glyph { color: rgba(220, 226, 255, 0.88); font-size: 11px; font-weight: 700; text-align: center; }
-.tray_item.icon_terminal .tray_glyph { color: #32d74b; font-size: 10px; }
+.tray_glyph { color: rgba(220, 226, 255, 0.88); font-size: 12px; font-weight: 400; text-align: center; }
+.tray_item.icon_terminal .tray_glyph { color: #32d74b; font-size: 11px; }
 .tray_item.icon_browser  .tray_glyph { color: #5ac8fa; }
 .tray_item.icon_files    .tray_glyph { color: var(--luna-accent); }
 .tray_item.icon_editor   .tray_glyph { color: #ffcc00; }
 .tray_item.icon_music    .tray_glyph { color: #ff6482; }
 .tray_item.icon_settings .tray_glyph { color: #a8b0c0; }
-.tray_item.icon_gtk      .tray_glyph { color: #bf5af2; font-size: 9px; }
-.tray_item.icon_wifi     .tray_glyph { color: #64d2ff; font-size: 10px; }
-.tray_item.icon_bat      .tray_glyph { color: #30d158; font-size: 10px; }
+.tray_item.icon_gtk      .tray_glyph { color: #bf5af2; font-size: 11px; }
+.tray_item.icon_wifi     .tray_glyph { color: #64d2ff; font-size: 11px; }
+.tray_item.icon_bat      .tray_glyph { color: #30d158; font-size: 11px; }
+.tray_item.icon_clip     .tray_glyph { color: #ffd60a; font-size: 12px; }
 
 /* ── Luna menu (Apple-menu style dropdown) ── */
 .menu_panel {
@@ -208,6 +221,16 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   z-index: 650;
 }
 #luna_menu { left: 6px; width: 252px; }
+#win_menu  { left: 200px; width: 200px; }
+#clip_menu { right: 160px; left: auto; width: 280px; max-height: 420px; }
+.clip_empty {
+  display: block; height: 36px; padding: 10px 14px;
+  color: rgba(160, 168, 210, 0.55); font-size: 12px; text-align: center;
+  background-color: transparent;
+}
+.clip_preview {
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* Section heading inside menu (like macOS "System Preferences" label at top) */
 .menu_section_label {
@@ -233,9 +256,9 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .menu_item:hover .mi_key   { color: rgba(255, 255, 255, 0.55); }
 
 .mi_sym {
-  width: 24px; flex: 0 0 24px;
-  text-align: center; color: rgba(160, 168, 216, 0.55);
-  font-size: 13px;
+  width: 28px; flex: 0 0 28px;
+  color: rgba(200, 208, 248, 0.72); font-size: 13px;
+  text-align: center; background-color: transparent;
 }
 .mi_label {
   flex: 1 1 auto;
@@ -323,10 +346,10 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .tl:hover  { opacity: 0.76; }
 
 /* ── About This Luna ── */
-#about_win {
-  position: absolute; left: 460px; top: 150px;
+#about_box.about_box {
+  position: absolute; left: 0; top: 0;
   width: 360px; height: 408px;
-  background-color: rgba(24, 25, 50, 0.80);
+  background-color: rgba(24, 25, 50, 0.92);
   backdrop-filter: blur(32px) saturate(1.6);
   -webkit-backdrop-filter: blur(32px) saturate(1.6);
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -335,7 +358,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
               inset 0 1px 0 rgba(255, 255, 255, 0.08);
   display: flex; flex-direction: column; align-items: center;
   padding: 52px 26px 22px 26px;
-  z-index: 300;
+  z-index: 810;
 }
 #about_drag { position: absolute; left: 0; top: 0; width: 360px; height: 38px; cursor: move; background-color: transparent; }
 #about_moon {
@@ -353,7 +376,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #about_sep   { width: 264px; height: 1px; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.14), transparent); margin: 16px 0; }
 .about_line  { color: rgba(180, 188, 228, 0.88); font-size: 12px; margin-top: 6px; white-space: nowrap; }
 
-/* ── Modal / sheet overlays (settings, confirm) ── */
+/* ── Modal / sheet overlays (settings, confirm, about) ── */
 .modal_sheet {
   position: absolute; left: 0; top: 0; width: 100%; height: 100%;
   z-index: 800; border-radius: 0;
@@ -366,12 +389,11 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border-radius: 0;
 }
 
-/* Alert dialog (confirm) */
+/* Alert dialog (confirm) — pixel-centered from C via center_element */
 #confirm_box.alert_box {
-  position: absolute; left: 50%; top: 42%;
-  width: 380px; min-height: 220px;
-  margin-left: -190px; margin-top: -110px;
-  background: linear-gradient(180deg, rgba(32, 33, 62, 0.92) 0%, rgba(22, 24, 48, 0.94) 100%);
+  position: absolute; left: 0; top: 0;
+  width: 380px; height: 240px;
+  background: linear-gradient(180deg, rgba(32, 33, 62, 0.94) 0%, rgba(22, 24, 48, 0.96) 100%);
   backdrop-filter: blur(30px) saturate(1.6);
   -webkit-backdrop-filter: blur(30px) saturate(1.6);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -380,6 +402,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
               0 0 0 1px rgba(255, 255, 255, 0.05) inset;
   display: flex; flex-direction: column; align-items: center;
   padding: 26px 28px 20px 28px;
+  z-index: 810;
 }
 #confirm_icon {
   width: 52px; height: 52px; border-radius: 15px;
@@ -390,22 +413,21 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 #confirm_moon_disc { position: absolute; left: 13px; top: 13px; width: 24px; height: 24px; border-radius: 12px; background-color: #f8f6ff; }
 #confirm_moon_bite { position: absolute; left: 21px; top: 10px; width: 22px; height: 22px; border-radius: 11px; background-color: #4c34a0; }
-#confirm_title { color: #f8f8fc; font-family: var(--display-font); font-size: 17px; font-weight: 700; text-align: center; margin-bottom: 8px; }
-#confirm_msg   { color: rgba(168, 176, 220, 0.92); font-size: 13px; line-height: 1.45; text-align: center; flex: 1 1 auto; padding: 0 4px; }
+#confirm_title { color: #f8f8fc; font-family: var(--display-font); font-size: 17px; font-weight: 700; text-align: center; margin-bottom: 8px; flex: 0 0 auto; }
+#confirm_msg   { color: rgba(168, 176, 220, 0.92); font-size: 13px; line-height: 1.45; text-align: center; flex: 1 1 auto; padding: 0 4px; height: 48px; }
 #confirm_btns {
   display: flex; flex-direction: row; justify-content: center; gap: 10px;
   background-color: transparent;
-  width: 100%; margin-top: 18px;
+  width: 100%; height: 40px; flex: 0 0 40px; margin-top: 12px;
 }
 #confirm_cancel { flex: 1 1 auto; max-width: 140px; }
 #confirm_ok     { flex: 1 1 auto; max-width: 160px; }
 
-/* Settings sheet */
+/* Settings sheet — pixel-centered from C; content scrolls */
 #settings_sheet.sheet_box {
-  position: absolute; left: 50%; top: 44%;
-  width: 560px; height: 500px;
-  margin-left: -280px; margin-top: -250px;
-  background: linear-gradient(180deg, rgba(30, 32, 58, 0.90) 0%, rgba(20, 22, 44, 0.92) 100%);
+  position: absolute; left: 0; top: 0;
+  width: 580px; height: 540px;
+  background: linear-gradient(180deg, rgba(30, 32, 58, 0.94) 0%, rgba(20, 22, 44, 0.96) 100%);
   backdrop-filter: blur(34px) saturate(1.6);
   -webkit-backdrop-filter: blur(34px) saturate(1.6);
   border: 1px solid rgba(255, 255, 255, 0.13);
@@ -413,19 +435,20 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   box-shadow: 0 36px 88px rgba(0, 0, 0, 0.74),
               0 0 0 1px rgba(255, 255, 255, 0.05) inset;
   display: flex; flex-direction: column;
-  padding: 48px 0 0 0;
+  padding: 44px 0 0 0;
   z-index: 810;
 }
-#settings_drag { position: absolute; left: 0; top: 0; width: 560px; height: 36px; cursor: move; background-color: transparent; }
+#settings_drag { position: absolute; left: 0; top: 0; width: 580px; height: 36px; cursor: move; background-color: transparent; }
 #settings_title {
   font-family: var(--display-font);
   color: #f5f3ff;
   font-size: 16px; font-weight: 700;
-  text-align: center; margin-bottom: 12px; padding: 0 24px;
+  text-align: center; margin-bottom: 10px; padding: 0 24px;
+  flex: 0 0 24px; height: 24px;
 }
 #settings_body {
   display: flex; flex-direction: row; flex: 1 1 auto;
-  min-height: 0; padding: 0 18px; gap: 14px; background-color: transparent;
+  min-height: 0; height: 400px; padding: 0 18px; gap: 14px; background-color: transparent;
 }
 #settings_sidebar {
   width: 132px; flex: 0 0 132px;
@@ -436,7 +459,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 #settings_content {
   flex: 1 1 auto; display: flex; flex-direction: column;
-  min-width: 0; background-color: transparent;
+  min-width: 0; min-height: 0; height: 400px;
+  background-color: transparent; overflow: hidden;
 }
 .panel_heading {
   color: rgba(148, 156, 204, 0.78); font-size: 11px; font-weight: 700;
@@ -446,7 +470,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .stab_icon { margin-right: 6px; opacity: 0.72; font-size: 11px; }
 
 /* Pref rows */
-#settings_panel_apps { flex: 1 1 auto; display: flex; flex-direction: column; gap: 5px; background-color: transparent; overflow: hidden; }
+#settings_panel_apps { flex: 1 1 auto; display: flex; flex-direction: column; gap: 5px; background-color: transparent; overflow: hidden; height: 380px; }
 .stab {
   width: 100%; height: 32px; text-align: left;
   color: rgba(144, 152, 200, 0.88); font-size: 12px;
@@ -468,7 +492,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .pref_input:focus { outline: none; border-color: rgba(var(--luna-accent-rgb), 0.65); box-shadow: 0 0 0 3px rgba(var(--luna-accent-rgb), 0.16); }
 
 /* Display panel */
-#settings_panel_disp { flex: 1 1 auto; display: flex; flex-direction: column; gap: 0; background-color: transparent; }
+#settings_panel_disp { flex: 1 1 auto; display: flex; flex-direction: column; gap: 0; background-color: transparent; overflow: hidden; height: 380px; }
 .pref_section { color: rgba(132, 140, 190, 0.88); font-size: 11px; font-weight: 600; margin: 12px 0 8px 0; }
 #wp_thumbs_row { display: flex; flex-direction: row; gap: 14px; background-color: transparent; height: 62px; margin-bottom: 4px; }
 .wp_thumb { width: 88px; height: 54px; border-radius: 10px; cursor: pointer; border: 2px solid rgba(255, 255, 255, 0.08); }
@@ -480,6 +504,87 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .wp_t_sunset { background: linear-gradient(135deg, #0e0510 0%, #5a1c10 55%, #e87040 100%); }
 .wp_label_row { display: flex; flex-direction: row; gap: 14px; background-color: transparent; height: 18px; }
 .wp_lbl { width: 88px; color: rgba(102, 110, 160, 0.88); font-size: 10px; text-align: center; }
+#cur_thumbs_row {
+  display: flex; flex-direction: row; gap: 12px;
+  background-color: transparent; height: 108px; margin-bottom: 6px;
+}
+.cur_card {
+  width: 120px; height: 100px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; cursor: pointer;
+  background-color: rgba(255, 255, 255, 0.04);
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 10px 8px 8px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+.cur_card:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  background-color: rgba(255, 255, 255, 0.07);
+}
+.cur_card.selected {
+  border-color: var(--luna-accent);
+  box-shadow: 0 0 0 2px rgba(var(--luna-accent-rgb), 0.28);
+  background-color: rgba(var(--luna-accent-rgb), 0.10);
+}
+.cur_preview {
+  width: 36px; height: 36px; border-radius: 8px;
+  margin-bottom: 2px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+.cur_p_aero {
+  background:
+    linear-gradient(135deg, transparent 42%, #1a1a22 42%, #1a1a22 48%, transparent 48%),
+    linear-gradient(155deg, #f4f6fa 0%, #d0d6e4 55%, #8a92a8 100%);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+.cur_p_miku {
+  background: linear-gradient(145deg, #39c5cf 0%, #1a8a96 45%, #e12885 100%);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+}
+.cur_name {
+  color: rgba(230, 234, 255, 0.95); font-size: 12px; font-weight: 600;
+  text-align: center; width: 100%; margin: 0; background-color: transparent;
+}
+.cur_desc {
+  color: rgba(120, 128, 178, 0.88); font-size: 10px;
+  text-align: center; width: 100%; margin: 0; background-color: transparent;
+}
+#kb_thumbs_row {
+  display: flex; flex-direction: row; flex-wrap: wrap; gap: 10px;
+  background-color: transparent; height: auto; margin-bottom: 6px;
+}
+.kb_card {
+  width: 140px; height: 64px;
+  display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
+  gap: 2px; cursor: pointer;
+  background-color: rgba(255, 255, 255, 0.04);
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 8px 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+.kb_card:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  background-color: rgba(255, 255, 255, 0.07);
+}
+.kb_card.selected {
+  border-color: var(--luna-accent);
+  box-shadow: 0 0 0 2px rgba(var(--luna-accent-rgb), 0.28);
+  background-color: rgba(var(--luna-accent-rgb), 0.10);
+}
+.kb_name {
+  color: rgba(230, 234, 255, 0.95); font-size: 12px; font-weight: 600;
+  margin: 0; background-color: transparent;
+}
+.kb_desc {
+  color: rgba(120, 128, 178, 0.88); font-size: 10px;
+  margin: 0; background-color: transparent;
+}
+.pref_hint {
+  color: rgba(110, 118, 168, 0.80); font-size: 11px;
+  margin: 0 0 10px 0; background-color: transparent;
+}
 .pref_row_full { display: flex; flex-direction: row; margin-top: 4px; height: 36px; flex: 0 0 36px; background-color: transparent; }
 .pref_input_full { flex: 1 1 auto; height: 30px; background-color: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; color: #f0f2ff; font-size: 12px; padding: 5px 10px; }
 #settings_btns {
@@ -511,7 +616,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #lp_grid { width: 800px; height: 380px; display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 26px; margin-top: 40px; background-color: transparent; }
 .lp_app { width: 110px; display: flex; flex-direction: column; align-items: center; gap: 10px; cursor: pointer; background-color: transparent; }
 .lp_app:hover .lp_icon { transform: translateY(-3px); box-shadow: 0 18px 44px rgba(0, 0, 0, 0.64), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.38), 0 0 22px rgba(var(--luna-gold-rgb), 0.18); }
-.lp_icon { width: 72px; height: 72px; border-radius: 18px; color: #ffffff; font-size: 26px; font-weight: bold; text-align: center; padding-top: 18px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.22); transition: transform 0.18s ease, box-shadow 0.18s ease; }
+.lp_icon { width: 72px; height: 72px; border-radius: 18px; color: #ffffff; font-size: 28px; font-weight: 400; text-align: center; padding-top: 20px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.22); transition: transform 0.18s ease, box-shadow 0.18s ease; }
 .lp_label { width: 110px; color: rgba(220, 226, 252, 0.90); font-size: 12px; text-align: center; }
 #lp_hint  { color: rgba(100, 108, 158, 0.76); font-size: 12px; margin-top: 36px; }
 
@@ -560,38 +665,81 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   position: absolute; bottom: 12px; left: 50%;
   margin-left: -271px; /* width/2 — centers without transform animation lag */
   width: 542px; height: 80px;
-  background-color: rgba(18, 19, 40, 0.52);
-  backdrop-filter: blur(28px) saturate(1.7);
-  -webkit-backdrop-filter: blur(28px) saturate(1.7);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 24px;
-  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.58),
-              0 2px 8px rgba(0, 0, 0, 0.32),
-              inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  background-color: rgba(20, 21, 44, 0.78);
+  backdrop-filter: blur(32px) saturate(1.8);
+  -webkit-backdrop-filter: blur(32px) saturate(1.8);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 26px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.60),
+              0 2px 8px rgba(0, 0, 0, 0.34),
+              inset 0 1px 0 rgba(255, 255, 255, 0.14),
+              inset 0 0 0 1px rgba(255, 255, 255, 0.04);
   display: flex; flex-direction: row; align-items: center; gap: 10px;
   padding: 8px 14px; z-index: 450;
 }
 .dock_item { width: 54px; flex: 0 0 54px; display: flex; flex-direction: column; align-items: center; gap: 3px; cursor: pointer; background-color: transparent; }
+/* Icon lift + fisheye scale are driven per-frame from C (dock_magnify_tick);
+ * hover here only adds the macOS focus glow so the two never fight. */
 .dock_item:hover .dock_icon {
-  transform: translateY(-4px);
-  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.64),
-              0 0 0 2px rgba(var(--luna-accent-rgb), 0.40),
-              0 0 20px rgba(var(--luna-gold-rgb), 0.18);
-  opacity: 0.92;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.66),
+              0 0 0 2px rgba(var(--luna-accent-rgb), 0.42),
+              0 0 24px rgba(var(--luna-gold-rgb), 0.22),
+              inset 0 1px 0 rgba(255, 255, 255, 0.30);
 }
-.dock_icon { width: 52px; height: 52px; border-radius: 13px; color: #ffffff; font-size: 22px; font-weight: bold; text-align: center; padding-top: 12px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.22); transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease; }
-.dock_dot { width: 4px; height: 4px; border-radius: 50%; background-color: var(--luna-gold); box-shadow: 0 0 4px rgba(var(--luna-gold-rgb), 0.70); }
+.dock_icon { width: 52px; height: 52px; border-radius: 14px; color: #ffffff; font-size: 20px; font-weight: 400; text-align: center; padding-top: 14px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.46), inset 0 1px 0 rgba(255, 255, 255, 0.22); transition: box-shadow 0.16s ease; }
+.dock_dot { width: 4px; height: 4px; border-radius: 50%; background-color: var(--luna-gold); box-shadow: 0 0 5px rgba(var(--luna-gold-rgb), 0.80); transition: opacity 0.18s ease; }
 .dock_dot.spacer { background-color: transparent; box-shadow: none; }
 .dock_sep { width: 1px; flex: 0 0 1px; height: 54px; background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.20), transparent); }
 
 /* ── App icon gradients (dock & launchpad) ── */
 .g_files     { background: linear-gradient(145deg, #6cd4ff, #0a6fe8); }
 .g_launchpad { background: linear-gradient(145deg, #e2e6f2, #a6b0c8); color: #283456; }
-.g_terminal  { background: linear-gradient(145deg, #1b1f30, #08090f); color: #38e05a; font-size: 17px; padding-top: 16px; }
+.g_terminal  { background: linear-gradient(145deg, #1b1f30, #08090f); color: #38e05a; font-size: 18px; padding-top: 15px; }
 .g_browser   { background: linear-gradient(145deg, #3ee0d8, #5a6ef2); }
 .g_editor    { background: linear-gradient(145deg, #ffab2e, #ffd83e); color: #4a2c00; }
 .g_music     { background: linear-gradient(145deg, #ff6d8e, #c81a68); }
 .g_settings  { background: linear-gradient(145deg, #b8c0d4, #747e96); }
 .g_trash     { background: linear-gradient(145deg, #d4dcec, #8a94ac); color: #343e58; }
-.g_demo      { background: linear-gradient(145deg, #bda6ff, #8248f4); font-size: 14px; padding-top: 16px; }
-.g_hello     { background: linear-gradient(145deg, #3ee6a8, #0dcf94); color: #063824; font-size: 16px; padding-top: 15px; }
+.g_demo      { background: linear-gradient(145deg, #bda6ff, #8248f4); font-size: 22px; padding-top: 22px; }
+.g_hello     { background: linear-gradient(145deg, #3ee6a8, #0dcf94); color: #063824; font-size: 24px; padding-top: 20px; }
+
+/* ── Alt+Tab switcher ── */
+.switcher_overlay {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  background-color: rgba(8, 10, 24, 0.28);
+  z-index: 900; pointer-events: none;
+}
+#switcher_strip {
+  display: flex; flex-direction: row; align-items: stretch; gap: 12px;
+  padding: 18px 20px;
+  background-color: rgba(18, 20, 40, 0.82);
+  backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 18px;
+  box-shadow: 0 28px 64px rgba(0, 0, 0, 0.55);
+  max-width: 92%;
+}
+.switcher_item {
+  min-width: 120px; max-width: 180px;
+  padding: 14px 14px 12px;
+  border-radius: 12px;
+  background-color: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #edf0ff;
+}
+.switcher_item.active {
+  background-color: rgba(var(--luna-accent-rgb), 0.28);
+  border-color: rgba(var(--luna-accent-rgb), 0.55);
+  box-shadow: 0 0 0 1px rgba(var(--luna-gold-rgb), 0.25),
+              0 10px 28px rgba(0, 0, 0, 0.35);
+}
+.sw_app {
+  font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase;
+  opacity: 0.62; margin-bottom: 6px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.sw_title {
+  font-size: 14px; font-weight: 600; line-height: 1.25;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

@@ -17,7 +17,8 @@ GLFW_LIBS   := $(shell pkg-config --libs glfw3 2>/dev/null)
 
 .PHONY: all build build-dri build-webgl build-desktop build-desktop-system build-shell \
         symlinks symlinks-system run server demo webgl run-gtk desktop desktop-system \
-        luna-session install install-system stop clean opengl_gui luna-shell luna-ui sample
+        luna-session install install-system stop clean opengl_gui luna-shell luna-ui \
+        luna-clipboard sample
 
 all: build symlinks
 
@@ -35,7 +36,7 @@ build-desktop: build build-dri build-shell symlinks
 # Compositor + shell only; GTK/GLFW use system libwayland-client
 build-desktop-system: build-dri build-shell symlinks-system
 
-build-shell: luna-shell opengl_gui luna-ui
+build-shell: luna-shell luna-clipboard opengl_gui luna-ui
 
 # Symlink libwayland-client.so.0 (SONAME expected by GTK4)
 symlinks:
@@ -43,12 +44,14 @@ symlinks:
 	ln -sf libwayland_client.so $(TARGET)/libwayland-client.so.0
 	ln -sf libwayland_client.so $(TARGET)/libwayland-client.so
 	ln -sf ../../luna-shell $(TARGET)/luna-shell
+	ln -sf ../../luna-clipboard $(TARGET)/luna-clipboard
 	@echo "✓ Done"
 
 # Symlinks without libwayland-client (use system Wayland)
 symlinks-system:
 	@echo "→ Creating symlinks in $(TARGET)/ (system Wayland)"
 	ln -sf ../../luna-shell $(TARGET)/luna-shell
+	ln -sf ../../luna-clipboard $(TARGET)/luna-clipboard
 	@echo "✓ Done"
 
 UI_DIR = ui
@@ -62,21 +65,47 @@ $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h: $(UI_DIR)/luna-ui.css $(UI_DIR
 $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h: $(UI_DIR)/luna-shell.css $(UI_DIR)/luna-shell.html $(UI_DIR)/gen_include.sh
 	cd $(UI_DIR) && ./gen_include.sh luna-shell.css luna-shell.html
 
-luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
+SHELL_CFLAGS := $(shell pkg-config --cflags libdrm 2>/dev/null) \
+                $(shell pkg-config --cflags wayland-client 2>/dev/null) \
+                $(shell pkg-config --cflags xkbcommon 2>/dev/null)
+SHELL_LIBS   := -lm -lEGL -lgbm -ldrm -linput -ludev -lxkbcommon \
+                -lwayland-client -lwayland-egl -lGL
+
+LAYER_SHELL_XML  := $(UI_DIR)/protocols/wlr-layer-shell-unstable-v1.xml
+LAYER_SHELL_HDR  := $(UI_DIR)/wlr-layer-shell-unstable-v1-client-protocol.h
+LAYER_SHELL_SRC  := $(UI_DIR)/wlr-layer-shell-unstable-v1-protocol.c
+
+$(LAYER_SHELL_HDR): $(LAYER_SHELL_XML)
+	wayland-scanner client-header $< $@
+
+$(LAYER_SHELL_SRC): $(LAYER_SHELL_XML)
+	wayland-scanner private-code $< $@
+
+luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
+            $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
+            $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h \
+            $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
 	@echo "→ Building luna-shell (Luna Desktop shell)"
-	gcc -O2 -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/luna-shell.c -o luna-shell -lm -lGL $(GLFW_LIBS)
+	gcc -Os -Wall -Wextra -DLUNA_BACKEND_X11 $(SHELL_CFLAGS) -I$(UI_DIR) \
+	    $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c $(LAYER_SHELL_SRC) \
+	    -o luna-shell $(SHELL_LIBS) -lX11
+
+luna-clipboard: clipboard/luna-clipboard.c
+	@echo "→ Building luna-clipboard (Wayland clipboard manager)"
+	gcc -Os -Wall -Wextra -o luna-clipboard clipboard/luna-clipboard.c \
+	    $$(pkg-config --cflags --libs wayland-client)
 
 opengl_gui: $(UI_DIR)/opengl_gui.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h
 	@echo "→ Building Luna UI demo host (opengl_gui)"
-	gcc -O2 -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/opengl_gui.c -o opengl_gui -lm -lGL $(GLFW_LIBS)
+	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/opengl_gui.c -o opengl_gui -lm -lGL $(GLFW_LIBS)
 
 luna-ui: $(UI_DIR)/luna-ui.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h
 	@echo "→ Building Aurora Noir demo (luna-ui)"
-	gcc -O2 -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/luna-ui.c -o luna-ui -lm -lGL $(GLFW_LIBS)
+	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/luna-ui.c -o luna-ui -lm -lGL $(GLFW_LIBS)
 
 sample: $(UI_DIR)/sample_02.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h
 	@echo "→ Building Luna UI sample"
-	gcc -O2 -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/sample_02.c -o $(UI_DIR)/sample -lm -lGL $(GLFW_LIBS)
+	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/sample_02.c -o $(UI_DIR)/sample -lm -lGL $(GLFW_LIBS)
 
 # Run app with Rust libwayland-client preloaded
 run: build symlinks
@@ -167,31 +196,48 @@ define install_systemd
 endef
 
 install: build-desktop
-	install -d $(PREFIX)/bin $(LUNA_LIB) $(PREFIX)/share/luna-desktop/shell $(PREFIX)/share/doc/luna-desktop
+	install -d $(PREFIX)/bin $(LUNA_LIB) $(PREFIX)/share/luna-desktop/shell \
+	            $(PREFIX)/share/luna-desktop/cursors $(PREFIX)/share/doc/luna-desktop
+	install -d /usr/share/fonts/luna
 	install -m 755 luna-session $(PREFIX)/bin/luna-session
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
+	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 755 $(TARGET)/libwayland_client.so $(LUNA_LIB)/
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so.0
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 ui/luna-ui.h ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
+	install -m 644 fonts/LunaSymbols-Solid.otf fonts/LunaSymbols-Regular.otf \
+	               fonts/LunaSymbols-Brands.otf /usr/share/fonts/luna/
+	# Cursor themes (.cur / .ani) — default is miku
+	rm -rf $(PREFIX)/share/luna-desktop/cursors/miku
+	cp -a cursors/miku $(PREFIX)/share/luna-desktop/cursors/
 	#install -m 644 README.md $(PREFIX)/share/doc/luna-desktop/README.md 2>/dev/null || true
 	$(install_systemd)
 	@echo "✓ Installed to $(PREFIX)"
+	@echo "  Fonts: /usr/share/fonts/luna/LunaSymbols-*.otf"
 	@echo "  Enable boot: systemctl enable luna-desktop.service"
 
 # Install using system libwayland (skip building/installing libwayland*.so)
 install-system: build-desktop-system
-	install -d $(PREFIX)/bin $(LUNA_LIB) $(PREFIX)/share/luna-desktop/shell $(PREFIX)/share/doc/luna-desktop
+	install -d $(PREFIX)/bin $(LUNA_LIB) $(PREFIX)/share/luna-desktop/shell \
+	            $(PREFIX)/share/luna-desktop/cursors $(PREFIX)/share/doc/luna-desktop
+	install -d /usr/share/fonts/luna
 	install -m 755 luna-session $(PREFIX)/bin/luna-session
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
+	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 ui/luna-ui.h ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
+	install -m 644 fonts/LunaSymbols-Solid.otf fonts/LunaSymbols-Regular.otf \
+	               fonts/LunaSymbols-Brands.otf /usr/share/fonts/luna/
+	rm -rf $(PREFIX)/share/luna-desktop/cursors/miku
+	cp -a cursors/miku $(PREFIX)/share/luna-desktop/cursors/
 	#install -m 644 README.md $(PREFIX)/share/doc/luna-desktop/README.md 2>/dev/null || true
 	$(install_systemd)
 	@echo "✓ Installed to $(PREFIX) (using system libwayland)"
+	@echo "  Fonts: /usr/share/fonts/luna/LunaSymbols-*.otf"
 	@echo "  Enable boot: systemctl enable luna-desktop.service"
 
 # Stop background compositor
@@ -204,7 +250,7 @@ stop:
 
 clean:
 	cargo clean
-	rm -f opengl_gui luna-shell luna-ui $(UI_DIR)/sample \
+	rm -f opengl_gui luna-shell luna-clipboard luna-ui $(UI_DIR)/sample \
 	  $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h \
 	  $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h \
 	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h

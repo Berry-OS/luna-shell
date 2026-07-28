@@ -54,6 +54,7 @@ unsafe impl Send for wl_message {}
 unsafe impl Sync for wl_message {}
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct wl_list {
     pub prev: *mut wl_list,
     pub next: *mut wl_list,
@@ -65,7 +66,20 @@ impl wl_list {
     }
 }
 
+/// `int (*)(const void*, void*, uint32_t, const wl_message*, wl_argument*)`
+pub type wl_dispatcher_func_t = Option<
+    unsafe extern "C" fn(
+        *const c_void,
+        *mut c_void,
+        u32,
+        *const wl_message,
+        *mut wl_argument,
+    ) -> c_int,
+>;
+
+/// Opaque queue handle. Events still dispatch immediately (HEAD behaviour);
+/// distinct allocations satisfy create_queue / set_queue ABI.
 #[repr(C)]
 pub struct wl_event_queue {
-    pub _opaque: u8,
+    pub _opaque: usize,
 }

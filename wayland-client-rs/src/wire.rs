@@ -10,7 +10,7 @@
 use std::os::raw::{c_char, c_void};
 use std::ffi::CStr;
 use crate::interfaces::WlInterface;
-use crate::types::{wl_argument, wl_array, wl_fixed_t};
+use crate::types::{wl_argument, wl_array};
 
 pub const WAYLAND_HEADER_SIZE: usize = 8;
 
@@ -164,9 +164,20 @@ pub unsafe fn parse_event_args(
     'outer: for &ch in sig {
         match ch {
             b'?' | b'0'..=b'9' => continue,
-            b'i' => out.push(wl_argument { i: read_i32!() }),
+            // Zero the full union before writing a narrow field so later
+            // transmute-to-u64 (dispatch_listener) never leaks stack garbage
+            // into the high 32 bits of pointer-sized args.
+            b'i' => {
+                let mut a = wl_argument { n: 0 };
+                a.i = read_i32!();
+                out.push(a);
+            }
             b'u' => out.push(wl_argument { u: read_u32!() }),
-            b'f' => out.push(wl_argument { f: read_i32!() }),
+            b'f' => {
+                let mut a = wl_argument { n: 0 };
+                a.f = read_i32!();
+                out.push(a);
+            }
             b'o' => {
                 let id = read_u32!();
                 let ptr = if id == 0 {
@@ -212,8 +223,9 @@ pub unsafe fn parse_event_args(
                 out.push(wl_argument { a: Box::into_raw(arr) });
             }
             b'h' => {
-                let fd = fds.pop_front().unwrap_or(-1);
-                out.push(wl_argument { h: fd });
+                let mut a = wl_argument { n: 0 };
+                a.h = fds.pop_front().unwrap_or(-1);
+                out.push(a);
             }
             _ => {}
         }

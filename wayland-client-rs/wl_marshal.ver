@@ -1,4 +1,8 @@
 {
-  global: wl_proxy_marshal_flags;
+  global:
+    wl_proxy_marshal;
+    wl_proxy_marshal_flags;
+    wl_proxy_marshal_constructor;
+    wl_proxy_marshal_constructor_versioned;
   local: *;
 };

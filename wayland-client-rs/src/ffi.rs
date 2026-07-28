@@ -9,12 +9,12 @@
 
 #![allow(non_snake_case, clippy::missing_safety_doc)]
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use crate::display::Display;
 use crate::interfaces::WlInterface;
 use crate::proxy::Proxy;
-use crate::types::{wl_argument, wl_array, wl_event_queue, wl_list};
+use crate::types::{wl_argument, wl_array, wl_dispatcher_func_t, wl_event_queue, wl_list};
 use crate::wire;
 
 // Fallback when proxy->display is wrong (real libwayland proxy passed in).
@@ -173,7 +173,38 @@ pub unsafe extern "C" fn wl_display_dispatch_queue_pending(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn wl_display_dispatch_pending_single(display: *mut Display) -> c_int {
+    wl_display_dispatch_pending(display)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_display_dispatch_queue_pending_single(
+    display: *mut Display,
+    queue: *mut wl_event_queue,
+) -> c_int {
+    wl_display_dispatch_queue_pending(display, queue)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_display_dispatch_timeout(
+    display: *mut Display,
+    _timeout: *const libc::timespec,
+) -> c_int {
+    wl_display_dispatch(display)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_display_dispatch_queue_timeout(
+    display: *mut Display,
+    queue: *mut wl_event_queue,
+    _timeout: *const libc::timespec,
+) -> c_int {
+    wl_display_dispatch_queue(display, queue)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn wl_display_prepare_read(display: *mut Display) -> c_int {
+    let _ = display;
     0
 }
 
@@ -182,7 +213,7 @@ pub unsafe extern "C" fn wl_display_prepare_read_queue(
     display: *mut Display,
     _queue: *mut wl_event_queue,
 ) -> c_int {
-    0
+    wl_display_prepare_read(display)
 }
 
 #[no_mangle]
@@ -191,18 +222,37 @@ pub unsafe extern "C" fn wl_display_read_events(display: *mut Display) -> c_int 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn wl_display_cancel_read(display: *mut Display) {
+pub unsafe extern "C" fn wl_display_cancel_read(_display: *mut Display) {
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_display_create_queue(display: *mut Display) -> *mut wl_event_queue {
-    // Stub queue: GTK4 requires non-NULL.
-    static mut STUB_QUEUE: wl_event_queue = wl_event_queue { _opaque: 0 };
-    &raw mut STUB_QUEUE
+    wl_display_create_queue_with_name(display, std::ptr::null())
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn wl_event_queue_destroy(_queue: *mut wl_event_queue) {
+pub unsafe extern "C" fn wl_display_create_queue_with_name(
+    _display: *mut Display,
+    _name: *const c_char,
+) -> *mut wl_event_queue {
+    // Distinct opaque handles; events still dispatch immediately.
+    Box::into_raw(Box::new(wl_event_queue { _opaque: 0 }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_event_queue_destroy(queue: *mut wl_event_queue) {
+    if !queue.is_null() {
+        let _ = Box::from_raw(queue);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_event_queue_get_name(_queue: *const wl_event_queue) -> *const c_char {
+    std::ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_display_set_max_buffer_size(_display: *mut Display, _max: usize) {
 }
 
 
@@ -229,12 +279,23 @@ pub unsafe extern "C" fn wl_proxy_create(
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_proxy_create_wrapper(proxy: *mut Proxy) -> *mut c_void {
-    // Wrapper copy for separate queue (simplified).
     if proxy.is_null() { return std::ptr::null_mut(); }
     let p = &*proxy;
     let wrapper = Box::new(Proxy {
+        interface: p.interface,
+        implementation: p.implementation,
+        id: p.id,
+        _id_pad: p._id_pad,
+        display: p.display,
+        queue: p.queue,
         flags: p.flags | crate::proxy::WL_PROXY_FLAG_WRAPPER,
-        ..*p
+        refcount: 1,
+        user_data: p.user_data,
+        dispatcher: p.dispatcher,
+        version: p.version,
+        _version_pad: p._version_pad,
+        tag: p.tag,
+        queue_link: crate::types::wl_list::new(),
     });
     Box::into_raw(wrapper) as *mut c_void
 }
@@ -268,27 +329,32 @@ pub unsafe extern "C" fn wl_proxy_add_listener(
     data: *mut c_void,
 ) -> c_int {
     if proxy.is_null() { return -1; }
-    (*proxy).listener  = listener as *const c_void;
+    if (*proxy).flags & crate::proxy::WL_PROXY_FLAG_WRAPPER != 0 { return -1; }
+    if !(*proxy).implementation.is_null() || (*proxy).dispatcher.is_some() { return -1; }
+    (*proxy).implementation = listener as *const c_void;
     (*proxy).user_data = data;
+    (*proxy).dispatcher = None;
     0
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_proxy_get_listener(proxy: *mut Proxy) -> *const c_void {
     if proxy.is_null() { return std::ptr::null(); }
-    (*proxy).listener
+    (*proxy).implementation
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_proxy_add_dispatcher(
     proxy: *mut Proxy,
-    dispatcher: *mut c_void,
+    dispatcher: wl_dispatcher_func_t,
     implementation: *const c_void,
     data: *mut c_void,
 ) -> c_int {
-    // Simplified: treat implementation as listener.
     if proxy.is_null() { return -1; }
-    (*proxy).listener  = implementation;
+    if (*proxy).flags & crate::proxy::WL_PROXY_FLAG_WRAPPER != 0 { return -1; }
+    if !(*proxy).implementation.is_null() || (*proxy).dispatcher.is_some() { return -1; }
+    (*proxy).implementation = implementation;
+    (*proxy).dispatcher = dispatcher;
     (*proxy).user_data = data;
     0
 }
@@ -341,8 +407,10 @@ pub unsafe extern "C" fn wl_proxy_marshal_array_flags(
     if iface_valid {
         let id = (*display).alloc_id();
         let vv = if version > 0 { version } else { (*interface).version as u32 };
-        let p = Box::new(Proxy::new(id, interface, vv, display));
-        new_proxy = Box::into_raw(p);
+        // new_id inherits the factory proxy's queue (Mesa eglSwapBuffers).
+        let mut p = Proxy::new(id, interface, vv, display);
+        p.queue = (*proxy).queue;
+        new_proxy = Box::into_raw(Box::new(p));
         (*display).register(new_proxy);
 
         if methods_ok {
@@ -416,6 +484,49 @@ pub unsafe extern "C" fn wl_proxy_set_queue(
     queue: *mut wl_event_queue,
 ) {
     if !proxy.is_null() { (*proxy).queue = queue; }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_proxy_get_queue(proxy: *const Proxy) -> *mut wl_event_queue {
+    if proxy.is_null() { std::ptr::null_mut() } else { (*proxy).queue }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_proxy_get_display(proxy: *mut Proxy) -> *mut Display {
+    if proxy.is_null() { return std::ptr::null_mut(); }
+    let d = (*proxy).display;
+    let gd = GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::Relaxed);
+    if d.is_null() || (!gd.is_null() && d != gd) { gd } else { d }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_proxy_marshal_array(
+    proxy: *mut Proxy,
+    opcode: u32,
+    args: *mut wl_argument,
+) {
+    let _ = wl_proxy_marshal_array_flags(proxy, opcode, std::ptr::null(), 0, 0, args);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_proxy_marshal_array_constructor(
+    proxy: *mut Proxy,
+    opcode: u32,
+    args: *mut wl_argument,
+    interface: *const WlInterface,
+) -> *mut Proxy {
+    wl_proxy_marshal_array_flags(proxy, opcode, interface, 0, 0, args)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn wl_proxy_marshal_array_constructor_versioned(
+    proxy: *mut Proxy,
+    opcode: u32,
+    args: *mut wl_argument,
+    interface: *const WlInterface,
+    version: u32,
+) -> *mut Proxy {
+    wl_proxy_marshal_array_flags(proxy, opcode, interface, version, 0, args)
 }
 
 #[no_mangle]

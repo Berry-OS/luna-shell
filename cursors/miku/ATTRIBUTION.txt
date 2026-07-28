@@ -1,0 +1,4 @@
+Hatsune Miku cursors for Windows/Linux
+Source: https://github.com/supermariofps/hatsune-miku-windows-linux-cursors
+Original artist: petit devil (ぷちでびる) — https://petitcan.blog.shinobi.jp
+Packaged for Luna Desktop as the default .cur/.ani theme.

@@ -23,6 +23,30 @@ pub mod webgl_server;
 
 use crate::shm::{ShmBuffer, FORMAT_XRGB8888};
 
+/// `stat()` + `open()` a DRM render node, returning its `dev_t` when both work.
+///
+/// A node that exists but cannot be opened is reported as unusable: handing its
+/// `dev_t` to clients as `main_device` sends Mesa down a path it cannot finish.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn probe_render_node(path: &str) -> Option<u64> {
+    let cpath = std::ffi::CString::new(path).ok()?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(cpath.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+    if fd < 0 {
+        eprintln!(
+            "[luna-compositor] {} exists but cannot be opened: {}",
+            path,
+            std::io::Error::last_os_error()
+        );
+        return None;
+    }
+    unsafe { libc::close(fd) };
+    Some(st.st_rdev as u64)
+}
+
 pub struct Framebuffer {
     pub width: u32,
     pub height: u32,
@@ -97,13 +121,20 @@ impl Framebuffer {
 
         buf.end_cpu_read();
     }
+
+    /// Draw the embedded Aero arrow when no client cursor is available.
+    pub fn blit_default_cursor(&mut self, x: i32, y: i32) {
+        crate::cursor_aero::blit_default_cursor(self, x, y);
+    }
 }
 
 #[inline]
 fn blend(dst: u32, src: u32) -> u32 {
+    // wl_shm ARGB8888 is premultiplied.  Straight-alpha blending made GTK
+    // CSD (sakura titlebar/shadows) shimmer on every full composite.
     let a = (src >> 24) & 0xff;
     if a == 0xff {
-        return src;
+        return src | 0xff00_0000;
     }
     if a == 0 {
         return dst;
@@ -112,7 +143,7 @@ fn blend(dst: u32, src: u32) -> u32 {
     let mix = |sh: u32| {
         let s = (src >> sh) & 0xff;
         let d = (dst >> sh) & 0xff;
-        ((s * a + d * ia) / 255) & 0xff
+        (s + (d * ia) / 255) & 0xff
     };
     0xff00_0000 | (mix(16) << 16) | (mix(8) << 8) | mix(0)
 }
@@ -151,4 +182,18 @@ pub trait Backend {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn shutdown(&mut self) {}
+
+    /// `dev_t` of the DRM **render node** belonging to the GPU this backend is
+    /// actually driving, used as `zwp_linux_dmabuf_v1.main_device`.
+    ///
+    /// Returning `None` means "no GPU behind this backend"; the server then
+    /// keeps the dmabuf global hidden and clients fall back to `wl_shm`.  It is
+    /// important never to report a *primary* node (`/dev/dri/cardN`) here: Mesa
+    /// resolves `main_device` to a device it can render on, and a primary node
+    /// that it cannot become DRM master of sends it down a half-initialised
+    /// path where the EGL back buffer image ends up NULL.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drm_render_device(&self) -> Option<u64> {
+        None
+    }
 }

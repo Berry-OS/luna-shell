@@ -9,6 +9,7 @@
 #   ./luna-session                              # DRI compositor + luna-shell
 #   BACKEND=software ./luna-session             # software compositor (dev / VM)
 #   LUNA_USE_SYSTEM_WAYLAND=1 ./luna-session  # GTK/GLFW via system libwayland-*
+#   LUNA_ENABLE_DMABUF=1 ./luna-session        # opt-in LINEAR dmabuf (GTK); off by default
 #   LUNA_APPS="hello-gtk" ./luna-session        # launch GTK apps after shell
 #   INSTALL_PREFIX=/usr/local make install && luna-session
 
@@ -75,6 +76,7 @@ chmod 700 "$XDG_RUNTIME_DIR"
 COMPOSITOR_PID=""
 SHELL_PID=""
 INPUT_METHOD_PID=""
+CLIPBOARD_PID=""
 APP_PIDS=()
 USE_SYSTEM_WAYLAND=0
 VENDORED_CLIENT=""
@@ -95,6 +97,7 @@ cleanup() {
         [ -n "$pid" ] && pids+=("$pid")
     done
     [ -n "$INPUT_METHOD_PID" ] && pids+=("$INPUT_METHOD_PID")
+    [ -n "$CLIPBOARD_PID" ] && pids+=("$CLIPBOARD_PID")
     [ -n "$SHELL_PID" ] && pids+=("$SHELL_PID")
     [ -n "$COMPOSITOR_PID" ] && pids+=("$COMPOSITOR_PID")
     for pid in "${pids[@]}"; do
@@ -160,10 +163,13 @@ resolve_wayland_client_mode() {
             USE_SYSTEM_WAYLAND=0
             ;;
         auto|*)
-            if VENDORED_CLIENT="$(resolve_vendored_client)"; then
-                USE_SYSTEM_WAYLAND=0
-            elif has_system_wayland_client; then
+            # Prefer system libwayland: Mesa EGL (Firefox/Chrome) needs real
+            # prepare_read / event queues.  Vendored client is opt-in for
+            # debugging (LUNA_USE_SYSTEM_WAYLAND=0).
+            if has_system_wayland_client; then
                 USE_SYSTEM_WAYLAND=1
+            elif VENDORED_CLIENT="$(resolve_vendored_client)"; then
+                USE_SYSTEM_WAYLAND=0
             else
                 echo "→ No vendored libwayland-client and system libwayland-client not found"
                 echo "  Build vendored client: make -C \"$SCRIPT_DIR\" build"
@@ -249,7 +255,143 @@ if [ -n "$FBDEV" ]; then
     COMPOSITOR_ARGS+=(--fbdev "$FBDEV")
 fi
 
-echo "→ Starting Luna compositor (backend=$BACKEND, socket=$SOCKET${FBDEV:+, fbdev=$FBDEV})"
+# Locale: Xorg sessions get this from berryos-xsession / PAM; a raw VT does not.
+export LANG="${LANG:-ja_JP.UTF-8}"
+export LC_CTYPE="${LC_CTYPE:-$LANG}"
+
+# Keyboard layout (XKB). Compositor embeds this into wl_keyboard.keymap.
+# Multilingual: comma-separated layouts (e.g. jp,us) with Alt+Shift to toggle.
+# Override anytime with XKB_DEFAULT_LAYOUT / VARIANT / OPTIONS.
+if [ -z "${XKB_DEFAULT_LAYOUT:-}" ]; then
+    case "${LANG}" in
+        ja*|JA*) export XKB_DEFAULT_LAYOUT=jp,us ;;
+        ko*|KO*) export XKB_DEFAULT_LAYOUT=kr,us ;;
+        zh_CN*|zh_SG*) export XKB_DEFAULT_LAYOUT=cn,us ;;
+        zh_TW*|zh_HK*) export XKB_DEFAULT_LAYOUT=tw,us ;;
+        de*|DE*) export XKB_DEFAULT_LAYOUT=de,us ;;
+        fr*|FR*) export XKB_DEFAULT_LAYOUT=fr,us ;;
+        es*|ES*) export XKB_DEFAULT_LAYOUT=es,us ;;
+        pt_BR*) export XKB_DEFAULT_LAYOUT=br,us ;;
+        ru*|RU*) export XKB_DEFAULT_LAYOUT=us,ru ;;
+        ar*|AR*) export XKB_DEFAULT_LAYOUT=us,ara ;;
+        *)       export XKB_DEFAULT_LAYOUT=us ;;
+    esac
+fi
+if [ -z "${XKB_DEFAULT_OPTIONS:-}" ] && echo "$XKB_DEFAULT_LAYOUT" | grep -q ','; then
+    export XKB_DEFAULT_OPTIONS=grp:alt_shift_toggle
+fi
+echo "→ Keyboard: XKB_DEFAULT_LAYOUT=$XKB_DEFAULT_LAYOUT${XKB_DEFAULT_OPTIONS:+ options=$XKB_DEFAULT_OPTIONS}"
+
+# Session bus (portal / some GTK apps expect it; X sessions start it via xinitrc.d).
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-launch >/dev/null 2>&1; then
+    eval "$(dbus-launch --sh-syntax)"
+fi
+
+# Identify as Luna (not GNOME).  GNOME's default WM button-layout is
+# appmenu:close — xdg-desktop-portal maps that to gtk-decoration-layout and
+# GTK CSD HeaderBars then hide minimize/maximize.
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-Luna}"
+export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-luna}"
+
+# GTK CSD title-bar buttons (HeaderBar / WindowControls).
+# Override with LUNA_GTK_BUTTON_LAYOUT=':close' for GNOME-style close-only.
+LUNA_GTK_BUTTON_LAYOUT="${LUNA_GTK_BUTTON_LAYOUT:-icon:minimize,maximize,close}"
+if command -v gsettings >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.wm.preferences button-layout \
+        "$LUNA_GTK_BUTTON_LAYOUT" 2>/dev/null \
+        && echo "→ GTK CSD buttons: $LUNA_GTK_BUTTON_LAYOUT" \
+        || true
+fi
+# settings.ini fallback when portals are absent (gtk reads these directly).
+for _gtk_ver in gtk-3.0 gtk-4.0; do
+    _gtk_dir="${XDG_CONFIG_HOME:-$HOME/.config}/$_gtk_ver"
+    _gtk_ini="$_gtk_dir/settings.ini"
+    mkdir -p "$_gtk_dir"
+    if [ ! -f "$_gtk_ini" ]; then
+        printf '[Settings]\ngtk-decoration-layout=%s\n' \
+            "$LUNA_GTK_BUTTON_LAYOUT" > "$_gtk_ini"
+    elif ! grep -q '^gtk-decoration-layout=' "$_gtk_ini" 2>/dev/null; then
+        grep -q '^\[Settings\]' "$_gtk_ini" 2>/dev/null \
+            || printf '\n[Settings]\n' >> "$_gtk_ini"
+        printf 'gtk-decoration-layout=%s\n' "$LUNA_GTK_BUTTON_LAYOUT" >> "$_gtk_ini"
+    fi
+done
+unset _gtk_ver _gtk_dir _gtk_ini
+
+# Toolkit / browser hints for the whole session (sakura → firefox inherits these).
+# luna-session is pure Wayland — no Xwayland — so clients must not look for DISPLAY.
+export GDK_BACKEND="${GDK_BACKEND:-wayland}"
+export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
+export MOZ_LAYERS_ALLOW_SOFTWARE_GL="${MOZ_LAYERS_ALLOW_SOFTWARE_GL:-1}"
+# Compositor holds DRM master; hardware EGL in clients yields fd=-1 and Firefox
+# hangs in WaitFlushedEvent.  Forced for session children; stripped for luna-shell
+# (see env -u below) so the shell keeps hardware EGL on the dri path.
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-llvmpipe}"
+export GALLIUM_DRIVER="${GALLIUM_DRIVER:-llvmpipe}"
+export MOZ_WEBRENDER="${MOZ_WEBRENDER:-0}"
+export MOZ_ACCELERATED="${MOZ_ACCELERATED:-0}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+# Force overwrite: console/logind leaves XDG_SESSION_TYPE=tty, and
+# ${VAR:-wayland} would keep it.  Chrome then defaults to ozone/x11 and
+# needs --ozone-platform=wayland; with this set it auto-selects Wayland.
+export XDG_SESSION_TYPE=wayland
+export GDK_SCALE="${GDK_SCALE:-1}"
+export GDK_DPI_SCALE="${GDK_DPI_SCALE:-1}"
+export QT_SCALE_FACTOR="${QT_SCALE_FACTOR:-1}"
+export QT_AUTO_SCREEN_SCALE_FACTOR="${QT_AUTO_SCREEN_SCALE_FACTOR:-0}"
+# Berry often exports GSK_RENDERER=vulkan; Luna clients have no Vulkan WSI
+# (dmabuf off → wl_shm), so GTK4/Firefox dialogs stall.  Prefer Cairo.
+case "${GSK_RENDERER:-}" in
+    ""|vulkan|Vulkan|VULKAN) export GSK_RENDERER=cairo ;;
+esac
+# wl_output physical size uses this (compositor); 96 ≈ typical Xorg look.
+# MUST be exported before the compositor forks so wl_output.geometry is correct.
+export LUNA_OUTPUT_DPI="${LUNA_OUTPUT_DPI:-96}"
+
+# Japanese IME: Luna is pure Wayland — apps must use text-input-v3 so the
+# compositor can relay preedit/commit to whiz-im-wayland (apps/whiz/im-wayland.c).
+#
+# A console / Berry X session often exports GTK_IM_MODULE=gim (in-process X11
+# Whiz).  That bypasses text-input-v3, so whiz-im-wayland sits idle and JP
+# input dies.  Force the Wayland IM module unless the user opts out.
+#
+#   default / LUNA_IM_WAYLAND=1  → GTK_IM_MODULE=wayland → whiz-im-wayland
+#   LUNA_IM_WAYLAND=0           → keep gim/whiz in-process (X11-style)
+case "${LUNA_IM_WAYLAND:-1}" in
+    0|no|false|off|gim|whiz)
+        case "${GTK_IM_MODULE:-}" in
+            ""|wayland|none|simple) export GTK_IM_MODULE=gim ;;
+        esac
+        case "${QT_IM_MODULE:-}" in
+            ""|wayland|none) export QT_IM_MODULE=gim ;;
+        esac
+        export QT4_IM_MODULE="${QT4_IM_MODULE:-whiz}"
+        export CLUTTER_IM_MODULE="${CLUTTER_IM_MODULE:-whiz}"
+        export XMODIFIERS="${XMODIFIERS:-@im=whiz}"
+        echo "→ IME: GTK_IM_MODULE=$GTK_IM_MODULE QT_IM_MODULE=$QT_IM_MODULE (in-process; LUNA_IM_WAYLAND=0)"
+        ;;
+    *)
+        export GTK_IM_MODULE=wayland
+        unset QT_IM_MODULE QT4_IM_MODULE CLUTTER_IM_MODULE XMODIFIERS
+        echo "→ IME: GTK_IM_MODULE=wayland (text-input-v3 → whiz-im-wayland)"
+        ;;
+esac
+
+echo "→ Starting Luna compositor (backend=$BACKEND, socket=$SOCKET${FBDEV:+, fbdev=$FBDEV}, dpi=$LUNA_OUTPUT_DPI)"
+if [ "$BACKEND" = "dri" ]; then
+    # Another compositor holding DRM master makes card0 fail and can leave
+    # Mesa on the wrong GPU — the classic luna-shell segfault path.
+    for card in /dev/dri/card0 /dev/dri/card1 /dev/dri/card2; do
+        [ -e "$card" ] || continue
+        holders="$(fuser "$card" 2>/dev/null || true)"
+        if [ -n "$holders" ]; then
+            echo "warning: $card is already open (pids:$holders)"
+            echo "  Stop wayback/weston/Xorg on this seat, or switch to a free VT, before luna-session."
+            break
+        fi
+    done
+fi
 "$COMPOSITOR" "${COMPOSITOR_ARGS[@]}" &
 COMPOSITOR_PID=$!
 sleep 0.6
@@ -263,7 +405,6 @@ fi
 export WAYLAND_DISPLAY="$SOCKET"
 unset DISPLAY
 export LUNA_BACKEND="$BACKEND"
-
 setup_egl_env() {
     export EGL_PLATFORM="${EGL_PLATFORM:-wayland}"
     case "${LUNA_EGL_SOFTWARE:-auto}" in
@@ -294,21 +435,74 @@ else
     echo "→ Wayland clients: vendored libwayland-client ($VENDORED_CLIENT)"
     export LUNA_WAYLAND_CLIENT_PRELOAD="$VENDORED_CLIENT"
     export LUNA_WAYLAND_CLIENT_LIBPATH="$LIB"
+    # Do NOT put $LIB on LD_LIBRARY_PATH for the whole session.
+    # luna-shell must resolve system libwayland-client.so.0 (Mesa EGL);
+    # the vendored client shadows it and eglInitialize fails with
+    # "[luna-shell/wl] eglInitialize failed". GTK/Firefox get the vendored
+    # path via LUNA_WAYLAND_CLIENT_LIBPATH → luna-shell child_session_env,
+    # and via the per-app LD_LIBRARY_PATH below for LUNA_APPS.
     unset LD_PRELOAD
 fi
 
 # Make sample apps (hello-gtk) and installed binaries reachable for dock/launchpad.
-export PATH="$BIN${TARGET:+:$TARGET}:$PATH"
+# SCRIPT_DIR covers source-tree luna-shell / luna-clipboard before install.
+export PATH="$BIN${TARGET:+:$TARGET}:$SCRIPT_DIR:$PATH"
+
+# Cursor theme folders (.cur/.ani). Shell default is embedded "aero";
+# GUI Settings → Display can switch to miku (or another folder under LUNA_CURSOR_PATH).
+if [ -z "${LUNA_CURSOR_PATH:-}" ]; then
+    for cand in \
+        "${INSTALL_PREFIX:-}/share/luna-desktop/cursors" \
+        "$SCRIPT_DIR/../share/luna-desktop/cursors" \
+        "$BIN/../share/luna-desktop/cursors" \
+        "$SCRIPT_DIR/cursors" \
+        "/usr/local/share/luna-desktop/cursors" \
+        "/usr/share/luna-desktop/cursors"
+    do
+        [ -n "$cand" ] || continue
+        if [ -d "$cand" ]; then
+            export LUNA_CURSOR_PATH="$(cd "$cand" && pwd)"
+            break
+        fi
+    done
+fi
+# Do not force LUNA_CURSOR_THEME here — luna-shell reads ~/.config/luna-shell/settings.conf
+# so the Settings GUI can switch themes. Explicit env still works as a one-shot override
+# only if the user exports it before launching luna-session.
+export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
 
 echo "→ Starting Luna shell ($SHELL_BIN)"
-# GLFW links system libwayland; never preload the vendored client into luna-shell.
-env -u LD_PRELOAD "$SHELL_BIN" --desktop &
+# luna-shell links system libwayland + Mesa EGL; never preload or LD_LIBRARY_PATH
+# the vendored client into it (that yields eglInitialize failure).
+# Strip $LIB from any inherited LD_LIBRARY_PATH as well.
+# LUNA_NO_HELPERS: session starts whiz-im-wayland + luna-clipboard itself.
+# On dri, also strip software-GL overrides so the shell can use the GPU; clients
+# keep LIBGL_ALWAYS_SOFTWARE from the session env (Firefox WaitFlushedEvent fix).
+_shell_ld_path="${LD_LIBRARY_PATH:-}"
+if [ -n "${LIB:-}" ] && [ -n "$_shell_ld_path" ]; then
+    _shell_ld_path="$(printf '%s' "$_shell_ld_path" | tr ':' '\n' | grep -vxF "$LIB" | paste -sd: - || true)"
+fi
+_shell_env=(env -u LD_PRELOAD)
+if [ "$BACKEND" = "dri" ]; then
+    _shell_env+=(-u LIBGL_ALWAYS_SOFTWARE -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER)
+fi
+if [ -n "$_shell_ld_path" ]; then
+    "${_shell_env[@]}" LD_LIBRARY_PATH="$_shell_ld_path" LUNA_NO_HELPERS=1 "$SHELL_BIN" --desktop &
+else
+    "${_shell_env[@]}" -u LD_LIBRARY_PATH LUNA_NO_HELPERS=1 "$SHELL_BIN" --desktop &
+fi
+unset _shell_ld_path _shell_env
 SHELL_PID=$!
 sleep 0.3
 if ! kill -0 "$SHELL_PID" 2>/dev/null; then
     echo "error: luna-shell exited immediately"
-    echo "  Common cause: EGL window surface failed on this compositor."
-    echo "  Try: LUNA_EGL_SOFTWARE=1 LUNA_USE_SYSTEM_WAYLAND=1 $0"
+    echo "  Common cause: Mesa tried to export a dmabuf the compositor cannot use"
+    echo "  (LINEAR-only CPU composite + OpenGL, or the wrong GPU on a multi-GPU box)."
+    echo "  Dmabuf is off by default now; if you set LUNA_ENABLE_DMABUF=1, unset it."
+    echo "  Also try:"
+    echo "    LUNA_DRM_DEVICE=/dev/dri/renderD129 $0       # pick the GPU explicitly"
+    echo "    LUNA_EGL_SOFTWARE=1 LUNA_USE_SYSTEM_WAYLAND=1 $0"
+    echo "    stop other compositors (wayback/weston) that hold DRM master"
     wait "$SHELL_PID" || true
     exit 1
 fi
@@ -316,6 +510,8 @@ fi
 # A Wayland input method is a regular client with a privileged compositor
 # protocol. Start Whiz when installed; set LUNA_INPUT_METHOD=none to opt out,
 # or provide an absolute path/custom command name.
+# Do NOT LD_PRELOAD the vendored libwayland into whiz — it is a normal GTK
+# client against system libwayland / text-input-v3 (preload makes it exit).
 INPUT_METHOD="${LUNA_INPUT_METHOD:-whiz-im-wayland}"
 if [ "$INPUT_METHOD" != "none" ] && [ "$INPUT_METHOD" != "0" ]; then
     if command -v "$INPUT_METHOD" >/dev/null 2>&1; then
@@ -330,6 +526,30 @@ if [ "$INPUT_METHOD" != "none" ] && [ "$INPUT_METHOD" != "0" ]; then
         fi
     elif [ -n "${LUNA_INPUT_METHOD:-}" ]; then
         echo "warning: LUNA_INPUT_METHOD not found: $INPUT_METHOD"
+    else
+        echo "warning: whiz-im-wayland not in PATH; Japanese IME unavailable"
+        echo "  build/install: (cd apps/whiz && make im-wayland install-wayland)"
+    fi
+fi
+
+# Clipboard manager: keeps seat selection alive after the copying app exits.
+# Always use system libwayland (like whiz-im) — LD_PRELOAD of the vendored
+# client broke offer receive (roundtrip/FD) so history stayed empty.
+# Opt out with LUNA_CLIPBOARD=none.
+CLIPBOARD="${LUNA_CLIPBOARD:-luna-clipboard}"
+if [ "$CLIPBOARD" != "none" ] && [ "$CLIPBOARD" != "0" ]; then
+    if command -v "$CLIPBOARD" >/dev/null 2>&1; then
+        echo "→ Starting clipboard manager ($CLIPBOARD)"
+        env -u LD_PRELOAD -u LUNA_WAYLAND_CLIENT_PRELOAD "$CLIPBOARD" -v &
+        CLIPBOARD_PID=$!
+        sleep 0.1
+        if ! kill -0 "$CLIPBOARD_PID" 2>/dev/null; then
+            echo "warning: clipboard manager exited immediately; continuing without it"
+            wait "$CLIPBOARD_PID" || true
+            CLIPBOARD_PID=""
+        fi
+    elif [ -n "${LUNA_CLIPBOARD:-}" ]; then
+        echo "warning: LUNA_CLIPBOARD not found: $CLIPBOARD"
     fi
 fi
 

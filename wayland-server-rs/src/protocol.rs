@@ -144,6 +144,95 @@ pub static WL_DATA_DEVICE_MANAGER: Interface = Interface {
   events: &[],
 };
 
+pub static WL_DATA_SOURCE: Interface = Interface {
+  name: "wl_data_source",
+  version: 3,
+  requests: &[m!("offer", "s"), m!("destroy", ""), m!("set_actions", "3u")],
+  events: &[
+    m!("target", "?s"),
+    m!("send", "sh"),
+    m!("cancelled", ""),
+    m!("dnd_drop_performed", "3"),
+    m!("dnd_finished", "3"),
+    m!("action", "3u"),
+  ],
+};
+
+pub static WL_DATA_DEVICE: Interface = Interface {
+  name: "wl_data_device",
+  version: 3,
+  requests: &[m!("start_drag", "?oo?ou"), m!("set_selection", "?ou"), m!("release", "2")],
+  events: &[
+    m!("data_offer", "n"),
+    m!("enter", "uoff?o"),
+    m!("leave", ""),
+    m!("motion", "uff"),
+    m!("drop", ""),
+    m!("selection", "?o"),
+  ],
+};
+
+pub static WL_DATA_OFFER: Interface = Interface {
+  name: "wl_data_offer",
+  version: 3,
+  requests: &[
+    m!("accept", "u?s"),
+    m!("receive", "sh"),
+    m!("destroy", ""),
+    m!("finish", "3"),
+    m!("set_actions", "3uu"),
+  ],
+  events: &[m!("offer", "s"), m!("source_actions", "3u"), m!("action", "3u")],
+};
+
+/// Middle-click (PRIMARY) paste — GTK4/Qt use this instead of X11 PRIMARY.
+pub static ZWP_PRIMARY_SELECTION_DEVICE_MANAGER_V1: Interface = Interface {
+  name: "zwp_primary_selection_device_manager_v1",
+  version: 1,
+  requests: &[
+    m!("create_source", "n"),
+    m!("get_device", "no"),
+    m!("destroy", ""),
+  ],
+  events: &[],
+};
+
+pub static ZWP_PRIMARY_SELECTION_DEVICE_V1: Interface = Interface {
+  name: "zwp_primary_selection_device_v1",
+  version: 1,
+  requests: &[m!("set_selection", "?ou"), m!("destroy", "")],
+  events: &[m!("data_offer", "n"), m!("selection", "?o")],
+};
+
+pub static ZWP_PRIMARY_SELECTION_SOURCE_V1: Interface = Interface {
+  name: "zwp_primary_selection_source_v1",
+  version: 1,
+  requests: &[m!("offer", "s"), m!("destroy", "")],
+  events: &[m!("send", "sh"), m!("cancelled", "")],
+};
+
+pub static ZWP_PRIMARY_SELECTION_OFFER_V1: Interface = Interface {
+  name: "zwp_primary_selection_offer_v1",
+  version: 1,
+  requests: &[m!("receive", "sh"), m!("destroy", "")],
+  events: &[m!("offer", "s")],
+};
+
+/// xdg-decoration: prefer client CSD; optional compositor SSD strip.
+pub static ZXDG_DECORATION_MANAGER_V1: Interface = Interface {
+  name: "zxdg_decoration_manager_v1",
+  version: 1,
+  requests: &[m!("destroy", ""), m!("get_toplevel_decoration", "no")],
+  events: &[],
+};
+
+pub static ZXDG_TOPLEVEL_DECORATION_V1: Interface = Interface {
+  name: "zxdg_toplevel_decoration_v1",
+  version: 1,
+  requests: &[m!("destroy", ""), m!("set_mode", "u"), m!("unset_mode", "")],
+  events: &[m!("configure", "u")],
+};
+
 pub static ZWP_TEXT_INPUT_MANAGER_V3: Interface = Interface {
   name: "zwp_text_input_manager_v3",
   version: 1,
@@ -292,6 +381,39 @@ pub static XDG_POPUP: Interface = Interface {
   events: &[m!("configure", "iiii"), m!("popup_done", ""), m!("repositioned", "u")],
 };
 
+// Layer-shell protocol (wlr-layer-shell-unstable-v1)
+// Layers: BACKGROUND=0, BOTTOM=1, TOP=2, OVERLAY=3
+// Anchor bits: TOP=1, BOTTOM=2, LEFT=4, RIGHT=8
+pub static ZWLR_LAYER_SHELL_V1: Interface = Interface {
+  name: "zwlr_layer_shell_v1",
+  version: 4,
+  requests: &[
+    m!("get_layer_surface", "no?ous"), // new_id, surface, ?output, layer, namespace
+    m!("destroy", ""),
+  ],
+  events: &[],
+};
+
+pub static ZWLR_LAYER_SURFACE_V1: Interface = Interface {
+  name: "zwlr_layer_surface_v1",
+  version: 4,
+  requests: &[
+    m!("set_size", "uu"),                    // 0
+    m!("set_anchor", "u"),                   // 1
+    m!("set_exclusive_zone", "i"),           // 2
+    m!("set_margin", "iiii"),                // 3
+    m!("set_keyboard_interactivity", "u"),   // 4
+    m!("get_popup", "o"),                    // 5
+    m!("ack_configure", "u"),                // 6
+    m!("destroy", ""),                       // 7
+    m!("set_layer", "u"),                    // 8
+  ],
+  events: &[
+    m!("configure", "uuu"), // 0: serial, width, height
+    m!("closed", ""),       // 1
+  ],
+};
+
 pub fn by_name(name: &str) -> Option<&'static Interface> {
   let table: &[&'static Interface] = &[
     &WL_DISPLAY,
@@ -310,6 +432,15 @@ pub fn by_name(name: &str) -> Option<&'static Interface> {
     &WL_KEYBOARD,
     &WL_OUTPUT,
     &WL_DATA_DEVICE_MANAGER,
+    &WL_DATA_SOURCE,
+    &WL_DATA_DEVICE,
+    &WL_DATA_OFFER,
+    &ZWP_PRIMARY_SELECTION_DEVICE_MANAGER_V1,
+    &ZWP_PRIMARY_SELECTION_DEVICE_V1,
+    &ZWP_PRIMARY_SELECTION_SOURCE_V1,
+    &ZWP_PRIMARY_SELECTION_OFFER_V1,
+    &ZXDG_DECORATION_MANAGER_V1,
+    &ZXDG_TOPLEVEL_DECORATION_V1,
     &ZWP_TEXT_INPUT_MANAGER_V3,
     &ZWP_TEXT_INPUT_V3,
     &ZWP_INPUT_METHOD_MANAGER_V2,
@@ -326,6 +457,8 @@ pub fn by_name(name: &str) -> Option<&'static Interface> {
     &ZWP_LINUX_DMABUF_V1,
     &ZWP_LINUX_BUFFER_PARAMS_V1,
     &ZWP_LINUX_DMABUF_FEEDBACK_V1,
+    &ZWLR_LAYER_SHELL_V1,
+    &ZWLR_LAYER_SURFACE_V1,
   ];
   table.iter().copied().find(|i| i.name == name)
 }

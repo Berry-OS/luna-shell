@@ -39,12 +39,10 @@ impl VtSession {
       return Err(std::io::Error::last_os_error());
     }
 
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut st) } != 0 || !is_virtual_terminal(st.st_rdev as u64) {
-      unsafe { libc::close(fd) };
-      return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a Linux virtual terminal", tty)));
-    }
-
+    // /dev/tty is a multiplexing device (major 5, minor 0), even when the
+    // process' controlling terminal is a real Linux VT.  Checking st_rdev
+    // therefore rejects the normal/default path unconditionally.  VT_GETMODE
+    // is the authoritative test and returns ENOTTY for PTYs.
     let mut saved_mode = VtMode::default();
     let mut saved_kd_mode = 0;
     if unsafe { libc::ioctl(fd, VT_GETMODE, &mut saved_mode) } != 0 || unsafe { libc::ioctl(fd, KDGETMODE, &mut saved_kd_mode) } != 0 {
@@ -147,12 +145,6 @@ pub fn create_signal_fd() -> std::io::Result<RawFd> {
   }
 }
 
-fn is_virtual_terminal(dev: u64) -> bool {
-  let major = (dev >> 8) & 0xfff;
-  let minor = (dev & 0xff) | ((dev >> 12) & 0xfff00);
-  major == 4 && (1..=63).contains(&minor)
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -160,12 +152,5 @@ mod tests {
   #[test]
   fn vt_mode_matches_linux_abi() {
     assert_eq!(std::mem::size_of::<VtMode>(), 8);
-  }
-
-  #[test]
-  fn recognizes_virtual_terminal_device_numbers() {
-    assert!(is_virtual_terminal((4 << 8) | 1));
-    assert!(is_virtual_terminal((4 << 8) | 63));
-    assert!(!is_virtual_terminal((5 << 8) | 0));
   }
 }

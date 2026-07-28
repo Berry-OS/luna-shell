@@ -5,7 +5,7 @@
  * a JSON state file and a Unix domain command socket.
  */
 
-use crate::object::Role;
+use crate::object::{Object, Role};
 use crate::server::Client;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
@@ -29,8 +29,12 @@ pub struct WindowInfo {
   pub surface_id: u32,
   pub title: String,
   pub app_id: String,
+  pub x: i32,
+  pub y: i32,
   pub focused: bool,
   pub minimized: bool,
+  pub maximized: bool,
+  pub fullscreen: bool,
 }
 
 pub struct ShellIpc {
@@ -140,16 +144,25 @@ impl ShellIpc {
     }
   }
 
-  pub fn collect_windows(clients: &HashMap<RawFd, Client>, focused_surface: u32) -> Vec<WindowInfo> {
+  pub fn collect_windows(
+    clients: &HashMap<RawFd, Client>,
+    focused_fd: RawFd,
+    focused_surface: u32,
+  ) -> Vec<WindowInfo> {
     let mut windows = Vec::new();
-    for client in clients.values() {
+    for (&fd, client) in clients {
       for (&surface_id, obj) in &client.objects {
         let Role::Surface(s) = &obj.role else { continue };
-        if !s.mapped || s.popup || s.xdg_surface_id.is_none() {
+        if s.popup || s.xdg_surface_id.is_none() || s.subsurface_parent.is_some() {
+          continue;
+        }
+        // Firefox may keep the xdg_toplevel parent buffer-less while content
+        // lives on subsurfaces — still list it in the shell taskbar.
+        if !s.mapped && !surface_has_subsurface_content(client, surface_id) {
           continue;
         }
         let xdg_id = s.xdg_surface_id.unwrap();
-        let (title, app_id, minimized) = toplevel_meta(client, xdg_id);
+        let (title, app_id, minimized, maximized, fullscreen) = toplevel_meta(client, xdg_id);
         if is_shell_surface(&title, &app_id) {
           continue;
         }
@@ -160,8 +173,12 @@ impl ShellIpc {
           surface_id,
           title: if title.is_empty() { app_id.clone() } else { title },
           app_id,
-          focused: surface_id == focused_surface,
+          x: s.x,
+          y: s.y,
+          focused: fd == focused_fd && surface_id == focused_surface,
           minimized,
+          maximized,
+          fullscreen,
         });
       }
     }
@@ -169,7 +186,12 @@ impl ShellIpc {
     windows
   }
 
-  pub fn collect_tray(&self, clients: &HashMap<RawFd, Client>, focused_surface: u32) -> Vec<TrayItem> {
+  pub fn collect_tray(
+    &self,
+    clients: &HashMap<RawFd, Client>,
+    focused_fd: RawFd,
+    focused_surface: u32,
+  ) -> Vec<TrayItem> {
     let mut tray = self.extra_tray.clone();
     let mut seen = HashSet::new();
     for t in &tray {
@@ -179,11 +201,14 @@ impl ShellIpc {
     for client in clients.values() {
       for (&surface_id, obj) in &client.objects {
         let Role::Surface(s) = &obj.role else { continue };
-        if !s.mapped || s.popup || s.xdg_surface_id.is_none() {
+        if s.popup || s.xdg_surface_id.is_none() || s.subsurface_parent.is_some() {
+          continue;
+        }
+        if !s.mapped && !surface_has_subsurface_content(client, surface_id) {
           continue;
         }
         let xdg_id = s.xdg_surface_id.unwrap();
-        let (title, app_id, _) = toplevel_meta(client, xdg_id);
+        let (title, app_id, _, _, _) = toplevel_meta(client, xdg_id);
         if is_shell_surface(&title, &app_id) {
           continue;
         }
@@ -208,7 +233,7 @@ impl ShellIpc {
       }
     }
 
-    if focused_surface != 0 {
+    if focused_surface != 0 && focused_fd >= 0 {
       for t in &mut tray {
         if t.id.ends_with(&format!(":{}", focused_surface)) {
           t.icon = format!("{}_active", t.icon);
@@ -218,11 +243,24 @@ impl ShellIpc {
     tray
   }
 
-  pub fn export_state(&mut self, clients: &HashMap<RawFd, Client>, focused_surface: u32, force: bool) {
-    let windows = Self::collect_windows(clients, focused_surface);
-    let tray = self.collect_tray(clients, focused_surface);
+  pub fn export_state(
+    &mut self,
+    clients: &HashMap<RawFd, Client>,
+    focused_fd: RawFd,
+    focused_surface: u32,
+    force: bool,
+    pending_menu: &mut Option<(u32, i32, i32)>,
+    switcher: &Option<(usize, Vec<u32>)>,
+  ) {
+    let windows = Self::collect_windows(clients, focused_fd, focused_surface);
+    let tray = self.collect_tray(clients, focused_fd, focused_surface);
 
-    let hash = simple_hash(&windows, &tray);
+    let hash = simple_hash(&windows, &tray)
+      ^ pending_menu.map(|(id, x, y)| id as u64 ^ (x as u64) << 16 ^ (y as u64) << 32).unwrap_or(0)
+      ^ switcher
+        .as_ref()
+        .map(|(i, ids)| *i as u64 ^ ids.len() as u64)
+        .unwrap_or(0);
     if !force && hash == self.last_export {
       return;
     }
@@ -235,10 +273,34 @@ impl ShellIpc {
 
     let mut out = String::new();
     for w in &windows {
-      out.push_str(&format!("W\t{}\t{}\t{}\t{}\t{}\n", w.surface_id, w.title.replace('\t', " ").replace('\n', " "), w.app_id.replace('\t', " "), if w.focused { 1 } else { 0 }, if w.minimized { 1 } else { 0 },));
+      out.push_str(&format!(
+        "W\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        w.surface_id,
+        w.title.replace('\t', " ").replace('\n', " "),
+        w.app_id.replace('\t', " "),
+        if w.focused { 1 } else { 0 },
+        if w.minimized { 1 } else { 0 },
+        if w.maximized { 1 } else { 0 },
+        if w.fullscreen { 1 } else { 0 },
+        w.x,
+        w.y,
+      ));
     }
     for t in &tray {
-      out.push_str(&format!("T\t{}\t{}\t{}\t{}\n", t.id.replace('\t', " "), t.label.replace('\t', " "), t.icon.replace('\t', " "), t.tooltip.replace('\t', " ").replace('\n', " "),));
+      out.push_str(&format!(
+        "T\t{}\t{}\t{}\t{}\n",
+        t.id.replace('\t', " "),
+        t.label.replace('\t', " "),
+        t.icon.replace('\t', " "),
+        t.tooltip.replace('\t', " ").replace('\n', " "),
+      ));
+    }
+    if let Some((id, x, y)) = pending_menu.take() {
+      out.push_str(&format!("M\t{}\t{}\t{}\n", id, x, y));
+    }
+    if let Some((idx, ids)) = switcher {
+      let list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+      out.push_str(&format!("S\t{}\t{}\n", idx, list.join(",")));
     }
 
     if let Ok(mut f) = std::fs::File::create(&path) {
@@ -255,28 +317,64 @@ impl Drop for ShellIpc {
   }
 }
 
-fn toplevel_meta(client: &Client, xdg_surface_id: u32) -> (String, String, bool) {
+pub fn toplevel_meta(client: &Client, xdg_surface_id: u32) -> (String, String, bool, bool, bool) {
   for obj in client.objects.values() {
     if let Role::XdgToplevel {
       xdg_surface_id: xs,
       title,
       app_id,
       minimized,
+      maximized,
+      fullscreen,
       ..
     } = &obj.role
     {
       if *xs == xdg_surface_id {
-        return (title.clone(), app_id.clone(), *minimized);
+        return (
+          title.clone(),
+          app_id.clone(),
+          *minimized,
+          *maximized,
+          *fullscreen,
+        );
       }
     }
   }
-  (String::new(), String::new(), false)
+  (String::new(), String::new(), false, false, false)
 }
 
-fn is_shell_surface(title: &str, app_id: &str) -> bool {
+pub fn is_shell_surface(title: &str, app_id: &str) -> bool {
   let t = title.to_ascii_lowercase();
   let a = app_id.to_ascii_lowercase();
   t.contains("luna desktop") || t.contains("luna-shell") || a.contains("luna-shell") || a.contains("glfw")
+}
+
+fn surface_has_subsurface_content(client: &Client, surface_id: u32) -> bool {
+  for obj in client.objects.values() {
+    if let Role::Subsurface {
+      surface_id: child,
+      parent_id,
+      ..
+    } = &obj.role
+    {
+      if *parent_id != surface_id {
+        continue;
+      }
+      if let Some(Object {
+        role: Role::Surface(s),
+        ..
+      }) = client.objects.get(child)
+      {
+        if s.mapped && s.current_buffer.is_some() {
+          return true;
+        }
+      }
+      if surface_has_subsurface_content(client, *child) {
+        return true;
+      }
+    }
+  }
+  false
 }
 
 fn tray_icon_for(app_id: &str) -> String {
@@ -309,6 +407,14 @@ fn simple_hash(windows: &[WindowInfo], tray: &[TrayItem]) -> u64 {
     h ^= w.focused as u64;
     h = h.wrapping_mul(0x100000001b3);
     h ^= w.minimized as u64;
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= w.maximized as u64;
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= w.fullscreen as u64;
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= w.x as u64;
+    h = h.wrapping_mul(0x100000001b3);
+    h ^= w.y as u64;
     for b in w.title.as_bytes() {
       h = h.wrapping_mul(0x100000001b3);
       h ^= *b as u64;

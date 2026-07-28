@@ -35,7 +35,6 @@ impl Drop for DmabufParams {
   }
 }
 
-#[derive(Default)]
 pub struct Surface {
   pub pending_buffer: Option<u32>,
   pub pending_attach: bool,
@@ -47,6 +46,15 @@ pub struct Surface {
   pub mapped: bool,
   pub popup: bool,
   pub input_method_popup: bool,
+  // Layer shell
+  pub layer_surface_id: Option<u32>,
+  pub accepts_input: bool,  // false when empty input region is set
+  /// xdg_surface.set_window_geometry — content box relative to buffer origin.
+  /// None → whole buffer. GTK CSD uses this to exclude drop-shadow padding.
+  pub window_geom: Option<(i32, i32, i32, i32)>,
+  /// When this surface is a wl_subsurface child, parent wl_surface id.
+  /// Firefox / WebRender put content on subsurfaces of an empty toplevel.
+  pub subsurface_parent: Option<u32>,
 }
 
 pub enum Role {
@@ -56,7 +64,15 @@ pub enum Role {
   Compositor,
   Subcompositor,
   Subsurface {
+    /// Child wl_surface id.
     surface_id: u32,
+    /// Parent wl_surface id.
+    parent_id: u32,
+    /// Position relative to parent buffer origin.
+    x: i32,
+    y: i32,
+    /// true = commit synchronized with parent (we still present immediately).
+    sync: bool,
   },
   Shm,
   Output,
@@ -98,8 +114,30 @@ pub enum Role {
     keymap_set: bool,
   },
   DataDeviceManager,
-  DataDevice,
-  DataSource,
+  DataDevice {
+    seat_id: u32,
+  },
+  DataSource {
+    mime_types: Vec<String>,
+  },
+  DataOffer {
+    /// Source lives on `source_fd` as object `source_id` (0 = none).
+    source_fd: RawFd,
+    source_id: u32,
+    mime_types: Vec<String>,
+  },
+  PrimarySelectionDeviceManager,
+  PrimarySelectionDevice {
+    seat_id: u32,
+  },
+  PrimarySelectionSource {
+    mime_types: Vec<String>,
+  },
+  PrimarySelectionOffer {
+    source_fd: RawFd,
+    source_id: u32,
+    mime_types: Vec<String>,
+  },
   WmBase,
   Positioner {
     size_w: i32,
@@ -110,8 +148,32 @@ pub enum Role {
     anchor_h: i32,
     offset_x: i32,
     offset_y: i32,
+    /// xdg_positioner.anchor enum (none=0, top=1, bottom=2, left=3, right=4,
+    /// top_left=5, bottom_left=6, top_right=7, bottom_right=8)
+    anchor: u32,
+    /// xdg_positioner.gravity enum (same numbering as anchor)
+    gravity: u32,
+    /// xdg_positioner.constraint_adjustment bitmask
+    /// (slide_x=1, slide_y=2, flip_x=4, flip_y=8, resize_x=16, resize_y=32)
+    constraint_adjustment: u32,
   },
-  Region,
+  Region { has_rects: bool },
+  LayerShell,
+  LayerSurface {
+    surface_id: u32,
+    layer: u32,           // 0=BACKGROUND, 1=BOTTOM, 2=TOP, 3=OVERLAY
+    anchor: u32,          // bitmask: TOP=1, BOTTOM=2, LEFT=4, RIGHT=8
+    exclusive_zone: i32,
+    size_w: u32,
+    size_h: u32,
+    margin_top: i32,
+    margin_right: i32,
+    margin_bottom: i32,
+    margin_left: i32,
+    keyboard: u32,
+    configure_serial: u32,
+    configured: bool,
+  },
   Dmabuf,
   DmabufParams(DmabufParams),
   DmabufFeedback,
@@ -129,9 +191,29 @@ pub enum Role {
     title: String,
     app_id: String,
     minimized: bool,
+    maximized: bool,
+    fullscreen: bool,
+    /// Parent wl_surface id (transient dialogs), if any.
+    parent_surface_id: Option<u32>,
+    /// Geometry before maximize / fullscreen / tile: (x, y, w, h).
+    saved_geom: Option<(i32, i32, i32, i32)>,
+    /// 0=none, 1=left half, 2=right half.
+    tiled: u32,
+    /// zxdg_toplevel_decoration mode: 0=unset, 1=client, 2=server.
+    decoration_mode: u32,
+    /// Client-requested size clamp (0 = unset).
+    min_w: i32,
+    min_h: i32,
+    max_w: i32,
+    max_h: i32,
   },
   XdgPopup {
     xdg_surface_id: u32,
+  },
+  DecorationManager,
+  ToplevelDecoration {
+    toplevel_id: u32,
+    mode: u32, // 0=unset, 1=client, 2=server
   },
 }
 
@@ -147,6 +229,27 @@ impl Object {
       interface,
       version,
       role,
+    }
+  }
+}
+
+impl Default for Surface {
+  fn default() -> Self {
+    Surface {
+      pending_buffer: None,
+      pending_attach: false,
+      current_buffer: None,
+      x: 0,
+      y: 0,
+      frame_callbacks: Vec::new(),
+      xdg_surface_id: None,
+      mapped: false,
+      popup: false,
+      input_method_popup: false,
+      layer_surface_id: None,
+      accepts_input: true,
+      window_geom: None,
+      subsurface_parent: None,
     }
   }
 }

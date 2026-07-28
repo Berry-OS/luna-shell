@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::ffi::CStr;
-use std::os::raw::{c_char, c_void};
+use std::os::raw::c_void;
 use crate::interfaces::WlInterface;
 use crate::proxy::Proxy;
 use crate::socket::WaylandSocket;
@@ -145,17 +145,62 @@ impl Display {
         unsafe {
             let proxy = &*proxy_ptr;
             let iface = proxy.interface;
-            if iface.is_null() || proxy.listener.is_null() {
+            if iface.is_null() {
                 return;
             }
+            let has_handler = proxy.dispatcher.is_some() || !proxy.implementation.is_null();
             let iface_ref = &*iface;
-            if opcode as i32 >= iface_ref.event_count {
+            if opcode as i32 >= iface_ref.event_count || iface_ref.events.is_null() {
                 return;
             }
             let ev_msg = &*iface_ref.events.add(opcode as usize);
             let sig = CStr::from_ptr(ev_msg.signature).to_bytes();
-            let args = wire::parse_event_args(sig, payload, &mut self.socket.recv_fds, &self.objects);
-            dispatch_listener(proxy_ptr, opcode, &args);
+            let mut args = wire::parse_event_args(sig, payload, &mut self.socket.recv_fds, &self.objects);
+            /* Server-side new_id ('n'): ALWAYS create a proxy before dispatch
+             * (libwayland ABI). Skipping this left raw ids in the arg union and
+             * GTK segfaulted on wl_proxy_add_listener (pcmanfm). */
+            let mut type_idx = 0usize;
+            let mut arg_idx = 0usize;
+            for &ch in sig {
+                match ch {
+                    b'?' | b'0'..=b'9' => continue,
+                    b'n' => {
+                        let new_id = args.get(arg_idx).map(|a| a.n).unwrap_or(0);
+                        let new_iface = if !ev_msg.types.is_null() {
+                            *ev_msg.types.add(type_idx)
+                        } else {
+                            std::ptr::null()
+                        };
+                        if new_id != 0 {
+                            let use_iface = if !new_iface.is_null() {
+                                new_iface
+                            } else {
+                                &crate::interfaces::wl_callback_interface as *const _
+                            };
+                            let ver = if !new_iface.is_null() {
+                                (*new_iface).version as u32
+                            } else {
+                                1
+                            };
+                            let mut p = Proxy::new(new_id, use_iface, ver, self as *mut Display);
+                            // Inherit sender queue (Mesa wayland-egl frame callbacks).
+                            p.queue = proxy.queue;
+                            let raw = Box::into_raw(Box::new(p));
+                            self.register(raw);
+                            args[arg_idx] = wl_argument { o: raw as *mut c_void };
+                        }
+                        type_idx += 1;
+                        arg_idx += 1;
+                    }
+                    _ => {
+                        type_idx += 1;
+                        arg_idx += 1;
+                    }
+                }
+            }
+            if has_handler {
+                dispatch_event(proxy_ptr, opcode, ev_msg as *const crate::types::wl_message, &mut args);
+            }
         }
     }
 
@@ -186,7 +231,8 @@ impl Display {
             (*cb_raw).user_data = Box::into_raw(Box::new(flag_clone)) as *mut c_void;
             static ROUNDTRIP_VTABLE: [unsafe extern "C" fn(*mut c_void, *mut Proxy, u32); 1]
                 = [roundtrip_done_listener];
-            (*cb_raw).listener = ROUNDTRIP_VTABLE.as_ptr() as *const c_void;
+            (*cb_raw).implementation = ROUNDTRIP_VTABLE.as_ptr() as *const c_void;
+            (*cb_raw).dispatcher = None;
 
             let timeout = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !done_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -212,9 +258,31 @@ unsafe extern "C" fn roundtrip_done_listener(
     flag.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+unsafe fn dispatch_event(
+    proxy: *mut Proxy,
+    opcode: u16,
+    message: *const crate::types::wl_message,
+    args: &mut [wl_argument],
+) {
+    let proxy_ref = &*proxy;
+    if let Some(disp) = proxy_ref.dispatcher {
+        let _ = disp(
+            proxy_ref.implementation,
+            proxy as *mut c_void,
+            opcode as u32,
+            message,
+            args.as_mut_ptr(),
+        );
+        return;
+    }
+    if !proxy_ref.implementation.is_null() {
+        dispatch_listener(proxy, opcode, args);
+    }
+}
+
 unsafe fn dispatch_listener(proxy: *mut Proxy, opcode: u16, args: &[wl_argument]) {
     let proxy_ref = &*proxy;
-    if proxy_ref.listener.is_null() { return; }
+    if proxy_ref.implementation.is_null() { return; }
 
     type Fn0  = unsafe extern "C" fn(*mut c_void, *mut Proxy);
     type Fn1  = unsafe extern "C" fn(*mut c_void, *mut Proxy, u64);
@@ -230,7 +298,7 @@ unsafe fn dispatch_listener(proxy: *mut Proxy, opcode: u16, args: &[wl_argument]
     type Fn11 = unsafe extern "C" fn(*mut c_void, *mut Proxy, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
     type Fn12 = unsafe extern "C" fn(*mut c_void, *mut Proxy, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64);
 
-    let fn_table = proxy_ref.listener as *const *const c_void;
+    let fn_table = proxy_ref.implementation as *const *const c_void;
     let fn_ptr   = *fn_table.add(opcode as usize);
     if fn_ptr.is_null() { return; }
 

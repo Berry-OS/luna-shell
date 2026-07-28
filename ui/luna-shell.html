@@ -8,7 +8,8 @@
 </head>
 <body>
 
-<!-- ── Wallpaper: Luna night sky ── -->
+<!-- ── Wallpaper: Luna night sky (bg_layer groups all wallpaper for layer-shell surface) ── -->
+<div id="bg_layer">
 <div id="wallpaper"></div>
 <div id="wp_aurora1"></div>
 <div id="wp_aurora2"></div>
@@ -22,11 +23,26 @@
 <div id="wp_star8" class="star"></div>
 <div id="wp_moon_halo"></div>
 <div id="wp_moon"></div>
+<!-- Desktop widgets live under bg_layer so the Wayland bg surface paints them. -->
+<div id="widget_clock" class="widget">
+  <p id="wg_time">--:--</p>
+  <p id="wg_date">Luna Desktop</p>
+</div>
+<div id="widget_stats" class="widget">
+  <div class="st_row"><p class="st_label">CPU</p><p id="st_cpu_val" class="st_val">0%</p></div>
+  <div class="st_bar"><div id="st_cpu_fill" class="st_fill"></div></div>
+  <div class="st_row"><p class="st_label">Memory</p><p id="st_mem_val" class="st_val">0%</p></div>
+  <div class="st_bar"><div id="st_mem_fill" class="st_fill g_mem"></div></div>
+  <div class="st_row"><p class="st_label">Disk</p><p id="st_disk_val" class="st_val">--</p></div>
+  <div class="st_bar"><div id="st_disk_fill" class="st_fill g_disk"></div></div>
+</div>
+</div>
 
 <!-- ── Menu bar ── -->
 <div id="menubar">
   <div id="mb_left">
     <div id="mb_logo" class="mb_item" onclick="onLunaMenu()"><div id="logo_disc"></div><div id="logo_bite"></div></div>
+    <div id="mb_app" class="mb_item mb_app_name">Desktop</div>
   </div>
   <div id="mb_center">
     <div id="win_list">
@@ -55,43 +71,75 @@
       <div id="tray_6" class="tray_item hidden" onclick="onTrayClick()"><span class="tray_glyph">●</span></div>
       <div id="tray_7" class="tray_item hidden" onclick="onTrayClick()"><span class="tray_glyph">●</span></div>
     </div>
+    <div id="mb_clip" class="mb_item mb_status" onclick="onClipboardMenu()"></div>
     <div id="mb_bat"  class="mb_item mb_status">100%</div>
     <div id="mb_wifi" class="mb_item mb_status" onclick="onControlCenter()">Wi-Fi</div>
-    <div id="mb_cc"   class="mb_item" onclick="onControlCenter()">≡</div>
+    <div id="mb_cc"   class="mb_item" onclick="onControlCenter()"></div>
     <div id="mb_clock" class="mb_item">--- -- --:--</div>
   </div>
+</div>
+
+<!-- ── Window context menu (right-click a taskbar title) ── -->
+<div id="win_menu" class="menu_panel hidden">
+  <div class="menu_section_label" id="win_menu_title">Window</div>
+  <div id="wm_activate"  class="menu_item" onclick="onWinMenuAction()"><div class="mi_sym"></div><div class="mi_label">Bring to Front</div></div>
+  <div id="wm_minimize"  class="menu_item" onclick="onWinMenuAction()"><div class="mi_sym"></div><div class="mi_label">Minimize</div></div>
+  <div id="wm_maximize"  class="menu_item" onclick="onWinMenuAction()"><div class="mi_sym"></div><div class="mi_label">Maximize</div></div>
+  <div id="wm_fullscreen" class="menu_item" onclick="onWinMenuAction()"><div class="mi_sym"></div><div class="mi_label">Fullscreen</div></div>
+  <div class="menu_sep"></div>
+  <div id="wm_tile_left"  class="menu_item" onclick="onWinMenuAction()"><div class="mi_sym"></div><div class="mi_label">Tile Left</div></div>
+  <div id="wm_tile_right" class="menu_item" onclick="onWinMenuAction()"><div class="mi_sym"></div><div class="mi_label">Tile Right</div></div>
+  <div id="wm_center"     class="menu_item" onclick="onWinMenuAction()"><div class="mi_sym"></div><div class="mi_label">Center</div></div>
+  <div class="menu_sep"></div>
+  <div id="wm_close"     class="menu_item mi_destructive" onclick="onWinMenuAction()"><div class="mi_sym"></div><div class="mi_label">Close</div></div>
+</div>
+
+<!-- ── Clipboard history menu ── -->
+<div id="clip_menu" class="menu_panel hidden">
+  <div class="menu_section_label">Clipboard</div>
+  <div id="clip_empty" class="clip_empty">No recent copies</div>
+  <div id="clip_0" class="menu_item clip_item hidden" onclick="onClipSelect()"><div class="mi_sym">1</div><div class="mi_label clip_preview">—</div></div>
+  <div id="clip_1" class="menu_item clip_item hidden" onclick="onClipSelect()"><div class="mi_sym">2</div><div class="mi_label clip_preview">—</div></div>
+  <div id="clip_2" class="menu_item clip_item hidden" onclick="onClipSelect()"><div class="mi_sym">3</div><div class="mi_label clip_preview">—</div></div>
+  <div id="clip_3" class="menu_item clip_item hidden" onclick="onClipSelect()"><div class="mi_sym">4</div><div class="mi_label clip_preview">—</div></div>
+  <div id="clip_4" class="menu_item clip_item hidden" onclick="onClipSelect()"><div class="mi_sym">5</div><div class="mi_label clip_preview">—</div></div>
+  <div id="clip_5" class="menu_item clip_item hidden" onclick="onClipSelect()"><div class="mi_sym">6</div><div class="mi_label clip_preview">—</div></div>
+  <div id="clip_6" class="menu_item clip_item hidden" onclick="onClipSelect()"><div class="mi_sym">7</div><div class="mi_label clip_preview">—</div></div>
+  <div id="clip_7" class="menu_item clip_item hidden" onclick="onClipSelect()"><div class="mi_sym">8</div><div class="mi_label clip_preview">—</div></div>
+  <div class="menu_sep"></div>
+  <div id="clip_clear" class="menu_item mi_destructive" onclick="onClipClear()"><div class="mi_sym"></div><div class="mi_label">Clear History</div></div>
 </div>
 
 <!-- ── Luna menu (dropdown) ── -->
 <div id="luna_menu" class="menu_panel hidden">
   <div class="menu_section_label">Luna Desktop</div>
   <div id="mi_about" class="menu_item" onclick="onAbout()">
-    <div class="mi_sym" onclick="onAbout()">◐</div>
+    <div class="mi_sym" onclick="onAbout()"></div>
     <div class="mi_label" onclick="onAbout()">About This Luna</div>
   </div>
   <div class="menu_sep"></div>
   <div id="mi_settings" class="menu_item" onclick="onSettingsOpen()">
-    <div class="mi_sym" onclick="onSettingsOpen()">◎</div>
+    <div class="mi_sym" onclick="onSettingsOpen()"></div>
     <div class="mi_label" onclick="onSettingsOpen()">Luna Settings…</div>
     <div class="mi_key" onclick="onSettingsOpen()">⌘ ,</div>
   </div>
   <div id="mi_launchpad" class="menu_item" onclick="onLaunchpadOpen()">
-    <div class="mi_sym" onclick="onLaunchpadOpen()">★</div>
+    <div class="mi_sym" onclick="onLaunchpadOpen()"></div>
     <div class="mi_label" onclick="onLaunchpadOpen()">Launchpad</div>
     <div class="mi_key" onclick="onLaunchpadOpen()">F4</div>
   </div>
   <div class="menu_sep"></div>
   <div id="mi_restart" class="menu_item" onclick="onRestart()">
-    <div class="mi_sym" onclick="onRestart()">↺</div>
+    <div class="mi_sym" onclick="onRestart()"></div>
     <div class="mi_label" onclick="onRestart()">Restart…</div>
   </div>
   <div id="mi_shutdown" class="menu_item" onclick="onShutdown()">
-    <div class="mi_sym" onclick="onShutdown()">◯</div>
+    <div class="mi_sym" onclick="onShutdown()"></div>
     <div class="mi_label" onclick="onShutdown()">Shut Down…</div>
   </div>
   <div class="menu_sep"></div>
   <div id="mi_logout" class="menu_item mi_destructive" onclick="onLogout()">
-    <div class="mi_sym" onclick="onLogout()">→</div>
+    <div class="mi_sym" onclick="onLogout()"></div>
     <div class="mi_label" onclick="onLogout()">Log Out…</div>
   </div>
 </div>
@@ -127,34 +175,23 @@
   <div class="cc_stat_row"><p class="cc_stat_label">RAM</p><div class="cc_bar"><div id="cc_mem_fill" class="cc_bar_fill"></div></div></div>
 </div>
 
-<!-- ── Desktop widgets ── -->
-<div id="widget_clock" class="widget">
-  <p id="wg_time">--:--</p>
-  <p id="wg_date">Luna Desktop</p>
-</div>
-<div id="widget_stats" class="widget">
-  <div class="st_row"><p class="st_label">CPU</p><p id="st_cpu_val" class="st_val">0%</p></div>
-  <div class="st_bar"><div id="st_cpu_fill" class="st_fill"></div></div>
-  <div class="st_row"><p class="st_label">Memory</p><p id="st_mem_val" class="st_val">0%</p></div>
-  <div class="st_bar"><div id="st_mem_fill" class="st_fill g_mem"></div></div>
-  <div class="st_row"><p class="st_label">Disk</p><p id="st_disk_val" class="st_val">--</p></div>
-  <div class="st_bar"><div id="st_disk_fill" class="st_fill g_disk"></div></div>
-</div>
-
 <!-- ── About This Luna ── -->
-<div id="about_win" class="hidden">
-  <div id="about_drag" draggable="1"></div>
-  <div id="tl_close" class="tl tl_red"    onclick="onAboutClose()"></div>
-  <div id="tl_min"   class="tl tl_yellow"></div>
-  <div id="tl_max"   class="tl tl_green"></div>
-  <div id="about_moon"></div>
-  <p id="about_title">Luna Desktop</p>
-  <p id="about_ver">Version 1.1 — Mare Tranquillitatis</p>
-  <div id="about_sep"></div>
-  <p id="about_shell"  class="about_line">Shell    luna-shell (Luna UI engine)</p>
-  <p id="about_comp"   class="about_line">Display  luna-compositor (Rust Wayland)</p>
-  <p id="about_kernel" class="about_line">Kernel   —</p>
-  <p id="about_mem"    class="about_line">Memory   —</p>
+<div id="about_win" class="modal_sheet hidden">
+  <div id="about_backdrop" class="modal_backdrop" onclick="onAboutClose()"></div>
+  <div id="about_box" class="sheet_box about_box">
+    <div id="about_drag" draggable="1"></div>
+    <div id="tl_close" class="tl tl_red"    onclick="onAboutClose()"></div>
+    <div id="tl_min"   class="tl tl_yellow" onclick="onAboutMin()"></div>
+    <div id="tl_max"   class="tl tl_green"  onclick="onAboutMax()"></div>
+    <div id="about_moon"></div>
+    <p id="about_title">Luna Desktop</p>
+    <p id="about_ver">Version 1.1 — Mare Tranquillitatis</p>
+    <div id="about_sep"></div>
+    <p id="about_shell"  class="about_line">Shell    luna-shell (Luna UI engine)</p>
+    <p id="about_comp"   class="about_line">Display  luna-compositor (Rust Wayland)</p>
+    <p id="about_kernel" class="about_line">Kernel   —</p>
+    <p id="about_mem"    class="about_line">Memory   —</p>
+  </div>
 </div>
 
 <!-- ── Settings window ── -->
@@ -163,14 +200,14 @@
   <div id="settings_sheet" class="sheet_box">
     <div id="settings_drag" draggable="1"></div>
     <div id="stl_close"  class="tl tl_red"    onclick="onSettingsClose()"></div>
-    <div id="stl_min"    class="tl tl_yellow"></div>
-    <div id="stl_max"    class="tl tl_green"></div>
+    <div id="stl_min"    class="tl tl_yellow" onclick="onSettingsMin()"></div>
+    <div id="stl_max"    class="tl tl_green"  onclick="onSettingsMax()"></div>
     <p id="settings_title">Luna Settings</p>
 
     <div id="settings_body">
       <div id="settings_sidebar">
-        <div id="stab_apps" class="stab active" onclick="onSettingsTab()"><span class="stab_icon">◫</span> Apps</div>
-        <div id="stab_disp" class="stab"        onclick="onSettingsTab()"><span class="stab_icon">◑</span> Display</div>
+        <div id="stab_apps" class="stab active" onclick="onSettingsTab()"><span class="stab_icon"></span> Apps</div>
+        <div id="stab_disp" class="stab"        onclick="onSettingsTab()"><span class="stab_icon"></span> Display</div>
       </div>
       <div id="settings_content">
         <div id="settings_panel_apps">
@@ -199,6 +236,48 @@
             <p class="wp_lbl">Forest</p>
             <p class="wp_lbl">Sunset</p>
           </div>
+          <p class="pref_section">Cursor Theme</p>
+          <div id="cur_thumbs_row">
+            <div id="cur_aero" class="cur_card selected" onclick="onCurSelect()">
+              <div class="cur_preview cur_p_aero"></div>
+              <p class="cur_name">Aero</p>
+              <p class="cur_desc">Windows Aero</p>
+            </div>
+            <div id="cur_miku" class="cur_card" onclick="onCurSelect()">
+              <div class="cur_preview cur_p_miku"></div>
+              <p class="cur_name">Miku</p>
+              <p class="cur_desc">Animated</p>
+            </div>
+          </div>
+          <p class="pref_hint">Applies instantly — click a card to switch</p>
+          <p class="pref_section">Keyboard Layout</p>
+          <div id="kb_thumbs_row">
+            <div id="kb_jp_us" class="kb_card selected" onclick="onKbSelect()">
+              <p class="kb_name">JP + US</p>
+              <p class="kb_desc">日本語 / English · Alt+Shift</p>
+            </div>
+            <div id="kb_jp" class="kb_card" onclick="onKbSelect()">
+              <p class="kb_name">Japanese</p>
+              <p class="kb_desc">JIS 配列</p>
+            </div>
+            <div id="kb_us" class="kb_card" onclick="onKbSelect()">
+              <p class="kb_name">US</p>
+              <p class="kb_desc">QWERTY</p>
+            </div>
+            <div id="kb_de_us" class="kb_card" onclick="onKbSelect()">
+              <p class="kb_name">DE + US</p>
+              <p class="kb_desc">Deutsch · Alt+Shift</p>
+            </div>
+            <div id="kb_fr_us" class="kb_card" onclick="onKbSelect()">
+              <p class="kb_name">FR + US</p>
+              <p class="kb_desc">Azerty · Alt+Shift</p>
+            </div>
+            <div id="kb_kr_us" class="kb_card" onclick="onKbSelect()">
+              <p class="kb_name">KR + US</p>
+              <p class="kb_desc">한국어 · Alt+Shift</p>
+            </div>
+          </div>
+          <p class="pref_hint">XKB_DEFAULT_LAYOUT / Alt+Shift toggles groups</p>
           <p class="pref_section">Hostname</p>
           <div class="pref_row_full"><input id="pref_hostname" class="pref_input_full" type="text"></div>
         </div>
@@ -216,14 +295,14 @@
 <div id="launchpad" class="hidden" onclick="onLaunchpadClose()">
   <input id="lp_search" placeholder="Search">
   <div id="lp_grid" onclick="onLaunchpadClose()">
-    <div id="lp_files"    class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_files">■</div><p class="lp_label">Files</p></div>
-    <div id="lp_terminal" class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_terminal">&gt;_</div><p class="lp_label">Terminal</p></div>
-    <div id="lp_browser"  class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_browser">⊕</div><p class="lp_label">Browser</p></div>
-    <div id="lp_editor"   class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_editor">¶</div><p class="lp_label">Editor</p></div>
-    <div id="lp_music"    class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_music">♫</div><p class="lp_label">Music</p></div>
-    <div id="lp_settings" class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_settings">◎</div><p class="lp_label">Settings</p></div>
-    <div id="lp_demo"     class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_demo">GTK</div><p class="lp_label">GTK Demo</p></div>
-    <div id="lp_hello"    class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_hello">Hi</div><p class="lp_label">Hello GTK</p></div>
+    <div id="lp_files"    class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_files"></div><p class="lp_label">Files</p></div>
+    <div id="lp_terminal" class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_terminal"></div><p class="lp_label">Terminal</p></div>
+    <div id="lp_browser"  class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_browser"></div><p class="lp_label">Browser</p></div>
+    <div id="lp_editor"   class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_editor"></div><p class="lp_label">Editor</p></div>
+    <div id="lp_music"    class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_music"></div><p class="lp_label">Music</p></div>
+    <div id="lp_settings" class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_settings"></div><p class="lp_label">Settings</p></div>
+    <div id="lp_demo"     class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_demo"></div><p class="lp_label">GTK Demo</p></div>
+    <div id="lp_hello"    class="lp_app" onclick="onLaunchApp()"><div class="lp_icon g_hello"></div><p class="lp_label">Hello GTK</p></div>
   </div>
   <p id="lp_hint">Esc or click background to close</p>
 </div>
@@ -235,7 +314,7 @@
     <p id="toast_title">Welcome to Luna</p>
     <p id="toast_msg">Your desktop is ready.</p>
   </div>
-  <div id="toast_close" onclick="onToastClose()">×</div>
+  <div id="toast_close" onclick="onToastClose()"></div>
 </div>
 
 <!-- ── Shutdown / restart confirmation ── -->
@@ -255,17 +334,35 @@
   </div>
 </div>
 
+<!-- ── Alt+Tab window switcher ── -->
+<div id="switcher" class="switcher_overlay hidden">
+  <div id="switcher_strip">
+    <div id="sw_0"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_1"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_2"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_3"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_4"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_5"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_6"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_7"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_8"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_9"  class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_10" class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+    <div id="sw_11" class="switcher_item hidden"><div class="sw_app">app</div><div class="sw_title">Window</div></div>
+  </div>
+</div>
+
 <!-- ── Dock ── -->
 <div id="dock">
-  <div id="dock_files"     class="dock_item" onclick="onDockClick()"><div class="dock_icon g_files">■</div><div id="dot_files" class="dock_dot"></div></div>
-  <div id="dock_launchpad" class="dock_item" onclick="onLaunchpadOpen()"><div class="dock_icon g_launchpad">★</div><div class="dock_dot spacer"></div></div>
-  <div id="dock_terminal"  class="dock_item" onclick="onDockClick()"><div class="dock_icon g_terminal">&gt;_</div><div id="dot_terminal" class="dock_dot"></div></div>
-  <div id="dock_browser"   class="dock_item" onclick="onDockClick()"><div class="dock_icon g_browser">⊕</div><div id="dot_browser" class="dock_dot"></div></div>
-  <div id="dock_editor"    class="dock_item" onclick="onDockClick()"><div class="dock_icon g_editor">¶</div><div id="dot_editor" class="dock_dot"></div></div>
-  <div id="dock_music"     class="dock_item" onclick="onDockClick()"><div class="dock_icon g_music">♫</div><div id="dot_music" class="dock_dot"></div></div>
-  <div id="dock_settings"  class="dock_item" onclick="onDockClick()"><div class="dock_icon g_settings">◎</div><div id="dot_settings" class="dock_dot"></div></div>
+  <div id="dock_files"     class="dock_item" onclick="onDockClick()"><div class="dock_icon g_files"></div><div id="dot_files" class="dock_dot"></div></div>
+  <div id="dock_launchpad" class="dock_item" onclick="onLaunchpadOpen()"><div class="dock_icon g_launchpad"></div><div class="dock_dot spacer"></div></div>
+  <div id="dock_terminal"  class="dock_item" onclick="onDockClick()"><div class="dock_icon g_terminal"></div><div id="dot_terminal" class="dock_dot"></div></div>
+  <div id="dock_browser"   class="dock_item" onclick="onDockClick()"><div class="dock_icon g_browser"></div><div id="dot_browser" class="dock_dot"></div></div>
+  <div id="dock_editor"    class="dock_item" onclick="onDockClick()"><div class="dock_icon g_editor"></div><div id="dot_editor" class="dock_dot"></div></div>
+  <div id="dock_music"     class="dock_item" onclick="onDockClick()"><div class="dock_icon g_music"></div><div id="dot_music" class="dock_dot"></div></div>
+  <div id="dock_settings"  class="dock_item" onclick="onDockClick()"><div class="dock_icon g_settings"></div><div id="dot_settings" class="dock_dot"></div></div>
   <div id="dock_sep" class="dock_sep"></div>
-  <div id="dock_trash"     class="dock_item" onclick="onTrash()"><div class="dock_icon g_trash">×</div><div class="dock_dot spacer"></div></div>
+  <div id="dock_trash"     class="dock_item" onclick="onTrash()"><div class="dock_icon g_trash"></div><div class="dock_dot spacer"></div></div>
 </div>
 
 </body>

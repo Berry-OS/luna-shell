@@ -9,15 +9,30 @@
 
 use std::os::raw::c_void;
 use crate::interfaces::WlInterface;
+use crate::types::{wl_dispatcher_func_t, wl_event_queue, wl_list};
 
 pub const WL_PROXY_FLAG_ID_DELETED: u32 = 1 << 0;
 pub const WL_PROXY_FLAG_DESTROYED:  u32 = 1 << 1;
 pub const WL_PROXY_FLAG_WRAPPER:    u32 = 1 << 2;
 
-/// wl_proxy layout matches libwayland wayland-private.h.
+/// Matches libwayland `struct wl_proxy` (64-bit).
 #[repr(C)]
 pub struct Proxy {
-    pub interface:       *const WlInterface,                 pub implementation:  *const c_void,                      pub id:              u32,                                pub _id_pad:         u32,                                pub display:         *mut crate::display::Display,       pub queue:           *mut crate::types::wl_event_queue,     pub flags:           u32,                                pub refcount:        i32,                                pub user_data:       *mut c_void,                        pub listener:        *const c_void,                      pub version:         u32,                                pub _version_pad:    u32,                                pub tag:             *const *const std::os::raw::c_char, }
+    pub interface:      *const WlInterface,
+    pub implementation: *const c_void,
+    pub id:             u32,
+    pub _id_pad:        u32,
+    pub display:        *mut crate::display::Display,
+    pub queue:          *mut wl_event_queue,
+    pub flags:          u32,
+    pub refcount:       i32,
+    pub user_data:      *mut c_void,
+    pub dispatcher:     wl_dispatcher_func_t,
+    pub version:        u32,
+    pub _version_pad:   u32,
+    pub tag:            *const *const std::os::raw::c_char,
+    pub queue_link:     wl_list,
+}
 
 unsafe impl Send for Proxy {}
 unsafe impl Sync for Proxy {}
@@ -39,10 +54,11 @@ impl Proxy {
             flags: 0,
             refcount: 1,
             user_data: std::ptr::null_mut(),
-            listener: std::ptr::null(),
+            dispatcher: None,
             version,
             _version_pad: 0,
             tag: std::ptr::null(),
+            queue_link: wl_list::new(),
         }
     }
 

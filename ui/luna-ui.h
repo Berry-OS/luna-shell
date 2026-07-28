@@ -63,7 +63,12 @@ enum {
     LUNA_PRESS = 1,
     LUNA_REPEAT = 2,
     LUNA_MOUSE_BUTTON_LEFT = 0,
+    LUNA_MOUSE_BUTTON_RIGHT = 1,
+    LUNA_MOUSE_BUTTON_MIDDLE = 2,
     LUNA_MOD_SHIFT = 0x0001,
+    LUNA_MOD_CONTROL = 0x0002,
+    LUNA_MOD_ALT = 0x0004,
+    LUNA_MOD_SUPER = 0x0008,
     LUNA_KEY_SPACE = 32,
     LUNA_KEY_ESCAPE = 256,
     LUNA_KEY_ENTER = 257,
@@ -95,10 +100,21 @@ void luna_wire_onclick_handlers(void);
 void luna_push_focus_trap(int idx, LunaTrapDismissFn on_dismiss, int backdrop_dismiss);
 void luna_pop_focus_trap(int idx);
 void luna_set_mouse_release_hook(LunaMouseReleaseHook fn);
+/* Button that triggered the most recent on_click (LUNA_MOUSE_BUTTON_*). */
+int  luna_last_click_button(void);
+/* Modifier mask (LUNA_MOD_*) at the most recent on_click. */
+int  luna_last_click_mods(void);
 void luna_resize(float w, float h);
 void luna_mark_layout_dirty(void);
 void luna_update(double now, double dt);
+/* 1 while color/scale easing still changes pixels (CSS @keyframes excluded). */
+int  luna_visuals_settling(void);
+/* Same, but only for root and its descendants. root_idx < 0 → whole tree. */
+int  luna_visuals_settling_under(int root_idx);
 void luna_render(int fbw, int fbh);
+void luna_render_region(int root_idx, int fbw, int fbh,
+                        float origin_x, float origin_y,
+                        float region_w, float region_h);
 int  luna_element_count(void);
 LunaElement* luna_element_at(int idx);
 int  luna_get_element_by_id(const char* id);
@@ -136,6 +152,7 @@ extern int   luna_css_from_document;
 #include <time.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #ifdef LUNA_UI_GLFW
 #include <GLFW/glfw3.h>
@@ -184,6 +201,16 @@ void luna_set_platform(const LunaPlatform* p) {
 
 float luna_window_width = 1024.0f;
 float luna_window_height = 768.0f;
+
+/* Region-render state: set by luna_render_region(), cleared after each call.
+ * When g_render_res_x==0 the full document / window dims are used (default). */
+static int   g_render_root  = -1;
+static float g_render_off_x = 0.0f;
+static float g_render_off_y = 0.0f;
+static float g_render_res_x = 0.0f;
+static float g_render_res_y = 0.0f;
+#define LUNA_RRES_X (g_render_res_x > 0.0f ? g_render_res_x : window_width)
+#define LUNA_RRES_Y (g_render_res_y > 0.0f ? g_render_res_y : window_height)
 char  luna_doc_title[128] = "Luna UI";
 int   luna_css_from_document = 0;
 
@@ -221,6 +248,38 @@ typedef void (*PFNGLFRAMEBUFFERTEXTURE2DPROC)(GLenum target, GLenum attachment, 
 typedef void (*PFNGLDELETEFRAMEBUFFERSPROC)(GLsizei n, const GLuint* framebuffers);
 typedef GLenum (*PFNGLCHECKFRAMEBUFFERSTATUSPROC)(GLenum target);
 
+/* GL 1.0/1.1 core entry-point typedefs.  <GL/gl.h>/<GL/glext.h> only ship PFN
+ * typedefs for GL 1.2+, so we declare the ones we need for the 1.0/1.1 calls
+ * that would otherwise be satisfied by directly-linked libGL symbols.  Those
+ * direct symbols dispatch through libGL's own current-context slot, which is
+ * populated by glXMakeCurrent — NOT by eglMakeCurrent.  On a driver stack
+ * where libGL and libEGL do not share one glapi dispatch, that slot stays
+ * NULL under EGL and the first such call dereferences a NULL gl_context deep
+ * inside the driver (the "NULL-context crash in libgallium" seen right after
+ * the first texture upload).  Routing these through get_proc()/eglGetProc-
+ * Address() (see load_gl_functions()) makes every GL call in the process share
+ * the single dispatch table that eglMakeCurrent() actually made current. */
+typedef void (*LUNA_PFNGLVIEWPORTPROC)(GLint x, GLint y, GLsizei w, GLsizei h);
+typedef void (*LUNA_PFNGLCLEARPROC)(GLbitfield mask);
+typedef void (*LUNA_PFNGLCLEARCOLORPROC)(GLfloat r, GLfloat g, GLfloat b, GLfloat a);
+typedef void (*LUNA_PFNGLENABLEPROC)(GLenum cap);
+typedef void (*LUNA_PFNGLDISABLEPROC)(GLenum cap);
+typedef void (*LUNA_PFNGLBLENDFUNCPROC)(GLenum sfactor, GLenum dfactor);
+typedef void (*LUNA_PFNGLSCISSORPROC)(GLint x, GLint y, GLsizei w, GLsizei h);
+typedef void (*LUNA_PFNGLDRAWARRAYSPROC)(GLenum mode, GLint first, GLsizei count);
+typedef void (*LUNA_PFNGLGENTEXTURESPROC)(GLsizei n, GLuint* textures);
+typedef void (*LUNA_PFNGLDELETETEXTURESPROC)(GLsizei n, const GLuint* textures);
+typedef void (*LUNA_PFNGLBINDTEXTUREPROC)(GLenum target, GLuint texture);
+typedef void (*LUNA_PFNGLTEXPARAMETERIPROC)(GLenum target, GLenum pname, GLint param);
+typedef void (*LUNA_PFNGLTEXIMAGE2DPROC)(GLenum target, GLint level, GLint internalformat,
+        GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void* pixels);
+typedef void (*LUNA_PFNGLTEXSUBIMAGE2DPROC)(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+        GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels);
+typedef void (*LUNA_PFNGLCOPYTEXSUBIMAGE2DPROC)(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+        GLint x, GLint y, GLsizei width, GLsizei height);
+typedef void (*LUNA_PFNGLREADPIXELSPROC)(GLint x, GLint y, GLsizei width, GLsizei height,
+        GLenum format, GLenum type, void* pixels);
+
 #ifndef GL_FRAMEBUFFER
 #define GL_FRAMEBUFFER          0x8D40
 #define GL_DRAW_FRAMEBUFFER     0x8CA9
@@ -257,6 +316,45 @@ PFNGLBINDFRAMEBUFFERPROC glBindFramebuffer_;
 PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D_;
 PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers_;
 PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatus_;
+
+/* GL 1.0/1.1 core function pointers, resolved in load_gl_functions() through
+ * the same get_proc()/eglGetProcAddress() path as the modern entry points so
+ * every GL call shares one dispatch table (see the typedef comment above).
+ * The macros redirect every subsequent gl* call in luna-ui.h and luna-shell.c
+ * from the directly-linked libGL symbol to these pointers. */
+LUNA_PFNGLVIEWPORTPROC         luna_p_glViewport;
+LUNA_PFNGLCLEARPROC            luna_p_glClear;
+LUNA_PFNGLCLEARCOLORPROC       luna_p_glClearColor;
+LUNA_PFNGLENABLEPROC           luna_p_glEnable;
+LUNA_PFNGLDISABLEPROC          luna_p_glDisable;
+LUNA_PFNGLBLENDFUNCPROC        luna_p_glBlendFunc;
+LUNA_PFNGLSCISSORPROC          luna_p_glScissor;
+LUNA_PFNGLDRAWARRAYSPROC       luna_p_glDrawArrays;
+LUNA_PFNGLGENTEXTURESPROC      luna_p_glGenTextures;
+LUNA_PFNGLDELETETEXTURESPROC   luna_p_glDeleteTextures;
+LUNA_PFNGLBINDTEXTUREPROC      luna_p_glBindTexture;
+LUNA_PFNGLTEXPARAMETERIPROC    luna_p_glTexParameteri;
+LUNA_PFNGLTEXIMAGE2DPROC       luna_p_glTexImage2D;
+LUNA_PFNGLTEXSUBIMAGE2DPROC    luna_p_glTexSubImage2D;
+LUNA_PFNGLCOPYTEXSUBIMAGE2DPROC luna_p_glCopyTexSubImage2D;
+LUNA_PFNGLREADPIXELSPROC       luna_p_glReadPixels;
+
+#define glViewport          luna_p_glViewport
+#define glClear             luna_p_glClear
+#define glClearColor        luna_p_glClearColor
+#define glEnable            luna_p_glEnable
+#define glDisable           luna_p_glDisable
+#define glBlendFunc         luna_p_glBlendFunc
+#define glScissor           luna_p_glScissor
+#define glDrawArrays        luna_p_glDrawArrays
+#define glGenTextures       luna_p_glGenTextures
+#define glDeleteTextures    luna_p_glDeleteTextures
+#define glBindTexture       luna_p_glBindTexture
+#define glTexParameteri     luna_p_glTexParameteri
+#define glTexImage2D        luna_p_glTexImage2D
+#define glTexSubImage2D     luna_p_glTexSubImage2D
+#define glCopyTexSubImage2D luna_p_glCopyTexSubImage2D
+#define glReadPixels        luna_p_glReadPixels
 
 // --- Shaders ---
 
@@ -1224,6 +1322,8 @@ typedef struct {
 static LunaFocusTrapEntry g_focus_traps[LUNA_MAX_FOCUS_TRAPS];
 static int g_focus_trap_count = 0;
 static LunaMouseReleaseHook g_mouse_release_hook = NULL;
+static int g_luna_last_click_button = LUNA_MOUSE_BUTTON_LEFT;
+static int g_luna_last_click_mods = 0;
 static int    g_focus_via_keyboard = 0;
 static char   g_a11y_live_msg[256];
 static double g_a11y_live_until = 0.0;
@@ -1251,7 +1351,7 @@ int bold_font_loaded = 0;
    (and the intrinsic-width measure path) before using the text helpers. */
 static float g_text_letter_spacing = 0.0f;
 
-/* ---- UTF-8 + dynamic CJK glyph atlas (CSS text paint path) ---- */
+/* ---- UTF-8 + dynamic CJK / symbol glyph atlas (CSS text paint path) ---- */
 static stbtt_fontinfo g_font_info;
 static unsigned char* g_font_ttf = NULL;
 static long           g_font_ttf_sz = 0;
@@ -1259,6 +1359,13 @@ static int            g_font_info_ok = 0;
 static stbtt_fontinfo g_cjk_font_info;
 static unsigned char* g_cjk_font_ttf = NULL;
 static int            g_cjk_font_info_ok = 0;
+/* LunaSymbols (Font Awesome–derived) — solid UI icons + brand marks. */
+static stbtt_fontinfo g_icon_font_info;
+static unsigned char* g_icon_font_ttf = NULL;
+static int            g_icon_font_info_ok = 0;
+static stbtt_fontinfo g_brand_font_info;
+static unsigned char* g_brand_font_ttf = NULL;
+static int            g_brand_font_info_ok = 0;
 
 #define LUNA_DYN_ATLAS_W 1024
 #define LUNA_DYN_ATLAS_H 1024
@@ -1351,7 +1458,8 @@ static int font_path_score(const char* path) {
     if (strstr(lower, "noto"))        score += 40;
     if (strstr(lower, "mplus") || strstr(lower, "sourcehansans")) score += 60;
     if (strstr(lower, "dejavu") || strstr(lower, "liberation")) score += 10;
-    if (strstr(lower, "emoji") || strstr(lower, "icon")) score -= 100;
+    if (strstr(lower, "emoji") || strstr(lower, "icon") || strstr(lower, "symbol")) score -= 100;
+    if (strstr(lower, "lunasymbols") || strstr(lower, "fontawesome") || strstr(lower, "awesome")) score -= 500;
     return score;
 }
 
@@ -1363,6 +1471,7 @@ static int font_path_score_ui(const char* path) {
     for (size_t i = 0; i < n; i++) lower[i] = (char)tolower((unsigned char)path[i]);
     lower[n] = '\0';
     if (strstr(lower, "emoji") || strstr(lower, "icon") || strstr(lower, "symbol")) return -1000;
+    if (strstr(lower, "lunasymbols") || strstr(lower, "fontawesome") || strstr(lower, "awesome")) return -1000;
     if (strstr(lower, "comic")) return -500;
     if (strstr(lower, "cjk") || strstr(lower, "notosansjp") || strstr(lower, "notosanscjk")) return -1000;
     if (strstr(lower, "serif") && !strstr(lower, "sans")) return -400;
@@ -1403,9 +1512,37 @@ static LunaDynGlyph* dyn_find_glyph(int cp, int px) {
     return NULL;
 }
 
+static int font_has_cp(const stbtt_fontinfo* fi, int ok, int cp) {
+    return ok && fi && stbtt_FindGlyphIndex(fi, cp) != 0;
+}
+
+/* Pick a face that actually contains `cp`. LunaSymbols win for PUA icon
+ * codepoints; otherwise fall through UI → CJK → symbols. */
+static stbtt_fontinfo* font_for_codepoint(int cp) {
+    int pua = (cp >= 0xE000 && cp <= 0xF8FF);
+    int icon_has  = font_has_cp(&g_icon_font_info,  g_icon_font_info_ok,  cp);
+    int brand_has = font_has_cp(&g_brand_font_info, g_brand_font_info_ok, cp);
+    int ui_has    = font_has_cp(&g_font_info,       g_font_info_ok,       cp);
+    int cjk_has   = font_has_cp(&g_cjk_font_info,   g_cjk_font_info_ok,   cp);
+
+    if (pua) {
+        if (icon_has)  return &g_icon_font_info;
+        if (brand_has) return &g_brand_font_info;
+    }
+    if (cjk_has)   return &g_cjk_font_info;
+    if (ui_has)    return &g_font_info;
+    if (icon_has)  return &g_icon_font_info;
+    if (brand_has) return &g_brand_font_info;
+    if (g_cjk_font_info_ok) return &g_cjk_font_info;
+    if (g_font_info_ok)     return &g_font_info;
+    if (g_icon_font_info_ok) return &g_icon_font_info;
+    if (g_brand_font_info_ok) return &g_brand_font_info;
+    return NULL;
+}
+
 static LunaDynGlyph* dyn_bake_glyph(int cp, int px) {
-    stbtt_fontinfo* finfo = g_cjk_font_info_ok ? &g_cjk_font_info : &g_font_info;
-    if (!g_cjk_font_info_ok && !g_font_info_ok) return NULL;
+    stbtt_fontinfo* finfo = font_for_codepoint(cp);
+    if (!finfo) return NULL;
     if (px < 8) return NULL;
     LunaDynGlyph* hit = dyn_find_glyph(cp, px);
     if (hit) return hit;
@@ -1749,7 +1886,7 @@ static int parse_length_calc(const char* val, float* out_num, int* out_pct, floa
         /* find the inner expression */
         const char* inner = buf + 5;
         /* trim trailing ) */
-        char expr[96] = {0}; strncpy(expr, inner, sizeof(expr) - 1);
+        char expr[96] = {0}; snprintf(expr, sizeof(expr), "%.*s", (int)(sizeof(expr) - 1), inner);
         int el = (int)strlen(expr);
         while (el > 0 && (expr[el-1] == ')' || isspace((unsigned char)expr[el-1]))) expr[--el] = '\0';
         /* parse: X% op Ypx */
@@ -1955,10 +2092,10 @@ static int parse_gradient_stops(const char** p_in, StyleRule* rule) {
                 color_buf[clen] = '\0';
                 trim_whitespace(color_buf);
             } else {
-                strncpy(color_buf, token, 63);
+                snprintf(color_buf, sizeof(color_buf), "%s", token);
             }
         } else {
-            strncpy(color_buf, token, 63);
+            snprintf(color_buf, sizeof(color_buf), "%s", token);
         }
 
         parse_color(color_buf,
@@ -2223,15 +2360,14 @@ static void rule_to_bg_layer(const StyleRule* rule, LunaBgLayer* layer) {
     layer->b = rule->bg_b; layer->a = rule->bg_a;
     layer->has_bg_image = rule->has_bg_image;
     if (rule->has_bg_image)
-        strncpy(layer->image_path, rule->bg_image_path, sizeof(layer->image_path) - 1);
+        snprintf(layer->image_path, sizeof(layer->image_path), "%s", rule->bg_image_path);
 }
 
 /* Split a CSS value string on top-level commas (commas inside () are not separators).
    Returns number of pieces; fills pieces[] with null-terminated strings into buf. */
 static int split_top_level_commas(const char* val, char* buf, int bufsz,
                                    char* pieces[], int max_pieces) {
-    strncpy(buf, val, (size_t)(bufsz - 1));
-    buf[bufsz - 1] = '\0';
+    snprintf(buf, bufsz, "%s", val);
     int count = 0;
     char* p = buf;
     char* start = p;
@@ -2311,7 +2447,7 @@ static void parse_background_shorthand(const char* val, StyleRule* rule) {
             char path[256];
             if (parse_url(piece, path, sizeof(path))) {
                 tmp.has_bg_image = 1;
-                strncpy(tmp.bg_image_path, path, sizeof(tmp.bg_image_path) - 1);
+                snprintf(tmp.bg_image_path, sizeof(tmp.bg_image_path), "%s", path);
             }
         } else {
             tmp.has_bg = 1;
@@ -2781,6 +2917,8 @@ int get_element_by_id(const char* id) {
 
 void set_text(int idx, const char* new_text) {
     if (idx >= 0 && idx < elem_count) {
+        if (!new_text) new_text = "";
+        if (strcmp(elements[idx].text, new_text) == 0) return;
         strncpy(elements[idx].text, new_text, sizeof(elements[idx].text) - 1);
         elements[idx].text[sizeof(elements[idx].text) - 1] = '\0';
         if (elements[idx].is_input) {
@@ -2993,7 +3131,7 @@ void add_class(LunaElement* e, const char* cls) {
 
 void remove_class(LunaElement* e, const char* cls) {
     char buf[96] = {0}, result[96] = {0};
-    strncpy(buf, e->class_name, sizeof(buf) - 1);
+    snprintf(buf, sizeof(buf), "%s", e->class_name);
     char* tok = strtok(buf, " ");
     while (tok) {
         if (strcmp(tok, cls) != 0) {
@@ -3002,7 +3140,7 @@ void remove_class(LunaElement* e, const char* cls) {
         }
         tok = strtok(NULL, " ");
     }
-    strncpy(e->class_name, result, sizeof(e->class_name) - 1);
+    snprintf(e->class_name, sizeof(e->class_name), "%s", result);
 }
 
 void set_bg(int idx, float r, float g, float b, float a) {
@@ -3068,17 +3206,19 @@ void parse_simple_selector(const char* sel_in, SimpleSelector* out) {
             while (*p && *p != '.' && *p != '#' && ti < 63) token[ti++] = *p++;
             token[ti] = 0;
             if (kind == '.') {
-                if (out->sel_class_count < MAX_SEL_CLASSES)
-                    strncpy(out->sel_classes[out->sel_class_count++], token, 63);
+                if (out->sel_class_count < MAX_SEL_CLASSES) {
+                    snprintf(out->sel_classes[out->sel_class_count], sizeof(out->sel_classes[0]), "%s", token);
+                    out->sel_class_count++;
+                }
             } else {
-                strncpy(out->sel_id, token, 63);
+                snprintf(out->sel_id, sizeof(out->sel_id), "%s", token);
             }
         } else {
             char token[32] = {0}; int ti = 0;
             while (*p && *p != '.' && *p != '#' && ti < 31) token[ti++] = *p++;
             token[ti] = 0;
             if (strcmp(token, "*") == 0) out->is_universal = 1;
-            else if (strlen(token) > 0) strncpy(out->sel_type, token, 31);
+            else if (strlen(token) > 0) snprintf(out->sel_type, sizeof(out->sel_type), "%s", token);
         }
     }
 }
@@ -3978,7 +4118,7 @@ int cmp_rules_by_specificity(const void* a, const void* b) {
 /* Parse an :nth-child() argument: odd, even, N, An+B, n, -n+B, ... */
 static void parse_nth_arg(const char* arg, int* out_a, int* out_b) {
     char buf[64] = {0};
-    strncpy(buf, arg ? arg : "", sizeof(buf) - 1);
+    snprintf(buf, sizeof(buf), "%.*s", (int)(sizeof(buf) - 1), arg ? arg : "");
     trim_whitespace(buf);
     *out_a = 0; *out_b = 0;
     if (strcasecmp(buf, "odd") == 0)  { *out_a = 2; *out_b = 1; return; }
@@ -4010,11 +4150,11 @@ static void apply_structural_pseudo(SimpleSelector* ss, const CSSSelectorPart* p
     }
     else if (strcmp(p->name, "not") == 0) {
         char buf[96] = {0};
-        strncpy(buf, p->pseudo_arg, sizeof(buf) - 1);
+        snprintf(buf, sizeof(buf), "%.*s", (int)(sizeof(buf) - 1), p->pseudo_arg);
         trim_whitespace(buf);
-        if (buf[0] == '.')      strncpy(ss->not_class, buf + 1, sizeof(ss->not_class) - 1);
-        else if (buf[0] == '#') strncpy(ss->not_id, buf + 1, sizeof(ss->not_id) - 1);
-        else if (buf[0])        strncpy(ss->not_type, buf, sizeof(ss->not_type) - 1);
+        if (buf[0] == '.')      snprintf(ss->not_class, sizeof(ss->not_class), "%.*s", (int)(sizeof(ss->not_class) - 1), buf + 1);
+        else if (buf[0] == '#') snprintf(ss->not_id, sizeof(ss->not_id), "%.*s", (int)(sizeof(ss->not_id) - 1), buf + 1);
+        else if (buf[0])        snprintf(ss->not_type, sizeof(ss->not_type), "%.*s", (int)(sizeof(ss->not_type) - 1), buf);
         if (buf[0]) ss->has_not = 1;
     }
 }
@@ -4225,9 +4365,9 @@ static void ingest_keyframes_from_sheet(const CSSStyleSheet* sheet) {
         CssKeyframe kf;
         memset(&kf, 0, sizeof(kf));
         char name[64] = {0};
-        strncpy(name, at->prelude, sizeof(name) - 1);
+        snprintf(name, sizeof(name), "%.*s", (int)(sizeof(name) - 1), at->prelude);
         trim_whitespace(name);
-        strncpy(kf.name, name, sizeof(kf.name) - 1);
+        snprintf(kf.name, sizeof(kf.name), "%s", name);
         for (int ri = 0; ri < at->nested_rule_count && kf.stop_count < MAX_KF_STOPS; ri++) {
             const CSSRule* kr = &at->nested_rules[ri];
             if (kr->selector_count == 0 || kr->selectors[0].compound_count == 0) continue;
@@ -4906,8 +5046,12 @@ static void resolve_resource_path(const char* href, char* out, size_t outsz) {
         snprintf(out, outsz, "%s", href);
         return;
     }
-    if (g_html_base_dir[0])
+    if (g_html_base_dir[0]) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
         snprintf(out, outsz, "%s/%s", g_html_base_dir, href);
+#pragma GCC diagnostic pop
+    }
     else
         snprintf(out, outsz, "%s", href);
 }
@@ -5088,7 +5232,7 @@ void parse_html(const char* html) {
                 char bcls[96] = {0};
                 char* battr = strstr(tag_buf, "class=\"");
                 if (battr) sscanf(battr + 7, "%95[^\"]", bcls);
-                strncpy(elements[bi].class_name, bcls, sizeof(elements[bi].class_name) - 1);
+                snprintf(elements[bi].class_name, sizeof(elements[bi].class_name), "%s", bcls);
                 elements[bi].id_idx = bi;
                 elements[bi].parent_idx = -1;
                 elements[bi].opacity = 1.0f;
@@ -5202,19 +5346,16 @@ void parse_html(const char* html) {
         e.aria_live = aria_live;
         e.aria_hidden = aria_hidden;
         e.aria_expanded = aria_expanded;
-        strncpy(e.aria_label, aria_label, 127);
-        e.aria_label[127] = '\0';
-        strncpy(e.role, role, 31);
-        e.role[31] = '\0';
-        strncpy(e.type, type, 31);
-        strncpy(e.class_name, class_name, 95);
-        strncpy(e.id, id, 63);
-        strncpy(e.text, text, sizeof(e.text) - 1);
-        e.text[sizeof(e.text) - 1] = '\0';
+        snprintf(e.aria_label, sizeof(e.aria_label), "%s", aria_label);
+        snprintf(e.role, sizeof(e.role), "%s", role);
+        snprintf(e.type, sizeof(e.type), "%s", type);
+        snprintf(e.class_name, sizeof(e.class_name), "%s", class_name);
+        snprintf(e.id, sizeof(e.id), "%s", id);
+        snprintf(e.text, sizeof(e.text), "%s", text);
         if (onclick_expr[0]) parse_onclick_expr(onclick_expr, e.onclick, (int)sizeof(e.onclick));
-        if (data_tab[0]) strncpy(e.data_tab, data_tab, sizeof(e.data_tab) - 1);
+        if (data_tab[0]) snprintf(e.data_tab, sizeof(e.data_tab), "%s", data_tab);
         if (style_attr[0]) {
-            strncpy(e.inline_style, style_attr, sizeof(e.inline_style) - 1);
+            snprintf(e.inline_style, sizeof(e.inline_style), "%s", style_attr);
             e.has_inline_style = 1;
         }
         e.cur_scale = 1.0f;
@@ -6832,6 +6973,7 @@ static void get_element_draw_bounds(LunaElement* e, float* out_x, float* out_y, 
 }
 
 static void apply_sticky_clip_bands(int idx, float* cx, float* cy, float* cw, float* ch) {
+    (void)cx; (void)cw;
     LunaElement* e = &elements[idx];
     if (e->position_sticky) return;
 
@@ -6919,19 +7061,31 @@ static int find_rounded_clip_ancestor(int idx) {
     return -1;
 }
 
+static int elem_is_self_or_descendant(int idx, int root) {
+    for (int i = idx; i >= 0; i = elements[i].parent_idx)
+        if (i == root) return 1;
+    return 0;
+}
+
 static void set_element_scissor(int idx, int fbw, int fbh) {
     float cx, cy, cw, ch;
     if (!get_overflow_clip_rect(idx, &cx, &cy, &cw, &ch)) return;
-    float sx = (float)fbw / window_width;
-    float sy = (float)fbh / window_height;
-    int sc_x = (int)(cx * sx + 0.5f);
-    int sc_y = (int)((window_height - cy - ch) * sy + 0.5f);
+    float res_x = LUNA_RRES_X, res_y = LUNA_RRES_Y;
+    float sx = (float)fbw / res_x;
+    float sy = (float)fbh / res_y;
+    int sc_x = (int)((cx - g_render_off_x) * sx + 0.5f);
+    int sc_y = (int)((res_y - (cy - g_render_off_y) - ch) * sy + 0.5f);
     int sc_w = (int)(cw * sx + 0.5f);
     int sc_h = (int)(ch * sy + 0.5f);
     if (sc_w < 0) sc_w = 0;
     if (sc_h < 0) sc_h = 0;
     glEnable(GL_SCISSOR_TEST);
     glScissor(sc_x, sc_y, sc_w, sc_h);
+}
+
+static int anim_near(float a, float b) {
+    float d = a - b;
+    return d > -0.002f && d < 0.002f;
 }
 
 void update_animations(double dt) {
@@ -6962,7 +7116,48 @@ void update_animations(double dt) {
         e->cur_scale += (target_scale - e->cur_scale) * factor;
         e->cur_tx += (e->transform_tx - e->cur_tx) * factor;
         e->cur_ty += (e->transform_ty - e->cur_ty) * factor;
+
+        /* Snap when close so idle frames stop marking the shell dirty. */
+        if (anim_near(e->cur_r, e->r)) e->cur_r = e->r;
+        if (anim_near(e->cur_g, e->g)) e->cur_g = e->g;
+        if (anim_near(e->cur_b, e->b)) e->cur_b = e->b;
+        if (e->a <= 0.001f) e->cur_a = 0.0f;
+        else if (anim_near(e->cur_a, e->a >= 0.999f ? 1.0f : e->a))
+            e->cur_a = e->a >= 0.999f ? 1.0f : e->a;
+        if (anim_near(e->cur_bd_r, e->bd_r)) e->cur_bd_r = e->bd_r;
+        if (anim_near(e->cur_bd_g, e->bd_g)) e->cur_bd_g = e->bd_g;
+        if (anim_near(e->cur_bd_b, e->bd_b)) e->cur_bd_b = e->bd_b;
+        if (anim_near(e->cur_bd_a, e->bd_a)) e->cur_bd_a = e->bd_a;
+        if (anim_near(e->cur_scale, target_scale)) e->cur_scale = target_scale;
+        if (anim_near(e->cur_tx, e->transform_tx)) e->cur_tx = e->transform_tx;
+        if (anim_near(e->cur_ty, e->transform_ty)) e->cur_ty = e->transform_ty;
     }
+}
+
+int luna_visuals_settling_under(int root_idx) {
+    /* Color/scale easing for interactive UI only. Elements driven by CSS
+     * @keyframes (wallpaper aurora/stars) change every frame — the shell
+     * throttles the bg surface for those instead of marking every layer dirty. */
+    for (int i = 0; i < elem_count; i++) {
+        LunaElement* e = &elements[i];
+        if (e->display_none) continue;
+        if (root_idx >= 0 && !elem_is_self_or_descendant(i, root_idx)) continue;
+        if (e->has_css_animation && e->anim_name[0]) continue;
+        float press_scale = (e->cursor_pointer && e->is_active && e->drag_mode != 1) ? 0.96f : 1.0f;
+        float target_scale = e->transform_scale * press_scale;
+        float target_a = e->a <= 0.001f ? 0.0f : (e->a >= 0.999f ? 1.0f : e->a);
+        if (!anim_near(e->cur_r, e->r) || !anim_near(e->cur_g, e->g) ||
+            !anim_near(e->cur_b, e->b) || !anim_near(e->cur_a, target_a) ||
+            !anim_near(e->cur_scale, target_scale) ||
+            !anim_near(e->cur_tx, e->transform_tx) ||
+            !anim_near(e->cur_ty, e->transform_ty))
+            return 1;
+    }
+    return 0;
+}
+
+int luna_visuals_settling(void) {
+    return luna_visuals_settling_under(-1);
 }
 
 static float css_anim_ease(int easing, float t) {
@@ -7363,6 +7558,96 @@ void init_font() {
         g_cjk_font_info_ok = stbtt_InitFont(&g_cjk_font_info, g_cjk_font_ttf, off) ? 1 : 0;
     }
 
+    /* LunaSymbols — env override, then /usr/share/fonts, then source-tree.
+     * NOTE: candidate slots may be NULL; never stop the loop on a middle NULL. */
+    {
+        const char* env_icon = getenv("LUNA_FONT_ICONS");
+        const char* icon_cands[] = {
+            env_icon && env_icon[0] ? env_icon : NULL,
+            "/usr/share/fonts/luna/LunaSymbols-Solid.otf",
+            "/usr/share/fonts/LunaSymbols-Solid.otf",
+            "/usr/local/share/fonts/luna/LunaSymbols-Solid.otf",
+            "fonts/LunaSymbols-Solid.otf",
+            "../fonts/LunaSymbols-Solid.otf",
+            "apps/luna-ui/fonts/LunaSymbols-Solid.otf",
+        };
+        long isz = 0;
+        for (size_t i = 0; i < sizeof(icon_cands) / sizeof(icon_cands[0]); i++) {
+            if (!icon_cands[i]) continue;
+            g_icon_font_ttf = read_file_bytes(icon_cands[i], &isz);
+            if (g_icon_font_ttf) {
+                fprintf(stderr, "[vespera] Symbol font loaded: %s\n", icon_cands[i]);
+                break;
+            }
+        }
+        /* Fallback: any scanned path named LunaSymbols-Solid.* */
+        if (!g_icon_font_ttf) {
+            for (int i = 0; i < reg.count; i++) {
+                const char* p = reg.paths[i];
+                char lower[1024];
+                size_t n = strlen(p);
+                if (n >= sizeof(lower)) n = sizeof(lower) - 1;
+                for (size_t k = 0; k < n; k++) lower[k] = (char)tolower((unsigned char)p[k]);
+                lower[n] = 0;
+                if (!strstr(lower, "lunasymbols-solid")) continue;
+                g_icon_font_ttf = read_file_bytes(p, &isz);
+                if (g_icon_font_ttf) {
+                    fprintf(stderr, "[vespera] Symbol font loaded: %s\n", p);
+                    break;
+                }
+            }
+        }
+        if (g_icon_font_ttf) {
+            int off = stbtt_GetFontOffsetForIndex(g_icon_font_ttf, 0);
+            if (off < 0) off = 0;
+            g_icon_font_info_ok = stbtt_InitFont(&g_icon_font_info, g_icon_font_ttf, off) ? 1 : 0;
+        } else {
+            fprintf(stderr, "[vespera] Warning: LunaSymbols-Solid.otf not found (icon glyphs unavailable)\n");
+            fprintf(stderr, "[vespera]   install: fonts/LunaSymbols-*.otf → /usr/share/fonts/luna/\n");
+        }
+
+        const char* env_brand = getenv("LUNA_FONT_BRANDS");
+        const char* brand_cands[] = {
+            env_brand && env_brand[0] ? env_brand : NULL,
+            "/usr/share/fonts/luna/LunaSymbols-Brands.otf",
+            "/usr/share/fonts/LunaSymbols-Brands.otf",
+            "/usr/local/share/fonts/luna/LunaSymbols-Brands.otf",
+            "fonts/LunaSymbols-Brands.otf",
+            "../fonts/LunaSymbols-Brands.otf",
+            "apps/luna-ui/fonts/LunaSymbols-Brands.otf",
+        };
+        long bsz = 0;
+        for (size_t i = 0; i < sizeof(brand_cands) / sizeof(brand_cands[0]); i++) {
+            if (!brand_cands[i]) continue;
+            g_brand_font_ttf = read_file_bytes(brand_cands[i], &bsz);
+            if (g_brand_font_ttf) {
+                fprintf(stderr, "[vespera] Brand font loaded: %s\n", brand_cands[i]);
+                break;
+            }
+        }
+        if (!g_brand_font_ttf) {
+            for (int i = 0; i < reg.count; i++) {
+                const char* p = reg.paths[i];
+                char lower[1024];
+                size_t n = strlen(p);
+                if (n >= sizeof(lower)) n = sizeof(lower) - 1;
+                for (size_t k = 0; k < n; k++) lower[k] = (char)tolower((unsigned char)p[k]);
+                lower[n] = 0;
+                if (!strstr(lower, "lunasymbols-brands")) continue;
+                g_brand_font_ttf = read_file_bytes(p, &bsz);
+                if (g_brand_font_ttf) {
+                    fprintf(stderr, "[vespera] Brand font loaded: %s\n", p);
+                    break;
+                }
+            }
+        }
+        if (g_brand_font_ttf) {
+            int off = stbtt_GetFontOffsetForIndex(g_brand_font_ttf, 0);
+            if (off < 0) off = 0;
+            g_brand_font_info_ok = stbtt_InitFont(&g_brand_font_info, g_brand_font_ttf, off) ? 1 : 0;
+        }
+    }
+
     unsigned char* bold_buf = try_load_font_list(&bold_list, font_path_score_ui, NULL);
     int bold_loaded = 0;
     if (bold_buf) {
@@ -7517,8 +7802,8 @@ static void draw_image(float x, float y, float w, float h, float radius, GLuint 
     float half_min = (w < h ? w : h) * 0.5f;
     if (radius > half_min) radius = half_min;
     luna_use_program(img_program);
-    glUniform2f(img_loc.uResolution, window_width, window_height);
-    glUniform2f(img_loc.uPos,  x, y);
+    glUniform2f(img_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    glUniform2f(img_loc.uPos,  x - g_render_off_x, y - g_render_off_y);
     glUniform2f(img_loc.uSize, w, h);
     glUniform1f(img_loc.uRadius, radius);
     glUniform1f(img_loc.uAlpha, alpha);
@@ -7551,8 +7836,8 @@ static void draw_bg_layer(float x, float y, float w, float h,
     if (la <= 0.0f && grad_mode == GRAD_NONE) return;
 
     luna_use_program(bg_program);
-    glUniform2f(bg_loc.uResolution, window_width, window_height);
-    glUniform2f(bg_loc.uPos,  x, y);
+    glUniform2f(bg_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    glUniform2f(bg_loc.uPos,  x - g_render_off_x, y - g_render_off_y);
     glUniform2f(bg_loc.uSize, w, h);
     glUniform4f(bg_loc.uColor, lr, lg, lb, la);
     glUniform4f(bg_loc.uBorderColor, 0,0,0,0);
@@ -7623,8 +7908,8 @@ void draw_rect_full(float x, float y, float w, float h,
     }
 
     luna_use_program(bg_program);
-    glUniform2f(bg_loc.uResolution, window_width, window_height);
-    glUniform2f(bg_loc.uPos,  x, y);
+    glUniform2f(bg_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    glUniform2f(bg_loc.uPos,  x - g_render_off_x, y - g_render_off_y);
     glUniform2f(bg_loc.uSize, w, h);
     glUniform4f(bg_loc.uColor,       r,    g,    b,    a);
     glUniform4f(bg_loc.uBorderColor, bd_r, bd_g, bd_b, bd_a);
@@ -7730,8 +8015,8 @@ static void draw_shadow(float ex, float ey, float ew, float eh,
     float off_y = 0.0f;
 
     luna_use_program(shadow_program);
-    glUniform2f(sh_loc.uResolution, window_width, window_height);
-    glUniform2f(sh_loc.uPos,  sx, sy);
+    glUniform2f(sh_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    glUniform2f(sh_loc.uPos,  sx - g_render_off_x, sy - g_render_off_y);
     glUniform2f(sh_loc.uSize, sw, sh_h);
     glUniform4f(sh_loc.uShadowColor, sh_r, sh_g, sh_b, sh_a * eff_op);
     glUniform2f(sh_loc.uElemSize, ew, eh);
@@ -7786,7 +8071,7 @@ void render_text_pass(FontAtlas* atlas, const char* text,
     }
     dyn_flush_atlas();
     luna_use_program(text_program);
-    glUniform2f(tx_loc.uResolution, window_width, window_height);
+    glUniform2f(tx_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
     glUniform4f(tx_loc.textColor,   r, g, b, a);
     if (glActiveTexture_) glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(text_vao);
@@ -7796,7 +8081,8 @@ void render_text_pass(FontAtlas* atlas, const char* text,
     int batch_count = 0;
     GLuint batch_tex = 0;
 
-    float draw_x = start_x, draw_y = baseline_y;
+    float draw_x = start_x - g_render_off_x;
+    float draw_y = baseline_y - g_render_off_y;
     const char* p = text;
     while (*p) {
         int cp = utf8_decode(&p);
@@ -8387,11 +8673,13 @@ void cursor_position_callback(void* window, double xpos, double ypos) {
 }
 
 void mouse_button_callback(void* window, int button, int action, int mods) {
-    (void)mods;
     (void)window;
     double mx = g_luna_mx, my = g_luna_my;
+    if (action == LUNA_PRESS)
+        g_luna_last_click_mods = mods;
 
     if (action == LUNA_PRESS && button == LUNA_MOUSE_BUTTON_LEFT) {
+        g_luna_last_click_button = LUNA_MOUSE_BUTTON_LEFT;
         g_drag_moved = 0;
         g_press_x = mx;
         g_press_y = my;
@@ -8462,8 +8750,10 @@ void mouse_button_callback(void* window, int button, int action, int mods) {
             if (elements[i].is_active) {
                 elements[i].is_active = 0;
                 int still_over = hit == i;
-                if (still_over && elements[i].on_click && !g_drag_moved)
+                if (still_over && elements[i].on_click && !g_drag_moved) {
+                    g_luna_last_click_button = LUNA_MOUSE_BUTTON_LEFT;
                     elements[i].on_click(&elements[i]);
+                }
                 update_element_style(&elements[i]);
             }
         }
@@ -8488,6 +8778,20 @@ void mouse_button_callback(void* window, int button, int action, int mods) {
         g_drag_mode = 0;
         g_scroll_drag_idx = -1;
         g_scroll_drag_axis = 0;
+        recompute_hover(window, mx, my);
+    } else if (action == LUNA_RELEASE && button == LUNA_MOUSE_BUTTON_RIGHT) {
+        /* Right-click: fire on_click on the hit element (or an ancestor that
+         * has a handler) so shells can open context menus. */
+        int hit = hit_test_at(mx, my);
+        g_luna_last_click_button = LUNA_MOUSE_BUTTON_RIGHT;
+        for (int i = hit; i != -1; i = elements[i].parent_idx) {
+            if (elements[i].on_click) {
+                elements[i].on_click(&elements[i]);
+                break;
+            }
+        }
+        if (g_mouse_release_hook)
+            g_mouse_release_hook(hit, 0);
         recompute_hover(window, mx, my);
     }
 }
@@ -8662,7 +8966,6 @@ static float measure_prefix_width(LunaElement* e, int byte_len) {
         const char* p = e->text;
         const char* end = e->text + byte_len;
         while (p < end && *p) { (void)utf8_decode(&p); n++; }
-        float w = 0.0f;
         int px = e->font_size > 0 ? e->font_size : 16;
         float adv = glyph_advance(atlas, (int)'*', px);
         return adv * (float)n;
@@ -8739,6 +9042,13 @@ static void key_callback(void* window, int key, int scancode, int action, int mo
             if (fn) fn(trap);
             return;
         }
+        /* ESC dismisses traps/overlays only — quit is Ctrl+Alt+Backspace. */
+        return;
+    }
+
+    /* Classic Linux graphical-session quit chord (was Xorg's Zap). */
+    if (action == LUNA_PRESS && key == LUNA_KEY_BACKSPACE &&
+        (mods & LUNA_MOD_CONTROL) && (mods & LUNA_MOD_ALT)) {
         if (g_luna_platform.request_close) g_luna_platform.request_close();
         return;
     }
@@ -8868,6 +9178,10 @@ static GLuint compile_shader(const char* src, GLenum type) {
 static void load_gl_functions() {
 #define LOAD(T, name) name = (T)g_luna_platform.get_proc(#name)
     LOAD(PFNGLCREATEVERTEXARRAYSPROC, glCreateVertexArrays);
+    /* GL 4.5 DSA fallback: glGenVertexArrays has identical signature */
+    if (!glCreateVertexArrays)
+        glCreateVertexArrays = (PFNGLCREATEVERTEXARRAYSPROC)
+            g_luna_platform.get_proc("glGenVertexArrays");
     LOAD(PFNGLDELETEVERTEXARRAYSPROC, glDeleteVertexArrays);
     LOAD(PFNGLGENBUFFERSPROC,         glGenBuffers);
     LOAD(PFNGLBINDBUFFERPROC,         glBindBuffer);
@@ -8895,7 +9209,38 @@ static void load_gl_functions() {
     glFramebufferTexture2D_  = (PFNGLFRAMEBUFFERTEXTURE2DPROC)g_luna_platform.get_proc("glFramebufferTexture2D");
     glDeleteFramebuffers_    = (PFNGLDELETEFRAMEBUFFERSPROC)g_luna_platform.get_proc("glDeleteFramebuffers");
     glCheckFramebufferStatus_ = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)g_luna_platform.get_proc("glCheckFramebufferStatus");
+
+    /* GL 1.0/1.1 core entry points.  The macros above redirect each name to a
+     * luna_p_* pointer, so `name` on the LHS resolves to the pointer while the
+     * stringized #name still passes the real GL symbol name to get_proc(). */
+    LOAD(LUNA_PFNGLVIEWPORTPROC,          glViewport);
+    LOAD(LUNA_PFNGLCLEARPROC,             glClear);
+    LOAD(LUNA_PFNGLCLEARCOLORPROC,        glClearColor);
+    LOAD(LUNA_PFNGLENABLEPROC,            glEnable);
+    LOAD(LUNA_PFNGLDISABLEPROC,           glDisable);
+    LOAD(LUNA_PFNGLBLENDFUNCPROC,         glBlendFunc);
+    LOAD(LUNA_PFNGLSCISSORPROC,           glScissor);
+    LOAD(LUNA_PFNGLDRAWARRAYSPROC,        glDrawArrays);
+    LOAD(LUNA_PFNGLGENTEXTURESPROC,       glGenTextures);
+    LOAD(LUNA_PFNGLDELETETEXTURESPROC,    glDeleteTextures);
+    LOAD(LUNA_PFNGLBINDTEXTUREPROC,       glBindTexture);
+    LOAD(LUNA_PFNGLTEXPARAMETERIPROC,     glTexParameteri);
+    LOAD(LUNA_PFNGLTEXIMAGE2DPROC,        glTexImage2D);
+    LOAD(LUNA_PFNGLTEXSUBIMAGE2DPROC,     glTexSubImage2D);
+    LOAD(LUNA_PFNGLCOPYTEXSUBIMAGE2DPROC, glCopyTexSubImage2D);
+    LOAD(LUNA_PFNGLREADPIXELSPROC,        glReadPixels);
 #undef LOAD
+
+    /* If the core entry points could not be resolved through the EGL/GLX
+     * dispatch, fail loudly here instead of letting the first draw call jump
+     * through a NULL pointer (or, worse, through libGL's un-current dispatch
+     * and crash inside the driver with a confusing backtrace). */
+    if (!luna_p_glClear || !luna_p_glViewport || !luna_p_glTexImage2D ||
+        !luna_p_glGenTextures || !luna_p_glDrawArrays) {
+        fprintf(stderr, "[luna-ui] fatal: could not resolve core GL 1.x entry points "
+                        "via get_proc(); the GL/EGL library stack is inconsistent\n");
+        return;
+    }
 }
 
 /* ── Public wrappers ── */
@@ -8960,6 +9305,8 @@ void luna_pop_focus_trap(int idx) {
 }
 
 void luna_set_mouse_release_hook(LunaMouseReleaseHook fn) { g_mouse_release_hook = fn; }
+int luna_last_click_button(void) { return g_luna_last_click_button; }
+int luna_last_click_mods(void) { return g_luna_last_click_mods; }
 void luna_resize(float w, float h) {
     if (w == luna_window_width && h == luna_window_height) return;
     luna_window_width = w; luna_window_height = h; g_layout_dirty = 1; g_render_order_dirty = 1;
@@ -9070,7 +9417,7 @@ static void apply_backdrop_blur(float ex, float ey, float ew, float eh,
     glViewport(0, 0, fbw, fbh);
     luna_use_program(blur_program);
     glUniform2f(blur_loc.uResolution, tw, th);
-    glUniform2f(blur_loc.uPos,  ex, ey);
+    glUniform2f(blur_loc.uPos,  ex - g_render_off_x, ey - g_render_off_y);
     glUniform2f(blur_loc.uSize, ew, eh);
     if (glActiveTexture_) glActiveTexture_(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_blur_tex[0]);
@@ -9078,7 +9425,7 @@ static void apply_backdrop_blur(float ex, float ey, float ew, float eh,
     glUniform2f(blur_loc.uBlurDir, 1.0f / tw, 0.0f);
     glUniform1f(blur_loc.uBlurRadius, blur_radius);
     glUniform2f(blur_loc.uBlurTexSize, tw, th);
-    glUniform2f(blur_loc.uBlurOrigin, ex, ey);
+    glUniform2f(blur_loc.uBlurOrigin, ex - g_render_off_x, ey - g_render_off_y);
     glBindVertexArray(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
@@ -9107,15 +9454,15 @@ static void apply_backdrop_blur(float ex, float ey, float ew, float eh,
         }
     }
     luna_use_program(backdrop_program);
-    glUniform2f(backdrop_loc.uResolution, window_width, window_height);
-    glUniform2f(backdrop_loc.uPos,  ex, ey);
+    glUniform2f(backdrop_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    glUniform2f(backdrop_loc.uPos,  ex - g_render_off_x, ey - g_render_off_y);
     glUniform2f(backdrop_loc.uSize, ew, eh);
     glUniform4f(backdrop_loc.uRadius4, c4[0], c4[1], c4[2], c4[3]);
     if (glActiveTexture_) glActiveTexture_(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_blur_tex[0]);
     glUniform1i_(backdrop_loc.uSrc, 0);
     glUniform2f(backdrop_loc.uBlurTexSize, tw, th);
-    glUniform2f(backdrop_loc.uBlurOrigin, ex, ey);
+    glUniform2f(backdrop_loc.uBlurOrigin, ex - g_render_off_x, ey - g_render_off_y);
     glBindVertexArray(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -9136,14 +9483,14 @@ void luna_render(int fbw, int fbh) {
         int i = render_order[ri];
         LunaElement* e = &elements[i];
         if (!is_rendered(i)) continue;
+        if (g_render_root >= 0 && !elem_is_self_or_descendant(i, g_render_root)) continue;
         float eff_op = element_effective_opacity(i);
         if (eff_op <= 0.004f) continue;
         float dx, dy, dw, dh;
         get_element_draw_bounds(e, &dx, &dy, &dw, &dh);
         if (dw <= 0.0f || dh <= 0.0f) continue;
         float scale = e->cur_scale;
-        /* Viewport culling: skip elements fully off-screen (pad covers the
-           blurred shadow halo, which can extend past the element rect). */
+        /* Viewport culling: skip elements fully off the surface region. */
         {
             float pad = 4.0f;
             if (e->has_shadow) {
@@ -9154,8 +9501,9 @@ void luna_render(int fbw, int fbh) {
                     if (ext > pad) pad = ext;
                 }
             }
-            if (dx - pad > window_width || dy - pad > window_height ||
-                dx + dw + pad < 0.0f || dy + dh + pad < 0.0f)
+            float sdx = dx - g_render_off_x, sdy = dy - g_render_off_y;
+            if (sdx - pad > LUNA_RRES_X || sdy - pad > LUNA_RRES_Y ||
+                sdx + dw + pad < 0.0f || sdy + dh + pad < 0.0f)
                 continue;
         }
         /* Set smooth rounded-clip via bg_fs shader for nearest overflow-hidden ancestor. */
@@ -9187,8 +9535,12 @@ void luna_render(int fbw, int fbh) {
             }
         }
         set_element_scissor(i, fbw, fbh);
-        /* backdrop-filter: blur() — capture + blur the region under this element */
-        if (e->has_backdrop_blur && e->backdrop_blur_radius > 0.0f && !e->position_sticky) {
+        /* backdrop-filter: blur() — capture + blur the region under this element.
+         * Skip on region/layer-surface renders: the FBO only holds this chrome
+         * layer (cleared transparent), so CopyTexSubImage feeds the previous
+         * menubar/dock frame back into itself → shimmer every swap. */
+        if (e->has_backdrop_blur && e->backdrop_blur_radius > 0.0f &&
+            !e->position_sticky && g_render_root < 0) {
             glDisable(GL_SCISSOR_TEST);
             apply_backdrop_blur(dx, dy, dw, dh, e->backdrop_blur_radius, rad4, fbw, fbh);
             set_element_scissor(i, fbw, fbh);
@@ -9527,6 +9879,22 @@ int luna_init(const LunaInitConfig* cfg) {
     return 1;
 }
 void luna_shutdown(void) {}
+
+void luna_render_region(int root_idx, int fbw, int fbh,
+                        float origin_x, float origin_y,
+                        float region_w, float region_h) {
+    g_render_root  = root_idx;
+    g_render_off_x = origin_x;
+    g_render_off_y = origin_y;
+    g_render_res_x = region_w;
+    g_render_res_y = region_h;
+    luna_render(fbw, fbh);
+    g_render_root  = -1;
+    g_render_off_x = 0.0f;
+    g_render_off_y = 0.0f;
+    g_render_res_x = 0.0f;
+    g_render_res_y = 0.0f;
+}
 
 #endif /* LUNA_UI_IMPLEMENTATION */
 #ifdef __cplusplus

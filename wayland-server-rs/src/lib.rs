@@ -9,6 +9,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 #[cfg(not(target_arch = "wasm32"))]
+mod cursor_aero;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod input;
 pub mod object;
 pub mod protocol;

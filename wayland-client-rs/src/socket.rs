@@ -42,10 +42,16 @@ impl WaylandSocket {
                 &wayland_env
             }
         };
-        let runtime_dir = env::var("XDG_RUNTIME_DIR")
-            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR not set"))?;
-
-        let path = format!("{}/{}", runtime_dir, name);
+        // Absolute paths are used as-is (Firefox spawns a wayland-proxy and
+        // reconnects with `$XDG_RUNTIME_DIR/wayland-proxy-<pid>`). Relative
+        // names are resolved under XDG_RUNTIME_DIR — same as libwayland.
+        let path = if name.starts_with('/') {
+            name.to_string()
+        } else {
+            let runtime_dir = env::var("XDG_RUNTIME_DIR")
+                .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR not set"))?;
+            format!("{}/{}", runtime_dir, name)
+        };
         let path_c = CString::new(path.as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid path"))?;
         let bytes = path_c.as_bytes_with_nul();
@@ -65,7 +71,6 @@ impl WaylandSocket {
             close(raw_fd);
             if high < 0 { raw_fd } else { high }
         };
-        eprintln!("[wl-socket] connected fd={}", fd);
 
         let mut addr: sockaddr_un = unsafe { std::mem::zeroed() };
         addr.sun_family = AF_UNIX as _;
@@ -81,10 +86,12 @@ impl WaylandSocket {
                 std::mem::size_of_val(&addr) as _,
             );
             if ret < 0 {
+                let e = io::Error::last_os_error();
                 close(fd);
-                return Err(io::Error::last_os_error());
+                return Err(e);
             }
         }
+        eprintln!("[wl-socket] connected fd={} path={}", fd, path);
 
         Ok(WaylandSocket {
             fd,
@@ -233,8 +240,28 @@ impl WaylandSocket {
         loop {
             let n = self.recv()?;
             if n > 0 { return Ok(n); }
-            // WouldBlock: sleep and retry.
-            unsafe { libc::usleep(1000); }
+            // WouldBlock: block on the fd until it becomes readable instead of
+            // busy-polling with a fixed sleep. poll() wakes the instant the
+            // compositor writes, so input/frame events are dispatched with no
+            // added latency (the old usleep(1000) added up to 1ms per event and
+            // spun the CPU — the cause of "mossari" pointer/click handling).
+            let mut pfd = libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ret = unsafe { libc::poll(&mut pfd, 1, -1) };
+            if ret < 0 {
+                let e = io::Error::last_os_error();
+                // Retry on EINTR; propagate anything else.
+                if e.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "compositor connection closed"));
+            }
         }
     }
 }

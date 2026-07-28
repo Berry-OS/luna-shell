@@ -450,14 +450,196 @@ pub static wp_viewport_interface:             WlInterface = WlInterface { name: 
 pub static wp_viewporter_interface:           WlInterface = WlInterface { name: c_str!("wp_viewporter"),           version: 1, method_count: 0, methods: std::ptr::null(), event_count: 0, events: std::ptr::null() };
 #[no_mangle]
 pub static zwp_linux_dmabuf_v1_interface:     WlInterface = WlInterface { name: c_str!("zwp_linux_dmabuf_v1"),     version: 4, method_count: 0, methods: std::ptr::null(), event_count: 0, events: std::ptr::null() };
+
+/* ── wl_data_device family (clipboard). Empty stubs here made GTK Ctrl+C/V
+ * and luna-clipboard silently no-op under the vendored libwayland-client. ── */
+
+static WL_DATA_OFFER_REQUESTS: [wl_message; 5] = [
+    wl_message { name: c_str!("accept"),      signature: c_str!("u?s"),  types: std::ptr::null() },
+    wl_message { name: c_str!("receive"),     signature: c_str!("sh"),   types: std::ptr::null() },
+    wl_message { name: c_str!("destroy"),     signature: c_str!(""),     types: std::ptr::null() },
+    wl_message { name: c_str!("finish"),      signature: c_str!("3"),    types: std::ptr::null() },
+    wl_message { name: c_str!("set_actions"), signature: c_str!("3uu"),  types: std::ptr::null() },
+];
+static WL_DATA_OFFER_EVENTS: [wl_message; 3] = [
+    wl_message { name: c_str!("offer"),          signature: c_str!("s"),  types: std::ptr::null() },
+    wl_message { name: c_str!("source_actions"), signature: c_str!("3u"), types: std::ptr::null() },
+    wl_message { name: c_str!("action"),         signature: c_str!("3u"), types: std::ptr::null() },
+];
+
 #[no_mangle]
-pub static wl_data_device_manager_interface:  WlInterface = WlInterface { name: c_str!("wl_data_device_manager"), version: 3, method_count: 0, methods: std::ptr::null(), event_count: 0, events: std::ptr::null() };
+pub static wl_data_offer_interface: WlInterface = WlInterface {
+    name: c_str!("wl_data_offer"),
+    version: 3,
+    method_count: 5,
+    methods: WL_DATA_OFFER_REQUESTS.as_ptr(),
+    event_count: 3,
+    events: WL_DATA_OFFER_EVENTS.as_ptr(),
+};
+
+static WL_DATA_SOURCE_REQUESTS: [wl_message; 3] = [
+    wl_message { name: c_str!("offer"),       signature: c_str!("s"),  types: std::ptr::null() },
+    wl_message { name: c_str!("destroy"),     signature: c_str!(""),   types: std::ptr::null() },
+    wl_message { name: c_str!("set_actions"), signature: c_str!("3u"), types: std::ptr::null() },
+];
+static WL_DATA_SOURCE_EVENTS: [wl_message; 6] = [
+    wl_message { name: c_str!("target"),             signature: c_str!("?s"), types: std::ptr::null() },
+    wl_message { name: c_str!("send"),               signature: c_str!("sh"), types: std::ptr::null() },
+    wl_message { name: c_str!("cancelled"),          signature: c_str!(""),   types: std::ptr::null() },
+    wl_message { name: c_str!("dnd_drop_performed"), signature: c_str!("3"),  types: std::ptr::null() },
+    wl_message { name: c_str!("dnd_finished"),       signature: c_str!("3"),  types: std::ptr::null() },
+    wl_message { name: c_str!("action"),             signature: c_str!("3u"), types: std::ptr::null() },
+];
+
 #[no_mangle]
-pub static wl_data_device_interface:          WlInterface = WlInterface { name: c_str!("wl_data_device"),         version: 3, method_count: 0, methods: std::ptr::null(), event_count: 0, events: std::ptr::null() };
+pub static wl_data_source_interface: WlInterface = WlInterface {
+    name: c_str!("wl_data_source"),
+    version: 3,
+    method_count: 3,
+    methods: WL_DATA_SOURCE_REQUESTS.as_ptr(),
+    event_count: 6,
+    events: WL_DATA_SOURCE_EVENTS.as_ptr(),
+};
+
+static WL_DATA_DEVICE_DATA_OFFER_TYPES: Spa<1> = Spa([&wl_data_offer_interface as *const _]);
+static WL_DATA_DEVICE_EVENTS: [wl_message; 6] = [
+    wl_message { name: c_str!("data_offer"), signature: c_str!("n"),      types: WL_DATA_DEVICE_DATA_OFFER_TYPES.ptr() },
+    wl_message { name: c_str!("enter"),      signature: c_str!("uoff?o"), types: std::ptr::null() },
+    wl_message { name: c_str!("leave"),      signature: c_str!(""),       types: std::ptr::null() },
+    wl_message { name: c_str!("motion"),     signature: c_str!("uff"),    types: std::ptr::null() },
+    wl_message { name: c_str!("drop"),       signature: c_str!(""),       types: std::ptr::null() },
+    wl_message { name: c_str!("selection"),  signature: c_str!("?o"),     types: std::ptr::null() },
+];
+static WL_DATA_DEVICE_REQUESTS: [wl_message; 3] = [
+    wl_message { name: c_str!("start_drag"),    signature: c_str!("?oo?ou"), types: std::ptr::null() },
+    wl_message { name: c_str!("set_selection"), signature: c_str!("?ou"),    types: std::ptr::null() },
+    wl_message { name: c_str!("release"),       signature: c_str!("2"),      types: std::ptr::null() },
+];
+
 #[no_mangle]
-pub static wl_data_source_interface:          WlInterface = WlInterface { name: c_str!("wl_data_source"),         version: 3, method_count: 0, methods: std::ptr::null(), event_count: 0, events: std::ptr::null() };
+pub static wl_data_device_interface: WlInterface = WlInterface {
+    name: c_str!("wl_data_device"),
+    version: 3,
+    method_count: 3,
+    methods: WL_DATA_DEVICE_REQUESTS.as_ptr(),
+    event_count: 6,
+    events: WL_DATA_DEVICE_EVENTS.as_ptr(),
+};
+
+static WL_DDM_CREATE_SOURCE_TYPES: Spa<1> = Spa([&wl_data_source_interface as *const _]);
+static WL_DDM_GET_DEVICE_TYPES: Spa<2> = Spa([
+    &wl_data_device_interface as *const _,
+    &wl_seat_interface as *const _,
+]);
+static WL_DATA_DEVICE_MANAGER_REQUESTS: [wl_message; 2] = [
+    wl_message { name: c_str!("create_data_source"), signature: c_str!("n"),  types: WL_DDM_CREATE_SOURCE_TYPES.ptr() },
+    wl_message { name: c_str!("get_data_device"),    signature: c_str!("no"), types: WL_DDM_GET_DEVICE_TYPES.ptr() },
+];
+
 #[no_mangle]
-pub static wl_data_offer_interface:           WlInterface = WlInterface { name: c_str!("wl_data_offer"),          version: 3, method_count: 0, methods: std::ptr::null(), event_count: 0, events: std::ptr::null() };
+pub static wl_data_device_manager_interface: WlInterface = WlInterface {
+    name: c_str!("wl_data_device_manager"),
+    version: 3,
+    method_count: 2,
+    methods: WL_DATA_DEVICE_MANAGER_REQUESTS.as_ptr(),
+    event_count: 0,
+    events: std::ptr::null(),
+};
+
+/* ── zwp_primary_selection (middle-click paste). Without types[] on
+ * data_offer, GTK receives the raw server id 0xff000000 and segfaults. ── */
+
+static ZWP_PRIMARY_OFFER_REQUESTS: [wl_message; 2] = [
+    wl_message { name: c_str!("receive"), signature: c_str!("sh"), types: std::ptr::null() },
+    wl_message { name: c_str!("destroy"), signature: c_str!(""),   types: std::ptr::null() },
+];
+static ZWP_PRIMARY_OFFER_EVENTS: [wl_message; 1] = [
+    wl_message { name: c_str!("offer"), signature: c_str!("s"), types: std::ptr::null() },
+];
+
+#[no_mangle]
+pub static zwp_primary_selection_offer_v1_interface: WlInterface = WlInterface {
+    name: c_str!("zwp_primary_selection_offer_v1"),
+    version: 1,
+    method_count: 2,
+    methods: ZWP_PRIMARY_OFFER_REQUESTS.as_ptr(),
+    event_count: 1,
+    events: ZWP_PRIMARY_OFFER_EVENTS.as_ptr(),
+};
+
+static ZWP_PRIMARY_SOURCE_REQUESTS: [wl_message; 2] = [
+    wl_message { name: c_str!("offer"),   signature: c_str!("s"), types: std::ptr::null() },
+    wl_message { name: c_str!("destroy"), signature: c_str!(""),  types: std::ptr::null() },
+];
+static ZWP_PRIMARY_SOURCE_EVENTS: [wl_message; 2] = [
+    wl_message { name: c_str!("send"),      signature: c_str!("sh"), types: std::ptr::null() },
+    wl_message { name: c_str!("cancelled"), signature: c_str!(""),   types: std::ptr::null() },
+];
+
+#[no_mangle]
+pub static zwp_primary_selection_source_v1_interface: WlInterface = WlInterface {
+    name: c_str!("zwp_primary_selection_source_v1"),
+    version: 1,
+    method_count: 2,
+    methods: ZWP_PRIMARY_SOURCE_REQUESTS.as_ptr(),
+    event_count: 2,
+    events: ZWP_PRIMARY_SOURCE_EVENTS.as_ptr(),
+};
+
+static ZWP_PRIMARY_DEVICE_DATA_OFFER_TYPES: Spa<1> =
+    Spa([&zwp_primary_selection_offer_v1_interface as *const _]);
+static ZWP_PRIMARY_DEVICE_EVENTS: [wl_message; 2] = [
+    wl_message {
+        name: c_str!("data_offer"),
+        signature: c_str!("n"),
+        types: ZWP_PRIMARY_DEVICE_DATA_OFFER_TYPES.ptr(),
+    },
+    wl_message { name: c_str!("selection"), signature: c_str!("?o"), types: std::ptr::null() },
+];
+static ZWP_PRIMARY_DEVICE_REQUESTS: [wl_message; 2] = [
+    wl_message { name: c_str!("set_selection"), signature: c_str!("?ou"), types: std::ptr::null() },
+    wl_message { name: c_str!("destroy"),       signature: c_str!(""),    types: std::ptr::null() },
+];
+
+#[no_mangle]
+pub static zwp_primary_selection_device_v1_interface: WlInterface = WlInterface {
+    name: c_str!("zwp_primary_selection_device_v1"),
+    version: 1,
+    method_count: 2,
+    methods: ZWP_PRIMARY_DEVICE_REQUESTS.as_ptr(),
+    event_count: 2,
+    events: ZWP_PRIMARY_DEVICE_EVENTS.as_ptr(),
+};
+
+static ZWP_PRIMARY_MGR_CREATE_TYPES: Spa<1> =
+    Spa([&zwp_primary_selection_source_v1_interface as *const _]);
+static ZWP_PRIMARY_MGR_GET_TYPES: Spa<2> = Spa([
+    &zwp_primary_selection_device_v1_interface as *const _,
+    &wl_seat_interface as *const _,
+]);
+static ZWP_PRIMARY_MGR_REQUESTS: [wl_message; 3] = [
+    wl_message {
+        name: c_str!("create_source"),
+        signature: c_str!("n"),
+        types: ZWP_PRIMARY_MGR_CREATE_TYPES.ptr(),
+    },
+    wl_message {
+        name: c_str!("get_device"),
+        signature: c_str!("no"),
+        types: ZWP_PRIMARY_MGR_GET_TYPES.ptr(),
+    },
+    wl_message { name: c_str!("destroy"), signature: c_str!(""), types: std::ptr::null() },
+];
+
+#[no_mangle]
+pub static zwp_primary_selection_device_manager_v1_interface: WlInterface = WlInterface {
+    name: c_str!("zwp_primary_selection_device_manager_v1"),
+    version: 1,
+    method_count: 3,
+    methods: ZWP_PRIMARY_MGR_REQUESTS.as_ptr(),
+    event_count: 0,
+    events: std::ptr::null(),
+};
 
 // wl_shell stub: deprecated but referenced by libgstgl
 #[no_mangle]

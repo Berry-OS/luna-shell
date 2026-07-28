@@ -262,7 +262,8 @@ fn input_loop(tx: SyncSender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, reques
 
 fn handle_key(code: u16, value: i32, pressed: &mut HashMap<u16, u32>, consumed_fn: &mut HashSet<u16>, tx: &SyncSender<InputEvent>, wake_fd: RawFd) {
   if value == 2 {
-    return; // Wayland repeat_info is disabled.
+    // Kernel auto-repeat.  Clients synthesize repeats from wl_keyboard.repeat_info.
+    return;
   }
   let down = value != 0;
   let old_count = pressed.get(&code).copied().unwrap_or(0);
