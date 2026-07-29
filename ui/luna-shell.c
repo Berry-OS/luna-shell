@@ -877,6 +877,13 @@ static void position_menu_at(int menu_idx, float x, float y) {
     m->pct_top = 0;
     m->has_left = 1;
     m->has_top = 1;
+    /* A CSS right/bottom inset belongs to the stylesheet's default position.
+     * Once the shell takes ownership of a popup position, leave a single
+     * unambiguous pair of insets.  In particular, clip_menu has `right` in
+     * CSS; retaining it here made the next layout pass choose a different
+     * horizontal anchor from the frame that opened the menu. */
+    m->has_right = 0;
+    m->has_bottom = 0;
     m->raw_left = m->rel_x;
     m->raw_top = m->rel_y;
     luna_mark_layout_dirty();
@@ -1033,6 +1040,17 @@ static void wire_subtree(int root, LunaEventHandler fn) {
 static void center_element(int idx) {
     if (idx < 0) return;
     LunaElement* e = luna_element_at(idx);
+    /* The sheet's offsets are relative to its containing overlay.  Using the
+     * overlay's resolved size keeps centring correct after a compositor resize
+     * and for non-fullscreen modal hosts, rather than relying on bootstrap
+     * window dimensions. */
+    float host_w = luna_window_width;
+    float host_h = luna_window_height;
+    if (e->parent_idx >= 0) {
+        LunaElement* host = luna_element_at(e->parent_idx);
+        if (host && host->w > 1.0f) host_w = host->w;
+        if (host && host->h > 1.0f) host_h = host->h;
+    }
     float w = e->css_width > 0 ? e->css_width : (e->w > 0 ? e->w : e->raw_w);
     float h = e->css_height > 0 ? e->css_height : (e->h > 0 ? e->h : e->raw_h);
     if (w <= 1.0f && e->has_css_width) w = e->css_width;
@@ -1040,10 +1058,17 @@ static void center_element(int idx) {
     /* Fall back to known dialog sizes when layout hasn't resolved yet. */
     if (w <= 1.0f) w = 360.0f;
     if (h <= 1.0f) h = 240.0f;
-    e->rel_x = floorf((luna_window_width  - w) * 0.5f);
-    e->rel_y = floorf((luna_window_height - h) * 0.42f);
+    /* Center in the same viewport coordinate system used by a dragged sheet.
+     * Use a slightly elevated optical center, but never allow a sheet to
+     * start outside the usable desktop. */
+    e->rel_x = floorf((host_w - w) * 0.5f);
+    e->rel_y = floorf((host_h - h) * 0.42f);
     if (e->rel_x < 12.0f) e->rel_x = 12.0f;
     if (e->rel_y < 36.0f) e->rel_y = 36.0f;
+    if (e->rel_x + w > host_w - 12.0f)
+        e->rel_x = fmaxf(12.0f, host_w - w - 12.0f);
+    if (e->rel_y + h > host_h - 12.0f)
+        e->rel_y = fmaxf(36.0f, host_h - h - 12.0f);
     e->pos_overridden_x = 1;
     e->pos_overridden_y = 1;
     e->pct_left = 0;
@@ -1062,13 +1087,14 @@ static void position_menu_near(int menu_idx, int anchor_idx, float fallback_x) {
     LunaElement* m = luna_element_at(menu_idx);
     float x = fallback_x;
     float y = 32.0f;
+    float mw = m->css_width > 1.0f ? m->css_width :
+               (m->w > 1.0f ? m->w : 240.0f);
     if (anchor_idx >= 0) {
         LunaElement* a = luna_element_at(anchor_idx);
         x = a->x;
         y = a->y + a->h + 4.0f;
         if (y < 32.0f) y = 32.0f;
     }
-    float mw = m->w > 1.0f ? m->w : (m->css_width > 1.0f ? m->css_width : 240.0f);
     if (x + mw > luna_window_width - 8.0f)
         x = luna_window_width - mw - 8.0f;
     if (x < 6.0f) x = 6.0f;
@@ -1080,6 +1106,30 @@ static void position_menu_near(int menu_idx, int anchor_idx, float fallback_x) {
     m->pct_top = 0;
     m->has_left = 1;
     m->has_top = 1;
+    m->has_right = 0;
+    m->has_bottom = 0;
+    m->raw_left = m->rel_x;
+    m->raw_top = m->rel_y;
+    luna_mark_layout_dirty();
+}
+
+/* The control center has a fixed visual width.  Position it from the right
+ * edge explicitly instead of relying on the CSS right inset: this also keeps
+ * Wi-Fi and Control Center clicks opening the same, correctly aligned panel. */
+static void position_control_center(void) {
+    if (g_cc_idx < 0) return;
+    LunaElement* m = luna_element_at(g_cc_idx);
+    float w = m->css_width > 1.0f ? m->css_width : (m->w > 1.0f ? m->w : 324.0f);
+    m->rel_x = floorf(luna_window_width - w - 8.0f);
+    m->rel_y = 36.0f;
+    if (m->rel_x < 6.0f) m->rel_x = 6.0f;
+    m->pos_overridden_x = 1;
+    m->pos_overridden_y = 1;
+    m->has_left = 1;
+    m->has_top = 1;
+    m->has_right = 0;
+    m->pct_left = 0;
+    m->pct_top = 0;
     m->raw_left = m->rel_x;
     m->raw_top = m->rel_y;
     luna_mark_layout_dirty();
@@ -1346,7 +1396,8 @@ static int helper_comm_running(const char* name) {
         if (ent->d_name[0] < '1' || ent->d_name[0] > '9') continue;
         (void)strtoul(ent->d_name, &end, 10);
         if (!end || *end) continue;
-        char path[96], comm[64];
+        /* d_name can be up to NAME_MAX bytes; leave room for /proc//comm. */
+        char path[320], comm[64];
         snprintf(path, sizeof(path), "/proc/%s/comm", ent->d_name);
         FILE* f = fopen(path, "r");
         if (!f) continue;
@@ -1556,6 +1607,7 @@ static void on_control_center(LunaElement* e) {
     dismiss_clip_menu();
     if (is_shown(g_cc_idx)) { dismiss_cc(g_cc_idx); return; }
     set_hidden(g_cc_idx, 0);
+    position_control_center();
 }
 
 static void launchpad_close(void) {
@@ -2710,12 +2762,30 @@ static void update_stats(void) {
     idx = luna_get_element_by_id("mb_bat");
     {
         int bat = read_battery_percent();
-        if (bat >= 0) snprintf(buf, sizeof(buf), "\uf240 %d%%", bat); /* battery-full */
-        else snprintf(buf, sizeof(buf), "\uf1e6 AC");                 /* plug */
+        const char* icon = bat >= 0 ? "\uf240" : "\uf1e6";
+        if (bat >= 0) snprintf(buf, sizeof(buf), "%d%%", bat);
+        else snprintf(buf, sizeof(buf), "AC");
+        /* Keep icon and label in their browser-equivalent DOM nodes.  Packing
+           both into mb_bat duplicates the child glyph and defeats flex's
+           anonymous text-item layout. */
+        for (int i = 0; i < luna_element_count(); i++) {
+            LunaElement* e = luna_element_at(i);
+            if (e->parent_idx == idx && strstr(e->class_name, "luna_icon")) {
+                luna_set_text(i, icon);
+                break;
+            }
+        }
         if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_mb = 1; }
     }
     idx = luna_get_element_by_id("mb_wifi");
-    snprintf(buf, sizeof(buf), "\uf1eb %s", read_net_status());   /* wifi */
+    snprintf(buf, sizeof(buf), "%s", read_net_status());
+    for (int i = 0; i < luna_element_count(); i++) {
+        LunaElement* e = luna_element_at(i);
+        if (e->parent_idx == idx && strstr(e->class_name, "luna_icon")) {
+            luna_set_text(i, "\uf1eb");
+            break;
+        }
+    }
     if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_mb = 1; }
 
     if (dirty_mb) shell_request_repaint(1); /* menubar */
@@ -2816,6 +2886,33 @@ static void bind_indices(void) {
     g_mb_logo_idx       = luna_get_element_by_id("mb_logo");
     g_mb_cc_idx         = luna_get_element_by_id("mb_cc");
     g_mb_wifi_idx       = luna_get_element_by_id("mb_wifi");
+
+    /* The redesigned markup keeps the about box's visual class but no longer
+     * includes sheet_box.  The shared class supplies its absolute positioning,
+     * stacking and clipping, all of which the C-side centering code relies on. */
+    if (g_about_box_idx >= 0) {
+        luna_add_class(g_about_box_idx, "sheet_box");
+        luna_update_element_style(g_about_box_idx);
+    }
+
+    /* Drag handles used to advertise draggable="1" in the markup.  Keep this
+     * behavior in the shell so presentation-only HTML changes cannot disable
+     * moving either sheet. */
+    {
+        const char* drag_ids[] = { "about_drag", "settings_drag", "confirm_drag" };
+        for (size_t i = 0; i < sizeof(drag_ids) / sizeof(drag_ids[0]); i++) {
+            int idx = luna_get_element_by_id(drag_ids[i]);
+            if (idx < 0) continue;
+            LunaElement* drag = luna_element_at(idx);
+            drag->is_draggable = 1;
+            drag->drag_mode = 1; /* move the containing sheet */
+            /* The handles overlap the title/content boundary.  Keep them
+             * above the body in the native hit-test order; CSS-only stacking
+             * is too late for a press received during a relayout.  Traffic
+             * light controls use z-index 20, so they remain clickable. */
+            drag->z_index = 10;
+        }
+    }
     g_mb_clip_idx       = luna_get_element_by_id("mb_clip");
 
     /* Wire dock items */
@@ -2828,6 +2925,14 @@ static void bind_indices(void) {
         app_set_dot(&g_apps[i], 0);
     }
     wire_subtree(luna_get_element_by_id("mb_logo"),       on_luna_menu);
+    wire_subtree(luna_get_element_by_id("mb_wifi"),       on_control_center);
+    wire_subtree(luna_get_element_by_id("mb_cc"),         on_control_center);
+    wire_subtree(luna_get_element_by_id("mi_about"),      on_about);
+    wire_subtree(luna_get_element_by_id("mi_settings"),   on_settings_open);
+    wire_subtree(luna_get_element_by_id("mi_launchpad"),  on_launchpad_open);
+    wire_subtree(luna_get_element_by_id("mi_restart"),    on_restart);
+    wire_subtree(luna_get_element_by_id("mi_shutdown"),   on_shutdown);
+    wire_subtree(luna_get_element_by_id("mi_logout"),     on_logout);
     wire_subtree(luna_get_element_by_id("dock_launchpad"),on_launchpad_open);
     wire_subtree(luna_get_element_by_id("dock_trash"),    on_trash);
     wire_subtree(luna_get_element_by_id("toast_close"),   on_toast_close);
@@ -2866,6 +2971,12 @@ static void bind_indices(void) {
         wire_subtree(g_tray_slot_idx[i], on_tray_click);
     }
 
+    /* Do not expose the static HTML preview chips while the first compositor
+     * snapshot is still pending.  poll_shell_state() replaces these with the
+     * actual window and tray entries on its first successful read. */
+    update_window_list_ui();
+    update_tray_ui();
+
     /* Wire settings tab buttons */
     wire_subtree(g_stab_apps_idx, on_settings_tab);
     wire_subtree(g_stab_disp_idx, on_settings_tab);
@@ -2889,6 +3000,15 @@ static void bind_indices(void) {
     wire_subtree(luna_get_element_by_id("tl_max"), on_about_max);
     wire_subtree(luna_get_element_by_id("stl_min"), on_settings_min);
     wire_subtree(luna_get_element_by_id("stl_max"), on_settings_max);
+    wire_subtree(luna_get_element_by_id("tl_close"), on_about_close);
+    wire_subtree(luna_get_element_by_id("about_backdrop"), on_about_close);
+    wire_subtree(luna_get_element_by_id("stl_close"), on_settings_close);
+    wire_subtree(luna_get_element_by_id("settings_backdrop"), on_settings_close);
+    wire_subtree(luna_get_element_by_id("settings_cancel"), on_settings_close);
+    wire_subtree(luna_get_element_by_id("settings_ok"), on_settings_save);
+    wire_subtree(luna_get_element_by_id("confirm_backdrop"), on_confirm_cancel);
+    wire_subtree(luna_get_element_by_id("confirm_cancel"), on_confirm_cancel);
+    wire_subtree(luna_get_element_by_id("confirm_ok"), on_confirm_ok);
 
     /* Cache dock geometry for magnification: the dock root and every icon
      * square (.dock_icon, excluding the .dock_dot running indicators). */
@@ -3565,19 +3685,35 @@ static void kms_page_flip_handler(int fd, unsigned int frame, unsigned int sec, 
 }
 
 static void kms_swap_buffers(void) {
-    eglSwapBuffers(g_kms.dpy, g_kms.surf);
+    if (!eglSwapBuffers(g_kms.dpy, g_kms.surf)) {
+        fprintf(stderr, "[luna-shell/kms] eglSwapBuffers failed (EGL 0x%x)\n",
+                eglGetError());
+        return;
+    }
     struct gbm_bo* bo = gbm_surface_lock_front_buffer(g_kms.gbm_surf);
     if (!bo) return;
     uint32_t fb_id = kms_fb_for_bo(bo);
+    if (!fb_id) {
+        gbm_surface_release_buffer(g_kms.gbm_surf, bo);
+        return;
+    }
 
     if (!g_kms.prev_bo) {
         /* First frame: set the mode directly instead of page-flipping. */
-        drmModeSetCrtc(g_kms.fd, g_kms.crtc_id, fb_id, 0, 0, &g_kms.conn_id, 1, &g_kms.mode);
+        if (drmModeSetCrtc(g_kms.fd, g_kms.crtc_id, fb_id, 0, 0,
+                           &g_kms.conn_id, 1, &g_kms.mode) != 0) {
+            fprintf(stderr, "[luna-shell/kms] initial modeset failed: %s\n",
+                    strerror(errno));
+            gbm_surface_release_buffer(g_kms.gbm_surf, bo);
+            return;
+        }
         /* Cursor plane needs an active CRTC — enable after the first modeset. */
         kms_cursor_show();
     } else {
         g_kms.flip_pending = 1;
-        if (drmModePageFlip(g_kms.fd, g_kms.crtc_id, fb_id, DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0) {
+        int flip_queued = drmModePageFlip(g_kms.fd, g_kms.crtc_id, fb_id,
+                                          DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0;
+        if (flip_queued) {
             while (g_kms.flip_pending) {
                 struct pollfd pfds[2];
                 int nfd = 1;
@@ -3597,9 +3733,27 @@ static void kms_swap_buffers(void) {
                     kms_process_input();
                 if (pfds[0].revents & POLLIN) {
                     drmEventContext evctx = { .version = 2, .page_flip_handler = kms_page_flip_handler };
-                    drmHandleEvent(g_kms.fd, &evctx);
+                    if (drmHandleEvent(g_kms.fd, &evctx) != 0) break;
                 }
             }
+        }
+        /* The old BO is still being scanned out until the flip event arrives.
+         * Releasing it after a failed/incomplete page flip lets GBM recycle the
+         * visible buffer and manifests as intermittent console flicker. */
+        if (!flip_queued) {
+            fprintf(stderr, "[luna-shell/kms] page flip failed: %s\n",
+                    strerror(errno));
+            g_kms.flip_pending = 0;
+            gbm_surface_release_buffer(g_kms.gbm_surf, bo);
+            return;
+        }
+        if (g_kms.flip_pending) {
+            /* The kernel accepted the flip, so either BO may be active now.
+             * Keep both locked and leave cleanly rather than recycling a
+             * potentially scanned-out buffer after an event-channel failure. */
+            fprintf(stderr, "[luna-shell/kms] page flip completion failed\n");
+            g_should_close = 1;
+            return;
         }
         gbm_surface_release_buffer(g_kms.gbm_surf, g_kms.prev_bo);
         /* Some drivers clear the cursor plane across a page flip — re-push. */
@@ -3792,7 +3946,8 @@ static struct {
     struct xkb_state*   xkb_state;
 
     int    mods;
-    double mouse_x, mouse_y;
+    double mouse_x, mouse_y;       /* document coordinates for luna-ui */
+    double pointer_x, pointer_y;   /* local coordinates of g_pointer_surface */
 
     /* Soft cursor surface (wl_shm ARGB8888 + wl_pointer.set_cursor). */
     struct wl_surface* cursor_surf;
@@ -3816,6 +3971,34 @@ static void wl_cursor_fini(void);
 static EGLConfig         g_wl_egl_cfg;
 static LunaSurface*      g_pointer_surface = NULL;   /* surface under the cursor */
 
+/* wl_pointer coordinates are local to the entered layer surface, whereas
+ * luna-ui hit-tests in document coordinates.  Keep this conversion tied to
+ * the current layout instead of relying on doc_x/doc_y from the previous
+ * render frame: a layer configure can resize the document and deliver pointer
+ * events in the same Wayland dispatch. */
+static void wl_surface_doc_origin(const LunaSurface* s, float* x, float* y) {
+    *x = 0.0f;
+    *y = 0.0f;
+    if (!s || s->root_idx < 0) return;
+
+    LunaElement* e = luna_element_at(s->root_idx);
+    if (!e) return;
+    *x = e->x;
+    *y = e->y;
+    /* Full-output overlay coordinates already match document coordinates. */
+    if (s->is_overlay && !s->fixed_w && !s->fixed_h) {
+        *x = 0.0f;
+        *y = 0.0f;
+    }
+}
+
+static void wl_refresh_pointer_doc_pos(void) {
+    float ox, oy;
+    wl_surface_doc_origin(g_pointer_surface, &ox, &oy);
+    g_wl.mouse_x = g_wl.pointer_x + ox;
+    g_wl.mouse_y = g_wl.pointer_y + oy;
+}
+
 static void wlp_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* surf, wl_fixed_t x, wl_fixed_t y) {
     (void)d; (void)p;
     g_wl.pointer_serial = s;
@@ -3823,10 +4006,9 @@ static void wlp_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surfa
     g_pointer_surface = NULL;
     for (int i = 0; i < LUNA_SURF_COUNT; i++)
         if (g_surfs[i].wl_surf == surf) { g_pointer_surface = &g_surfs[i]; break; }
-    double lx = wl_fixed_to_double(x), ly = wl_fixed_to_double(y);
-    float ox = g_pointer_surface ? g_pointer_surface->doc_x : 0.0f;
-    float oy = g_pointer_surface ? g_pointer_surface->doc_y : 0.0f;
-    g_wl.mouse_x = lx + ox; g_wl.mouse_y = ly + oy;
+    g_wl.pointer_x = wl_fixed_to_double(x);
+    g_wl.pointer_y = wl_fixed_to_double(y);
+    wl_refresh_pointer_doc_pos();
     wl_cursor_apply();
     luna_mouse_move(g_wl.mouse_x, g_wl.mouse_y);
 }
@@ -3842,10 +4024,9 @@ static void wlp_leave(void* d, struct wl_pointer* p, uint32_t s, struct wl_surfa
 }
 static void wlp_motion(void* d, struct wl_pointer* p, uint32_t t, wl_fixed_t x, wl_fixed_t y) {
     (void)d; (void)p; (void)t;
-    double lx = wl_fixed_to_double(x), ly = wl_fixed_to_double(y);
-    float ox = g_pointer_surface ? g_pointer_surface->doc_x : 0.0f;
-    float oy = g_pointer_surface ? g_pointer_surface->doc_y : 0.0f;
-    g_wl.mouse_x = lx + ox; g_wl.mouse_y = ly + oy;
+    g_wl.pointer_x = wl_fixed_to_double(x);
+    g_wl.pointer_y = wl_fixed_to_double(y);
+    wl_refresh_pointer_doc_pos();
     wl_cursor_apply();
     luna_mouse_move(g_wl.mouse_x, g_wl.mouse_y);
 }
@@ -3859,6 +4040,10 @@ static void wlp_button(void* d, struct wl_pointer* p, uint32_t s, uint32_t t, ui
         default:         btn = 3; break;
     }
     int action = state == WL_POINTER_BUTTON_STATE_PRESSED ? LUNA_PRESS : LUNA_RELEASE;
+    /* wl_pointer.button has no position.  Rebase the most recent surface-local
+     * position now, so an output/layout configure immediately before a click
+     * cannot send the stale document coordinate to luna-ui. */
+    wl_refresh_pointer_doc_pos();
     luna_mouse_button(btn, action, g_wl.mods, g_wl.mouse_x, g_wl.mouse_y);
 }
 static void wlp_axis(void* d, struct wl_pointer* p, uint32_t t, uint32_t axis, wl_fixed_t value) {
@@ -3962,12 +4147,26 @@ static void layer_surf_configure(void* d, struct zwlr_layer_surface_v1* ls,
                                   uint32_t serial, uint32_t w, uint32_t h) {
     LunaSurface* s = (LunaSurface*)d;
     zwlr_layer_surface_v1_ack_configure(ls, serial);
-    if (w > 0) s->surf_w = (int)w;
-    if (h > 0) s->surf_h = (int)h;
+    int new_w = w > 0 ? (int)w : s->surf_w;
+    int new_h = h > 0 ? (int)h : s->surf_h;
+    int size_changed = new_w != s->surf_w || new_h != s->surf_h;
+    if (w > 0) s->surf_w = new_w;
+    if (h > 0) s->surf_h = new_h;
+    /* Layer-shell may configure an overlay after its first visible frame.
+     * Keep wl_egl_window and the drawing viewport in lockstep with that
+     * configure.  Previously only surf_w/surf_h changed, so the compositor
+     * scaled the old buffer into the new full-screen layer and popups appeared
+     * to jump after opening. */
+    if (size_changed && s->egl_win && s->surf_w > 0 && s->surf_h > 0) {
+        wl_egl_window_resize(s->egl_win, s->surf_w, s->surf_h, 0, 0);
+        shell_request_repaint((int)(s - g_surfs));
+    }
     /* bg surface gives us the output resolution */
     if (s == &g_surfs[LUNA_SURF_BG] && w > 0 && h > 0) {
-        luna_window_width  = (float)w;
-        luna_window_height = (float)h;
+        /* The first layer-shell configure is the authoritative desktop size.
+         * Go through luna_resize so the CSS viewport is relaid out once, not
+         * left with positions calculated for the bootstrap 1440x900 size. */
+        luna_resize((float)w, (float)h);
     }
     s->configured = 1;
 }
@@ -4221,9 +4420,9 @@ static int wl_backend_start(void) {
     wl_display_roundtrip(g_wl.display);
 
     /* bg surface now has the real output dimensions */
-    if (g_surfs[LUNA_SURF_BG].surf_w > 0) {
-        luna_window_width  = (float)g_surfs[LUNA_SURF_BG].surf_w;
-        luna_window_height = (float)g_surfs[LUNA_SURF_BG].surf_h;
+    if (g_surfs[LUNA_SURF_BG].surf_w > 0 && g_surfs[LUNA_SURF_BG].surf_h > 0) {
+        luna_resize((float)g_surfs[LUNA_SURF_BG].surf_w,
+                    (float)g_surfs[LUNA_SURF_BG].surf_h);
     }
 
     /* Assign default sizes for surfaces that haven't had configure yet */
@@ -4328,15 +4527,7 @@ static void wl_surfs_update(void) {
     for (int i = 0; i < LUNA_SURF_COUNT; i++) {
         LunaSurface* s = &g_surfs[i];
         if (s->root_idx < 0) continue;
-        LunaElement* e = luna_element_at(s->root_idx);
-        if (!e) continue;
-        /* Static surfaces: origin = element's computed top-left */
-        s->doc_x = e->x;
-        s->doc_y = e->y;
-        /* Full-screen overlays always have origin (0,0) */
-        if (s->is_overlay && !s->fixed_w && !s->fixed_h) {
-            s->doc_x = 0.0f; s->doc_y = 0.0f;
-        }
+        wl_surface_doc_origin(s, &s->doc_x, &s->doc_y);
     }
 
     /* Handle overlay visibility changes */
@@ -4523,10 +4714,22 @@ static const LunaBackend g_wl_backend = {
 */
 #ifdef LUNA_BACKEND_X11
 
+/* Traditional X11 panels use freedesktop's XEmbed tray protocol.  This is
+ * distinct from Luna's native compositor-state tray above: it lets classic
+ * tray clients (such as luna-wifi) embed when the shell runs on X11. */
+#define X11_TRAY_ICON_SIZE 24
+#define X11_TRAY_MAX_ICONS 12
+#define X11_SYSTEM_TRAY_REQUEST_DOCK 0
+#define X11_XEMBED_EMBEDDED_NOTIFY 0
+
 static struct {
     Display* display;
     Window   window;
+    Window   tray_host;
     Atom     wm_delete_window;
+    Atom     tray_selection, tray_opcode, tray_manager, xembed;
+    Window   tray_icons[X11_TRAY_MAX_ICONS];
+    int      tray_icon_count;
 
     EGLDisplay dpy;
     EGLContext ctx;
@@ -4540,6 +4743,86 @@ static struct {
     struct xkb_keymap*  xkb_keymap;
     struct xkb_state*   xkb_state;
 } g_x11;
+
+static void x11_tray_layout(void) {
+    const int host_w = X11_TRAY_MAX_ICONS * (X11_TRAY_ICON_SIZE + 2) + 4;
+    int x = g_x11.width - host_w - 4;
+    if (x < 0) x = 0;
+    /* This is a separate override-redirect top-level, never a child of the
+     * full-screen EGL window.  Some legacy XEmbed clients inherit their
+     * parent geometry while docking; keeping the tray host independent means
+     * they can never see or occupy the desktop-sized shell surface. */
+    if (g_x11.tray_host)
+        XMoveResizeWindow(g_x11.display, g_x11.tray_host, x, 2,
+                          host_w, X11_TRAY_ICON_SIZE + 2);
+    for (int i = 0; i < g_x11.tray_icon_count; i++)
+        XMoveResizeWindow(g_x11.display, g_x11.tray_icons[i],
+                          2 + i * (X11_TRAY_ICON_SIZE + 2), 1,
+                          X11_TRAY_ICON_SIZE, X11_TRAY_ICON_SIZE);
+}
+
+static void x11_tray_remove(Window icon) {
+    for (int i = 0; i < g_x11.tray_icon_count; i++) {
+        if (g_x11.tray_icons[i] != icon) continue;
+        memmove(&g_x11.tray_icons[i], &g_x11.tray_icons[i + 1],
+                (size_t)(g_x11.tray_icon_count - i - 1) * sizeof(Window));
+        g_x11.tray_icon_count--;
+        x11_tray_layout();
+        return;
+    }
+}
+
+static int x11_tray_contains(Window icon) {
+    for (int i = 0; i < g_x11.tray_icon_count; i++)
+        if (g_x11.tray_icons[i] == icon) return 1;
+    return 0;
+}
+
+static void x11_tray_dock(Window icon) {
+    if (!icon || g_x11.tray_icon_count >= X11_TRAY_MAX_ICONS) return;
+    for (int i = 0; i < g_x11.tray_icon_count; i++)
+        if (g_x11.tray_icons[i] == icon) return;
+    g_x11.tray_icons[g_x11.tray_icon_count++] = icon;
+    /* Intercept ConfigureRequest as well: several legacy tray clients keep
+     * their pre-dock toplevel geometry and otherwise request it again after
+     * receiving _XEMBED_EMBEDDED_NOTIFY. */
+    XSelectInput(g_x11.display, icon, StructureNotifyMask);
+    XReparentWindow(g_x11.display, icon, g_x11.tray_host, 0, 0);
+    XMapRaised(g_x11.display, icon);
+    x11_tray_layout();
+    XEvent embedded;
+    memset(&embedded, 0, sizeof(embedded));
+    embedded.xclient.type = ClientMessage;
+    embedded.xclient.window = icon;
+    embedded.xclient.message_type = g_x11.xembed;
+    embedded.xclient.format = 32;
+    embedded.xclient.data.l[0] = CurrentTime;
+    embedded.xclient.data.l[1] = X11_XEMBED_EMBEDDED_NOTIFY;
+    embedded.xclient.data.l[3] = g_x11.tray_host;
+    XSendEvent(g_x11.display, icon, False, NoEventMask, &embedded);
+}
+
+static void x11_tray_claim(void) {
+    g_x11.tray_selection = XInternAtom(g_x11.display, "_NET_SYSTEM_TRAY_S0", False);
+    g_x11.tray_opcode = XInternAtom(g_x11.display, "_NET_SYSTEM_TRAY_OPCODE", False);
+    g_x11.tray_manager = XInternAtom(g_x11.display, "MANAGER", False);
+    g_x11.xembed = XInternAtom(g_x11.display, "_XEMBED", False);
+    XSetSelectionOwner(g_x11.display, g_x11.tray_selection, g_x11.tray_host, CurrentTime);
+    if (XGetSelectionOwner(g_x11.display, g_x11.tray_selection) != g_x11.tray_host) {
+        fprintf(stderr, "[luna-shell/x11] another system tray owns _NET_SYSTEM_TRAY_S0\n");
+        return;
+    }
+    XEvent manager;
+    memset(&manager, 0, sizeof(manager));
+    manager.xclient.type = ClientMessage;
+    manager.xclient.window = RootWindow(g_x11.display, DefaultScreen(g_x11.display));
+    manager.xclient.message_type = g_x11.tray_manager;
+    manager.xclient.format = 32;
+    manager.xclient.data.l[0] = CurrentTime;
+    manager.xclient.data.l[1] = g_x11.tray_selection;
+    manager.xclient.data.l[2] = g_x11.tray_host;
+    XSendEvent(g_x11.display, manager.xclient.window, False, StructureNotifyMask, &manager);
+}
 
 static int x11_mod_bits(unsigned int x11state) {
     int mods = 0;
@@ -4625,7 +4908,25 @@ static int x11_backend_start(void) {
                         wm_state, XA_ATOM, 32,
                         PropModeReplace, (unsigned char*)&fullscreen, 1);
     }
+    /* Separate, clipped XEmbed viewport.  It must be a root child instead
+     * of a shell child: an embedded client must not be able to derive the
+     * shell's desktop-sized allocation from its X parent. */
+    XSetWindowAttributes tray_attrs;
+    memset(&tray_attrs, 0, sizeof(tray_attrs));
+    tray_attrs.override_redirect = True;
+    tray_attrs.background_pixel = BlackPixel(g_x11.display, screen);
+    g_x11.tray_host = XCreateWindow(g_x11.display, root,
+                                    0, 2, 1, X11_TRAY_ICON_SIZE + 2, 0,
+                                    CopyFromParent, InputOutput, CopyFromParent,
+                                    CWOverrideRedirect | CWBackPixel, &tray_attrs);
+    XSelectInput(g_x11.display, g_x11.tray_host,
+                 StructureNotifyMask | SubstructureNotifyMask | SubstructureRedirectMask);
+    x11_tray_layout();
     XMapWindow(g_x11.display, g_x11.window);
+    /* Map after the desktop so this small root-level tray stays above the
+     * fullscreen EGL surface instead of being obscured by it. */
+    XMapRaised(g_x11.display, g_x11.tray_host);
+    x11_tray_claim();
     XFlush(g_x11.display);
 
     static const int versions[][2] = { {4,5}, {4,1}, {3,3} };
@@ -4681,17 +4982,39 @@ static void x11_process_events(void) {
         XNextEvent(g_x11.display, &ev);
         switch (ev.type) {
         case ConfigureNotify:
+            /* The XEmbed tray host is a second window on this Display.
+             * Its fixed 316x26 geometry must never become the desktop
+             * viewport (doing so shrinks the entire Luna render target to
+             * the tray's size). */
+            if (ev.xconfigure.window != g_x11.window)
+                break;
             if (ev.xconfigure.width  != g_x11.width ||
                 ev.xconfigure.height != g_x11.height) {
                 g_x11.width  = ev.xconfigure.width;
                 g_x11.height = ev.xconfigure.height;
                 luna_window_width  = (float)g_x11.width;
                 luna_window_height = (float)g_x11.height;
+                x11_tray_layout();
             }
             break;
         case ClientMessage:
-            if ((Atom)ev.xclient.data.l[0] == g_x11.wm_delete_window)
+            if (ev.xclient.message_type == g_x11.tray_opcode &&
+                ev.xclient.data.l[1] == X11_SYSTEM_TRAY_REQUEST_DOCK)
+                x11_tray_dock((Window)ev.xclient.data.l[2]);
+            else if ((Atom)ev.xclient.data.l[0] == g_x11.wm_delete_window)
                 g_should_close = 1;
+            break;
+        case ConfigureRequest:
+            if (x11_tray_contains(ev.xconfigurerequest.window)) {
+                /* A tray icon is always a 24px surface; never let it turn the
+                 * tray viewport into the geometry of its old top-level window. */
+                XMoveResizeWindow(g_x11.display, ev.xconfigurerequest.window,
+                                  0, 0, X11_TRAY_ICON_SIZE, X11_TRAY_ICON_SIZE);
+                x11_tray_layout();
+            }
+            break;
+        case DestroyNotify:
+            x11_tray_remove(ev.xany.window);
             break;
         case MotionNotify:
             g_x11.mouse_x = ev.xmotion.x;
@@ -4701,6 +5024,11 @@ static void x11_process_events(void) {
         case ButtonPress:
         case ButtonRelease: {
             int action = ev.type == ButtonPress ? LUNA_PRESS : LUNA_RELEASE;
+            /* X button events carry their own coordinates.  Reusing the
+             * previous MotionNotify position can dispatch a click to a stale,
+             * visibly shifted location when those events are coalesced. */
+            g_x11.mouse_x = ev.xbutton.x;
+            g_x11.mouse_y = ev.xbutton.y;
             g_x11.mods = x11_mod_bits(ev.xbutton.state);
             /* Buttons 4/5 are scroll wheel */
             if (ev.xbutton.button == Button4) {
@@ -4752,6 +5080,7 @@ static void x11_backend_terminate(void) {
     if (g_x11.xkb_state)  xkb_state_unref(g_x11.xkb_state);
     if (g_x11.xkb_keymap) xkb_keymap_unref(g_x11.xkb_keymap);
     if (g_x11.xkb_ctx)    xkb_context_unref(g_x11.xkb_ctx);
+    if (g_x11.tray_host) XDestroyWindow(g_x11.display, g_x11.tray_host);
     if (g_x11.window)  XDestroyWindow(g_x11.display, g_x11.window);
     if (g_x11.display) XCloseDisplay(g_x11.display);
 }
@@ -4934,7 +5263,11 @@ int main(int argc, char** argv) {
 
         int fbw, fbh;
         g_backend->get_fb_size(&fbw, &fbh);
-        if (fbw != prev_ww || fbh != prev_wh) {
+        /* A layer-shell output has no usable size until its first configure.
+         * Never turn that transient 0x0 into the CSS viewport: doing so moves
+         * every centered/absolute dialog to the left/top before the real size
+         * arrives on the next event dispatch. */
+        if (fbw > 0 && fbh > 0 && (fbw != prev_ww || fbh != prev_wh)) {
             luna_resize((float)fbw, (float)fbh);
             prev_ww = fbw; prev_wh = fbh;
         }
@@ -4993,9 +5326,17 @@ int main(int argc, char** argv) {
             g_wl_poll_timeout_ms = painted ? 0 : (settling ? 8 : (desktop_busy ? 32 : 16));
         } else {
             luna_render(fbw, fbh);
+            /* The default framebuffer contents are undefined after EGL swap
+             * on the X11 backend.  Capture while the completed Luna frame is
+             * still current, otherwise --screenshot can return a black image
+             * even though the window itself was rendered correctly. */
+            luna_flush_pending_screenshot();
             g_backend->swap_buffers();
         }
-        luna_flush_pending_screenshot();
+        /* Wayland surfaces perform their own swap in wl_surf_render(); keep
+         * the existing post-render capture point for that backend. */
+        if (g_backend == &g_wl_backend)
+            luna_flush_pending_screenshot();
         g_backend->poll_events();
     }
     session_save();

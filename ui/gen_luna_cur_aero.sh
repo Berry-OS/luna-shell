@@ -8,6 +8,12 @@ AERO_DIR="${LUNA_AERO_CURSOR_DIR:-/usr/share/icons/aero/cursors}"
 OUT_C="${SCRIPT_DIR}/luna-cur-aero.h"
 OUT_RS="${SCRIPT_DIR}/../wayland-server-rs/src/cursor_aero.rs"
 TMPGEN="$(mktemp /tmp/luna_xcur_gen.XXXXXX)"
+TARGET="${LUNA_AERO_CURSOR_TARGET:-both}"
+
+case "$TARGET" in
+    both|c|rs) ;;
+    *) echo "error: LUNA_AERO_CURSOR_TARGET must be both, c, or rs" >&2; exit 1 ;;
+esac
 
 if [ ! -d "$AERO_DIR" ]; then
     echo "error: Aero cursor dir not found: $AERO_DIR" >&2
@@ -39,8 +45,9 @@ static void emit_blob_rs(const char* name, XcursorImage* im) {
     for (int i = 0; i < n; i++) {
         if (i % 8 == 0) printf("    ");
         printf("0x%08x", im->pixels[i]);
-        if (i + 1 < n) printf(", ");
+        if (i + 1 < n) printf(",");
         if (i % 8 == 7) printf("\n");
+        else if (i + 1 < n) printf(" ");
     }
     if (n % 8) printf("\n");
     printf("];\n");
@@ -83,11 +90,11 @@ static int load_role_rs(const char* dir, const char* file, const char* sym) {
         char name[128];
         snprintf(name, sizeof(name), "%s_%d", sym, i);
         emit_blob_rs(name, imgs->images[i]);
-        printf("static const EMBED_FRAME %s_%d = EMBED_FRAME { w: %d, h: %d, hot_x: %d, hot_y: %d, delay_ms: %d, pixels: &CUR_%s };\n",
+        printf("const %s_%d: EmbedFrame = EmbedFrame { w: %d, h: %d, hot_x: %d, hot_y: %d, delay_ms: %d, pixels: &CUR_%s };\n",
                sym, i, imgs->images[i]->width, imgs->images[i]->height,
                imgs->images[i]->xhot, imgs->images[i]->yhot, imgs->images[i]->delay, name);
     }
-    printf("static const [EMBED_FRAME; %d] ROLE_%s = [\n", imgs->nimage, sym);
+    printf("static ROLE_%s: [EmbedFrame; %d] = [\n", sym, imgs->nimage);
     for (int i = 0; i < imgs->nimage; i++)
         printf("    %s_%d,\n", sym, i);
     printf("];\n\n");
@@ -118,12 +125,22 @@ int main(int argc, char** argv) {
     } else {
         printf("// Embedded Aero cursors from %s — regenerate with ui/gen_luna_cur_aero.sh\n", dir);
         printf("#[allow(dead_code)]\nstruct EmbedFrame { w: i32, h: i32, hot_x: i32, hot_y: i32, delay_ms: i32, pixels: &'static [u32] }\n");
-        printf("type EMBED_FRAME = EmbedFrame;\n\n");
         load_role_rs(dir, "left_ptr", "DEFAULT");
+        load_role_rs(dir, "h_double_arrow", "EW");
+        load_role_rs(dir, "v_double_arrow", "NS");
+        load_role_rs(dir, "top_left_corner", "NWSE");
+        load_role_rs(dir, "top_right_corner", "NESW");
         printf("pub fn blit_default_cursor(fb: &mut crate::render::Framebuffer, x: i32, y: i32) {\n");
         printf("    blit_embed_frame(fb, &ROLE_DEFAULT[0], x, y);\n");
         printf("}\n\n");
-        printf("pub fn blit_embed_frame(fb: &mut crate::render::Framebuffer, frame: &EmbedFrame, x: i32, y: i32) {\n");
+        printf("pub fn blit_resize_cursor(fb: &mut crate::render::Framebuffer, x: i32, y: i32, edges: u32) {\n");
+        printf("    let frame = match edges {\n");
+        printf("        5 | 10 => &ROLE_NWSE[0], // top-left / bottom-right\n");
+        printf("        9 | 6  => &ROLE_NESW[0], // top-right / bottom-left\n");
+        printf("        4 | 8  => &ROLE_EW[0],\n");
+        printf("        _      => &ROLE_NS[0],\n");
+        printf("    };\n    blit_embed_frame(fb, frame, x, y);\n}\n\n");
+        printf("fn blit_embed_frame(fb: &mut crate::render::Framebuffer, frame: &EmbedFrame, x: i32, y: i32) {\n");
         printf("    let w = frame.w as u32;\n    let h = frame.h as u32;\n");
         printf("    for row in 0..h {\n");
         printf("        for col in 0..w {\n");
@@ -153,8 +170,12 @@ int main(int argc, char** argv) {
 EOF
 
 gcc -o "${TMPGEN}" "${TMPGEN}.c" -lXcursor -lX11
-"${TMPGEN}" "$AERO_DIR" c > "$OUT_C"
-"${TMPGEN}" "$AERO_DIR" rs > "$OUT_RS"
+if [ "$TARGET" = both ] || [ "$TARGET" = c ]; then
+    "${TMPGEN}" "$AERO_DIR" c > "$OUT_C"
+fi
+if [ "$TARGET" = both ] || [ "$TARGET" = rs ]; then
+    "${TMPGEN}" "$AERO_DIR" rs > "$OUT_RS"
+fi
 rm -f "${TMPGEN}" "${TMPGEN}.c"
-echo "→ wrote $OUT_C"
-echo "→ wrote $OUT_RS"
+[ "$TARGET" = both ] || [ "$TARGET" = c ] && echo "→ wrote $OUT_C"
+[ "$TARGET" = both ] || [ "$TARGET" = rs ] && echo "→ wrote $OUT_RS"

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Luna Wi-Fi
+Comment=ConnMan Wi-Fi controller for XEmbed system trays
+Exec=luna-wifi
+Terminal=false
+Categories=Network;Settings;
+X-GNOME-Autostart-enabled=true

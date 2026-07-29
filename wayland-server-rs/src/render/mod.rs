@@ -98,12 +98,15 @@ impl Framebuffer {
                 let dst_row =
                     &mut self.pixels[dst_start..dst_start + copy_w as usize];
                 if opaque {
-                    // XRGB: opaque, byte swap only
+                    // XRGB: the byte order already matches native-endian
+                    // 0xAARRGGBB on supported little-endian targets.  Decode
+                    // one word and force alpha; no per-channel shuffle.
                     for (i, dst) in dst_row.iter_mut().enumerate() {
-                        let b = src_row[i * 4] as u32;
-                        let g = src_row[i * 4 + 1] as u32;
-                        let r = src_row[i * 4 + 2] as u32;
-                        *dst = 0xff00_0000 | (r << 16) | (g << 8) | b;
+                        let off = i * 4;
+                        *dst = u32::from_le_bytes([
+                            src_row[off], src_row[off + 1],
+                            src_row[off + 2], 0xff,
+                        ]);
                     }
                 } else {
                     for (i, dst) in dst_row.iter_mut().enumerate() {
@@ -143,9 +146,22 @@ fn blend(dst: u32, src: u32) -> u32 {
     let mix = |sh: u32| {
         let s = (src >> sh) & 0xff;
         let d = (dst >> sh) & 0xff;
-        (s + (d * ia) / 255) & 0xff
+        // Round instead of biasing every translucent composite downward.
+        (s + (d * ia + 127) / 255).min(255)
     };
     0xff00_0000 | (mix(16) << 16) | (mix(8) << 8) | mix(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::blend;
+
+    #[test]
+    fn premultiplied_source_over_preserves_channels() {
+        assert_eq!(blend(0xff20_4060, 0x8080_0000), 0xff90_2030);
+        assert_eq!(blend(0xff12_3456, 0x0000_0000), 0xff12_3456);
+        assert_eq!(blend(0xff12_3456, 0xffab_cdef), 0xffab_cdef);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

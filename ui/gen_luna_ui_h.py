@@ -280,7 +280,8 @@ int luna_init(const LunaInitConfig* cfg) {
     glLinkProgram(img_program);
     cache_uniform_locations();
     glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                        GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     init_rect_geometry();
     init_font();
     return 1;

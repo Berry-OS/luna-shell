@@ -2113,6 +2113,40 @@ impl Server {
     }
   }
 
+  /// Cancel an interactive resize and restore the geometry that was active
+  /// when the grab started.  Keyboard events normally belong to the focused
+  /// client during a WM grab, so this must be handled by the compositor rather
+  /// than expecting luna-shell (or the client) to see Escape.
+  fn cancel_wm_grab(&mut self) {
+    let grab = std::mem::replace(&mut self.wm_grab, WmGrab::None);
+    match grab {
+      WmGrab::Resize {
+        fd,
+        surface_id,
+        orig_x,
+        orig_y,
+        orig_w,
+        orig_h,
+        ..
+      } => {
+        if let Some(Object { role: Role::Surface(s), .. }) =
+          self.clients.get_mut(&fd).and_then(|c| c.objects.get_mut(&surface_id))
+        {
+          s.x = orig_x;
+          s.y = orig_y;
+        }
+        self.pending_resize_configure = None;
+        self.send_toplevel_configure_for(fd, surface_id, Some((orig_w, orig_h)), false);
+        self.dirty = true;
+      }
+      // Escape only cancels resizing.  A move has no provisional client size
+      // to roll back, so leave it at its current position.
+      grab => {
+        self.wm_grab = grab;
+      }
+    }
+  }
+
   fn save_geom_if_needed(&mut self, fd: RawFd, surface_id: u32) {
     let geom = self.surface_geometry(fd, surface_id);
     let xdg_id = match self.clients.get(&fd).and_then(|c| c.objects.get(&surface_id)) {
@@ -5302,7 +5336,13 @@ impl Server {
     }
     self.fb.clear(0xff10_1014);
 
-    // Layer shell z-order: BACKGROUND(0) < BOTTOM(1) < toplevels < TOP(2) < OVERLAY(3) < popups
+    // Input-method popups belong above ordinary application windows, but not
+    // above the shell's own modal layers.  In particular, luna-shell uses
+    // OVERLAY for its launcher, settings and confirmation surfaces; letting a
+    // candidate window paint after those surfaces made the two independent
+    // clients appear to tear through one another when they overlapped.
+    //
+    // BACKGROUND(0) < BOTTOM(1) < toplevels < TOP(2) < IM/xdg popups < OVERLAY(3)
     let mut layers: [Vec<(RawFd, u32, i32, i32)>; 4] = Default::default();
     let mut toplevels: Vec<(RawFd, u32, i32, i32)> = Vec::new();
     let mut popups: Vec<(RawFd, u32, i32, i32)> = Vec::new();
@@ -5423,7 +5463,7 @@ impl Server {
         .unwrap_or_default();
       Self::blit_collected(&mut self.fb, &blits);
     }
-    for (fd, sid, dx, dy) in &layers[3] {
+    for (fd, sid, dx, dy) in &popups {
       let blits = self
         .clients
         .get(fd)
@@ -5431,7 +5471,7 @@ impl Server {
         .unwrap_or_default();
       Self::blit_collected(&mut self.fb, &blits);
     }
-    for (fd, sid, dx, dy) in &popups {
+    for (fd, sid, dx, dy) in &layers[3] {
       let blits = self
         .clients
         .get(fd)
@@ -5446,6 +5486,14 @@ impl Server {
     {
       let px = (self.ptr_x * w as f32) as i32;
       let py = (self.ptr_y * h as f32) as i32;
+      // The compositor owns cursor feedback over its resize rim.  During a
+      // grab the pointer may be anywhere, but it must keep the cursor shape
+      // selected when the grab began.
+      let resize_edges = match &self.wm_grab {
+        WmGrab::Resize { edges, .. } => Some(*edges),
+        WmGrab::None => self.hit_resize_edge(px, py).map(|(_, _, edges)| edges),
+        WmGrab::Move { .. } => None,
+      };
       let client_cursor = if self.cursor_surface_id != 0 && self.cursor_client_fd >= 0 {
         self.clients.get(&self.cursor_client_fd).and_then(|client| {
           match client.objects.get(&self.cursor_surface_id) {
@@ -5456,7 +5504,9 @@ impl Server {
       } else {
         None
       };
-      let drew_client = if let Some(buf) = client_cursor {
+      let drew_client = if resize_edges.is_some() {
+        false
+      } else if let Some(buf) = client_cursor {
         if buf.width > 0 && buf.height > 0 && shm_buffer_has_visible_pixel(&buf) {
           self.fb.blit_shm(&buf, px - self.cursor_hot_x, py - self.cursor_hot_y);
           true
@@ -5469,7 +5519,9 @@ impl Server {
       // GTK can hand us a cursor surface whose buffer is still empty /
       // fully transparent (theme load race).  Fall back so the pointer
       // never vanishes until the next set_cursor (often triggered by typing).
-      if !drew_client {
+      if let Some(edges) = resize_edges {
+        crate::cursor_aero::blit_resize_cursor(&mut self.fb, px, py, edges);
+      } else if !drew_client {
         self.fb.blit_default_cursor(px, py);
       }
     }
@@ -5592,7 +5644,10 @@ impl Server {
 
     // Collect candidates per client
     // (layer_priority, fd, surface_id, ptr_id, kbd_id, surf_w, surf_h, ox, oy)
-    // layer_priority: OVERLAY=40, TOP=30, focused_window=20, other_window=10, BOTTOM=5, BG=0
+    // layer_priority: OVERLAY=60, IM/xdg popup=50, TOP=30,
+    // focused_window=20, other_window=10, BOTTOM=5, BG=0.
+    // Keep this in the same order as composite_and_present(), so an invisible
+    // pointer-focus layer can never disagree with what is visibly on top.
     let mut candidates: Vec<(i32, RawFd, u32, u32, u32, i32, i32, i32, i32)> = Vec::new();
 
     for (&fd, client) in &self.clients {
@@ -5615,9 +5670,9 @@ impl Server {
 
       for (&surf_id, obj) in &client.objects {
         let Role::Surface(s) = &obj.role else { continue };
-        if !s.mapped || !s.accepts_input { continue; }
-        if let Some(buf) = &s.current_buffer {
-          if let Some((layer, anchor, size_w, size_h, mt, mr, mb, ml, _kbd)) = ls_map.get(&surf_id).copied() {
+        if !s.accepts_input { continue; }
+        if let Some((layer, anchor, size_w, size_h, mt, mr, mb, ml, _kbd)) = ls_map.get(&surf_id).copied() {
+          if s.mapped && s.current_buffer.is_some() {
             // BACKGROUND is wallpaper: even if a buggy client forgets to clear
             // its input region, never let it beat real windows or chrome.
             if layer == 0 {
@@ -5625,10 +5680,12 @@ impl Server {
             }
             let (ox, oy, cw, ch) = layer_surface_rect(bw, bh, anchor, size_w, size_h, mt, mr, mb, ml);
             if px >= ox && py >= oy && px < ox + cw as i32 && py < oy + ch as i32 {
-              let prio = match layer { 3 => 40, 2 => 30, 1 => 5, _ => 0 };
+              let prio = match layer { 3 => 60, 2 => 30, 1 => 5, _ => 0 };
               candidates.push((prio, fd, surf_id, ptr_id, kbd_id, cw as i32, ch as i32, ox, oy));
             }
-          } else if s.input_method_popup {
+          }
+        } else if s.input_method_popup {
+          if let Some(buf) = &s.current_buffer {
             if self.active_text_input.is_some()
               && px >= s.x
               && py >= s.y
@@ -5637,22 +5694,35 @@ impl Server {
             {
               candidates.push((50, fd, surf_id, ptr_id, kbd_id, buf.width, buf.height, s.x, s.y));
             }
-          } else if s.popup {
+          }
+        } else if s.popup {
+          if let Some(buf) = &s.current_buffer {
             if px >= s.x && py >= s.y && px < s.x + buf.width && py < s.y + buf.height {
               candidates.push((45, fd, surf_id, ptr_id, kbd_id, buf.width, buf.height, s.x, s.y));
             }
-          } else if s.xdg_surface_id.is_some() && !self.surface_is_minimized(client, surf_id) {
+          }
+        } else if s.xdg_surface_id.is_some()
+            && !self.surface_is_minimized(client, surf_id)
+            // Firefox/WebRender often leaves the xdg_toplevel parent
+            // buffer-less and commits pixels only to desynchronised
+            // subsurfaces.  The parent still owns wl_pointer/wl_keyboard,
+            // so hit-test the visible surface tree but deliver input to this
+            // parent surface.
+            && Self::surface_tree_has_content(client, surf_id)
+          {
             let ox = s.x;
             let oy = s.y;
             // MUST clip to the window rect.  Without this, the topmost
             // xdg_toplevel steals pointer focus for the entire output —
             // cursor vanishes everywhere except layer-shell chrome (dock),
             // and title-bar hit-testing / move requests go to the wrong place.
-            if px >= ox && py >= oy && px < ox + buf.width && py < oy + buf.height {
+            let (w, h) = Self::surface_tree_size(client, surf_id)
+              // `surface_tree_has_content` above guarantees a non-empty tree.
+              .unwrap_or((0, 0));
+            if px >= ox && py >= oy && px < ox + w && py < oy + h {
               // Base prio 10 for all windows; stack order breaks ties below.
-              candidates.push((10, fd, surf_id, ptr_id, kbd_id, buf.width, buf.height, ox, oy));
+              candidates.push((10, fd, surf_id, ptr_id, kbd_id, w, h, ox, oy));
             }
-          }
         }
       }
     }
@@ -5965,6 +6035,14 @@ impl Server {
       } else {
         self.kbd_mods &= !mod_bit;
       }
+    }
+
+    // KEY_ESC is 1 on libinput's evdev keycode scale.  A resize is a
+    // compositor-owned modal operation, so do this before forwarding to an
+    // input-method grab or the focused client.
+    if pressed && keycode == 1 && matches!(self.wm_grab, WmGrab::Resize { .. }) {
+      self.cancel_wm_grab();
+      return;
     }
 
     // Session Zap — handled here so it wins over text fields and IM grabs.

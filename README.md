@@ -7,6 +7,7 @@ A **pure Rust** Wayland compositor + custom `libwayland-client` implementation +
 ![Screenshot](ui/sample_01.png)
 ![Screenshot](ui/sample_02.png)
 ![Screenshot](screenshot.png)
+![Screenshot](luna-shell.png)
 
 ---
 

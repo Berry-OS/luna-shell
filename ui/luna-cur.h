@@ -420,6 +420,18 @@ static int luna_cur_dir_exists(const char* path) {
     return path && *path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+static int luna_cur_join_path(char* out, size_t out_n, const char* dir, const char* leaf) {
+    size_t dl = strnlen(dir, out_n);
+    size_t ll = strnlen(leaf, out_n);
+    if (dl >= out_n || ll >= out_n || dl + 1 >= out_n || ll > out_n - dl - 2)
+        return 0;
+    memcpy(out, dir, dl);
+    out[dl] = '/';
+    memcpy(out + dl + 1, leaf, ll);
+    out[dl + 1 + ll] = '\0';
+    return 1;
+}
+
 static int luna_cur_find_theme_dir(const char* theme, char* out, size_t out_n) {
     if (!theme || !*theme || !strcmp(theme, "builtin") || !strcmp(theme, "none"))
         return 0;
@@ -459,7 +471,7 @@ static int luna_cur_find_theme_dir(const char* theme, char* out, size_t out_n) {
 
 static void luna_cur_parse_theme_conf(LunaCurTheme* th, char role_files[LUNA_CUR_MAX_ROLES][256]) {
     char path[LUNA_CUR_PATH_MAX];
-    snprintf(path, sizeof(path), "%s/theme.conf", th->theme_dir);
+    if (!luna_cur_join_path(path, sizeof(path), th->theme_dir, "theme.conf")) return;
     FILE* f = fopen(path, "r");
     if (!f) return;
     char line[512];
@@ -565,7 +577,7 @@ static int luna_cur_theme_load(LunaCurTheme* th, const char* theme_name) {
         const char* file = role_files[r][0] ? role_files[r] : luna_cur_role_fallback_file(r);
         if (!file) continue;
         char path[LUNA_CUR_PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s", th->theme_dir, file);
+        if (!luna_cur_join_path(path, sizeof(path), th->theme_dir, file)) continue;
         if (!luna_cur_file_exists(path)) {
             /* try lowercase aliases */
             continue;

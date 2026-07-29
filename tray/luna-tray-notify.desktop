@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Luna Tray Notifier
+Comment=Resident XEmbed notification service
+Exec=luna-tray-notify
+Terminal=false
+Categories=Utility;System;
+X-GNOME-Autostart-enabled=true

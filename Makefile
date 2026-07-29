@@ -18,7 +18,7 @@ GLFW_LIBS   := $(shell pkg-config --libs glfw3 2>/dev/null)
 .PHONY: all build build-dri build-webgl build-desktop build-desktop-system build-shell \
         symlinks symlinks-system run server demo webgl run-gtk desktop desktop-system \
         luna-session install install-system stop clean opengl_gui luna-shell luna-ui \
-        luna-clipboard sample
+        luna-clipboard luna-tray-notify luna-wifi sample
 
 all: build symlinks
 
@@ -36,7 +36,7 @@ build-desktop: build build-dri build-shell symlinks
 # Compositor + shell only; GTK/GLFW use system libwayland-client
 build-desktop-system: build-dri build-shell symlinks-system
 
-build-shell: luna-shell luna-clipboard opengl_gui luna-ui
+build-shell: luna-shell luna-clipboard luna-tray-notify luna-wifi opengl_gui luna-ui
 
 # Symlink libwayland-client.so.0 (SONAME expected by GTK4)
 symlinks:
@@ -94,6 +94,14 @@ luna-clipboard: clipboard/luna-clipboard.c
 	@echo "→ Building luna-clipboard (Wayland clipboard manager)"
 	gcc -Os -Wall -Wextra -o luna-clipboard clipboard/luna-clipboard.c \
 	    $$(pkg-config --cflags --libs wayland-client)
+
+luna-tray-notify: tray/luna-tray-notify.c
+	@echo "→ Building luna-tray-notify (XEmbed tray notification service)"
+	gcc -Os -Wall -Wextra $$(pkg-config --cflags dbus-1) -o luna-tray-notify tray/luna-tray-notify.c -lX11 $$(pkg-config --libs dbus-1)
+
+luna-wifi: tray/luna-wifi.c
+	@echo "→ Building Luna Wi-Fi (XEmbed ConnMan tray app)"
+	gcc -Os -Wall -Wextra -o luna-wifi tray/luna-wifi.c -lX11
 
 opengl_gui: $(UI_DIR)/opengl_gui.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h
 	@echo "→ Building Luna UI demo host (opengl_gui)"
@@ -203,6 +211,10 @@ install: build-desktop
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
+	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
+	install -m 755 luna-wifi $(PREFIX)/bin/luna-wifi
+	install -D -m 644 tray/luna-wifi.desktop $(PREFIX)/share/applications/luna-wifi.desktop
+	install -D -m 644 tray/luna-tray-notify.desktop $(PREFIX)/share/applications/luna-tray-notify.desktop
 	install -m 755 $(TARGET)/libwayland_client.so $(LUNA_LIB)/
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so.0
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so
@@ -228,6 +240,10 @@ install-system: build-desktop-system
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
+	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
+	install -m 755 luna-wifi $(PREFIX)/bin/luna-wifi
+	install -D -m 644 tray/luna-tray-notify.desktop $(PREFIX)/share/applications/luna-tray-notify.desktop
+	install -D -m 644 tray/luna-wifi.desktop $(PREFIX)/share/applications/luna-wifi.desktop
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 ui/luna-ui.h ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 fonts/LunaSymbols-Solid.otf fonts/LunaSymbols-Regular.otf \
@@ -250,7 +266,7 @@ stop:
 
 clean:
 	cargo clean
-	rm -f opengl_gui luna-shell luna-clipboard luna-ui $(UI_DIR)/sample \
+	rm -f opengl_gui luna-shell luna-clipboard luna-tray-notify luna-wifi luna-ui $(UI_DIR)/sample \
 	  $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h \
 	  $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h \
 	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
