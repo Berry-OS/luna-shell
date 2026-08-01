@@ -13,14 +13,14 @@ use std::os::unix::io::RawFd;
 
 pub const HEADER_SIZE: usize = 8;
 
-pub struct RawMessage {
+pub struct RawMessage<'a> {
     pub object_id: u32,
     pub opcode: u16,
     pub size: usize,
-    pub payload: Vec<u8>,
+    pub payload: &'a [u8],
 }
 
-pub fn decode_header(buf: &[u8]) -> Option<(RawMessage, usize)> {
+pub fn decode_header(buf: &[u8]) -> Option<(RawMessage<'_>, usize)> {
     if buf.len() < HEADER_SIZE {
         return None;
     }
@@ -31,7 +31,7 @@ pub fn decode_header(buf: &[u8]) -> Option<(RawMessage, usize)> {
     if size < HEADER_SIZE || buf.len() < size {
         return None;
     }
-    let payload = buf[HEADER_SIZE..size].to_vec();
+    let payload = &buf[HEADER_SIZE..size];
     Some((
         RawMessage {
             object_id,

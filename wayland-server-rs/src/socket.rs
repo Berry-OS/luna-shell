@@ -167,7 +167,8 @@ impl Conn {
             } else {
                 0
             };
-            let mut ctrl_buf = vec![0u8; ctrl_len];
+            let mut ctrl_buf = [0u8; 256];
+            debug_assert!(ctrl_len <= ctrl_buf.len());
 
             let mut iov = iovec {
                 iov_base: data.as_ptr() as *mut c_void,
@@ -198,8 +199,9 @@ impl Conn {
         let fd_bytes = std::mem::size_of::<RawFd>() * FD_MAX;
         let ctrl_len = unsafe { CMSG_SPACE(fd_bytes as _) as usize };
 
-        let mut data_buf = vec![0u8; BUF];
-        let mut ctrl_buf = vec![0u8; ctrl_len];
+        let mut data_buf = [0u8; BUF];
+        let mut ctrl_buf = [0u8; 256];
+        debug_assert!(ctrl_len <= ctrl_buf.len());
 
         let (n, actual_ctrl_len) = unsafe {
             let mut iov = iovec {

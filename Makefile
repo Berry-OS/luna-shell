@@ -86,7 +86,9 @@ luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
             $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h \
             $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
 	@echo "→ Building luna-shell (Luna Desktop shell)"
-	gcc -Os -Wall -Wextra -DLUNA_BACKEND_X11 $(SHELL_CFLAGS) -I$(UI_DIR) \
+	# luna-shell's layout, animation and draw-list walks are hot on every KMS \
+	# frame.  Prefer runtime optimization over the size-oriented global default.
+	gcc -O2 -Wall -Wextra -DLUNA_BACKEND_X11 $(SHELL_CFLAGS) -I$(UI_DIR) \
 	    $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c $(LAYER_SHELL_SRC) \
 	    -o luna-shell $(SHELL_LIBS) -lX11
 
@@ -100,8 +102,8 @@ luna-tray-notify: tray/luna-tray-notify.c
 	gcc -Os -Wall -Wextra $$(pkg-config --cflags dbus-1) -o luna-tray-notify tray/luna-tray-notify.c -lX11 $$(pkg-config --libs dbus-1)
 
 luna-wifi: tray/luna-wifi.c
-	@echo "→ Building Luna Wi-Fi (XEmbed ConnMan tray app)"
-	gcc -Os -Wall -Wextra -o luna-wifi tray/luna-wifi.c -lX11
+	@echo "→ Building Luna Wi-Fi (native Wayland tray service)"
+	gcc -Os -Wall -Wextra -o luna-wifi tray/luna-wifi.c
 
 opengl_gui: $(UI_DIR)/opengl_gui.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h
 	@echo "→ Building Luna UI demo host (opengl_gui)"

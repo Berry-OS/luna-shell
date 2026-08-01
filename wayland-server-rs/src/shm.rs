@@ -97,6 +97,12 @@ impl ShmPool {
         self.size
     }
 
+    /// Borrow the owned dma-buf fd for DRM PRIME import. The pool keeps the
+    /// descriptor alive for the complete wl_buffer lifetime.
+    pub fn dmabuf_fd(&self) -> Option<RawFd> {
+        self.is_dmabuf.then_some(self.fd)
+    }
+
     pub fn slice(&self, offset: usize, len: usize) -> Option<&[u8]> {
         if offset.checked_add(len)? > self.size {
             return None;
@@ -125,6 +131,14 @@ pub struct ShmBuffer {
 }
 
 impl ShmBuffer {
+    pub fn dmabuf_fd(&self) -> Option<RawFd> {
+        self.pool.dmabuf_fd()
+    }
+
+    pub fn upload_ptr(&self) -> Option<*const u8> {
+        let len = (self.stride as usize).checked_mul(self.height as usize)?;
+        Some(self.pool.slice(self.offset, len)?.as_ptr())
+    }
     /// Begin CPU read (dmabuf issues SYNC_START). Pair with end_cpu_read().
     pub fn begin_cpu_read(&self) {
         self.pool.begin_cpu_read();

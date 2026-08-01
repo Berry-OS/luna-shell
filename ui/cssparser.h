@@ -708,22 +708,24 @@ static void parse_stylesheet_inner(Lexer *l, CSSStyleSheet *sheet, CSSCallbacks 
                         lex_skip_ws(l);
                         if (lex_peek(l) == '}') { lex_advance(l); break; }
                         if (lex_peek(l) == '@') { skip_block(l); continue; }
-                        CSSRule inner = {0};
-                        inner.selector_count = parse_selector_list(l, inner.selectors, CSS_MAX_SELECTORS);
+                        CSSRule *inner = calloc(1, sizeof(*inner));
+                        if (!inner) return;
+                        inner->selector_count = parse_selector_list(l, inner->selectors, CSS_MAX_SELECTORS);
                         lex_skip_ws(l);
                         if (lex_peek(l) == '{') {
-                            parse_rule_block(l, &inner, NULL);
+                            parse_rule_block(l, inner, NULL);
                             if (at.nested_rule_count >= at.nested_rule_cap) {
                                 at.nested_rule_cap *= 2;
                                 at.nested_rules = realloc(at.nested_rules,
                                     at.nested_rule_cap * sizeof(CSSRule));
                             }
-                            at.nested_rules[at.nested_rule_count++] = inner;
+                            at.nested_rules[at.nested_rule_count++] = *inner;
                         } else {
                             /* skip garbage */
                             while (!lex_eof(l) && lex_peek(l) != '}' && lex_peek(l) != '{')
                                 lex_advance(l);
                         }
+                        free(inner);
                     }
                 }
                 if (cb && cb->on_at_rule) cb->on_at_rule(cb->user_data, &at);
@@ -745,27 +747,29 @@ static void parse_stylesheet_inner(Lexer *l, CSSStyleSheet *sheet, CSSCallbacks 
                     while (!lex_eof(l)) {
                         lex_skip_ws(l);
                         if (lex_peek(l) == '}') { lex_advance(l); break; }
-                        CSSRule kf = {0};
+                        CSSRule *kf = calloc(1, sizeof(*kf));
+                        if (!kf) return;
                         /* keyframe selector: from / to / percentage */
                         char stop_sel[CSS_MAX_STR] = {0};
                         lex_until(l, stop_sel, CSS_MAX_STR, "{");
                         str_trim(stop_sel);
                         /* store as type selector for simplicity */
-                        if (kf.selector_count < CSS_MAX_SELECTORS) {
-                            snprintf(kf.selectors[0].compounds[0].parts[0].name, CSS_MAX_STR, "%s", stop_sel);
-                            kf.selectors[0].compounds[0].parts[0].type = CSS_SEL_TYPE;
-                            kf.selectors[0].compounds[0].part_count = 1;
-                            kf.selectors[0].compound_count = 1;
-                            kf.selector_count = 1;
+                        if (kf->selector_count < CSS_MAX_SELECTORS) {
+                            snprintf(kf->selectors[0].compounds[0].parts[0].name, CSS_MAX_STR, "%s", stop_sel);
+                            kf->selectors[0].compounds[0].parts[0].type = CSS_SEL_TYPE;
+                            kf->selectors[0].compounds[0].part_count = 1;
+                            kf->selectors[0].compound_count = 1;
+                            kf->selector_count = 1;
                         }
                         lex_skip_ws(l);
-                        if (lex_peek(l) == '{') parse_rule_block(l, &kf, NULL);
+                        if (lex_peek(l) == '{') parse_rule_block(l, kf, NULL);
                         if (at.nested_rule_count >= at.nested_rule_cap) {
                             at.nested_rule_cap *= 2;
                             at.nested_rules = realloc(at.nested_rules,
                                 at.nested_rule_cap * sizeof(CSSRule));
                         }
-                        at.nested_rules[at.nested_rule_count++] = kf;
+                        at.nested_rules[at.nested_rule_count++] = *kf;
+                        free(kf);
                     }
                 }
                 if (cb && cb->on_at_rule) cb->on_at_rule(cb->user_data, &at);
@@ -779,11 +783,13 @@ static void parse_stylesheet_inner(Lexer *l, CSSStyleSheet *sheet, CSSCallbacks 
                 str_trim(tmp);
                 snprintf(at.prelude, CSS_MAX_VALUE, "%s", tmp);
                 lex_skip_ws(l);
-                CSSRule inner = {0};
-                if (lex_peek(l) == '{') parse_rule_block(l, &inner, NULL);
+                CSSRule *inner = calloc(1, sizeof(*inner));
+                if (!inner) return;
+                if (lex_peek(l) == '{') parse_rule_block(l, inner, NULL);
                 at.nested_rule_cap = 1;
                 at.nested_rules = malloc(sizeof(CSSRule));
-                at.nested_rules[0] = inner;
+                at.nested_rules[0] = *inner;
+                free(inner);
                 at.nested_rule_count = 1;
                 if (cb && cb->on_at_rule) cb->on_at_rule(cb->user_data, &at);
                 sheet_add_at(sheet, &at);
@@ -803,28 +809,29 @@ static void parse_stylesheet_inner(Lexer *l, CSSStyleSheet *sheet, CSSCallbacks 
         }
 
         /* Normal rule */
-        CSSRule rule = {0};
+        CSSRule *rule = calloc(1, sizeof(*rule));
+        if (!rule) return;
         if (cb && cb->on_rule_start) cb->on_rule_start(cb->user_data);
 
-        rule.selector_count = parse_selector_list(l, rule.selectors, CSS_MAX_SELECTORS);
+        rule->selector_count = parse_selector_list(l, rule->selectors, CSS_MAX_SELECTORS);
         lex_skip_ws(l);
 
         if (lex_peek(l) == '{') {
             /* emit selectors */
             if (cb && cb->on_selector) {
-                for (int i = 0; i < rule.selector_count; i++)
-                    cb->on_selector(cb->user_data, &rule.selectors[i], i, rule.selector_count);
+                for (int i = 0; i < rule->selector_count; i++)
+                    cb->on_selector(cb->user_data, &rule->selectors[i], i, rule->selector_count);
             }
-            parse_rule_block(l, &rule, cb);
+            parse_rule_block(l, rule, cb);
 
             /* compute max specificity */
-            for (int i = 0; i < rule.selector_count; i++) {
-                if (rule.selectors[i].specificity > rule.specificity)
-                    rule.specificity = rule.selectors[i].specificity;
+            for (int i = 0; i < rule->selector_count; i++) {
+                if (rule->selectors[i].specificity > rule->specificity)
+                    rule->specificity = rule->selectors[i].specificity;
             }
 
-            if (rule.selector_count > 0 || rule.decl_count > 0)
-                sheet_add_rule(sheet, &rule);
+            if (rule->selector_count > 0 || rule->decl_count > 0)
+                sheet_add_rule(sheet, rule);
         } else {
             /* malformed: skip to next brace or semicolon */
             while (!lex_eof(l) && lex_peek(l) != '{' && lex_peek(l) != ';')
@@ -836,6 +843,7 @@ static void parse_stylesheet_inner(Lexer *l, CSSStyleSheet *sheet, CSSCallbacks 
         }
 
         if (cb && cb->on_rule_end) cb->on_rule_end(cb->user_data);
+        free(rule);
     }
 }
 

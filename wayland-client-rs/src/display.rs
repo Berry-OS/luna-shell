@@ -104,7 +104,9 @@ impl Display {
 
     pub fn drain_recv_buf(&mut self) {
         let mut buf_offset = 0usize;
-        let buf = self.socket.recv_buf.clone(); // TODO: zero-copy
+        // Temporarily own the allocation so callbacks may mutate `self` while
+        // message payloads borrow this stable receive storage.
+        let mut buf = std::mem::take(&mut self.socket.recv_buf);
 
         loop {
             let remaining = &buf[buf_offset..];
@@ -112,11 +114,16 @@ impl Display {
                 None => break,
                 Some((msg, consumed)) => {
                     buf_offset += consumed;
-                    self.dispatch_raw(msg.object_id, msg.opcode, &msg.payload);
+                    self.dispatch_raw(msg.object_id, msg.opcode, msg.payload);
                 }
             }
         }
-        self.socket.recv_buf.drain(..buf_offset);
+        if buf_offset != 0 {
+            let remaining = buf.len() - buf_offset;
+            buf.copy_within(buf_offset.., 0);
+            buf.truncate(remaining);
+        }
+        self.socket.recv_buf = buf;
     }
 
     fn dispatch_raw(&mut self, object_id: u32, opcode: u16, payload: &[u8]) {
@@ -155,7 +162,8 @@ impl Display {
             }
             let ev_msg = &*iface_ref.events.add(opcode as usize);
             let sig = CStr::from_ptr(ev_msg.signature).to_bytes();
-            let mut args = wire::parse_event_args(sig, payload, &mut self.socket.recv_fds, &self.objects);
+            let mut parsed = wire::parse_event_args(sig, payload, &mut self.socket.recv_fds, &self.objects);
+            let args = &mut parsed.args;
             /* Server-side new_id ('n'): ALWAYS create a proxy before dispatch
              * (libwayland ABI). Skipping this left raw ids in the arg union and
              * GTK segfaulted on wl_proxy_add_listener (pcmanfm). */
@@ -199,7 +207,7 @@ impl Display {
                 }
             }
             if has_handler {
-                dispatch_event(proxy_ptr, opcode, ev_msg as *const crate::types::wl_message, &mut args);
+                dispatch_event(proxy_ptr, opcode, ev_msg as *const crate::types::wl_message, args);
             }
         }
     }

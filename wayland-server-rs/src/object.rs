@@ -39,6 +39,9 @@ pub struct Surface {
   pub pending_buffer: Option<u32>,
   pub pending_attach: bool,
   pub current_buffer: Option<ShmBuffer>,
+  /// Object id of `current_buffer`.  The compositor must retain this wl_buffer
+  /// until it has stopped reading the shared storage.
+  pub current_buffer_id: Option<u32>,
   pub x: i32,
   pub y: i32,
   pub frame_callbacks: Vec<u32>,
@@ -239,6 +242,7 @@ impl Default for Surface {
       pending_buffer: None,
       pending_attach: false,
       current_buffer: None,
+      current_buffer_id: None,
       x: 0,
       y: 0,
       frame_callbacks: Vec::new(),

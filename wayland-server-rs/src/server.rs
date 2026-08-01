@@ -26,6 +26,8 @@ const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258; // 'XR24'
 const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 const SERVER_ID_BASE: u32 = 0xff00_0000;
 
+type SurfacePlacement = (RawFd, u32, i32, i32);
+
 /// xdg_toplevel.state
 const TOPLEVEL_STATE_MAXIMIZED: u32 = 1;
 const TOPLEVEL_STATE_FULLSCREEN: u32 = 2;
@@ -153,9 +155,19 @@ pub struct Server {
   session_quit: bool,
   /// Bottom→top stacking order of mapped xdg_toplevel surfaces.
   window_stack: Vec<(RawFd, u32)>,
+  /// Bottom→top creation order of mapped xdg_popup surfaces.  Object storage
+  /// is a HashMap, whose iteration order must not decide submenu stacking.
+  popup_stack: Vec<(RawFd, u32)>,
   /// Last pointer button-press serial (for xdg_toplevel.move/resize).
   last_button_serial: u32,
   last_button_pressed: bool,
+  /// Wayland implicit pointer grab: button releases must go to the surface
+  /// that received the press, even when focus/stacking changes meanwhile.
+  pointer_grab: Option<(RawFd, u32, u32, i32, i32)>,
+  /// Explicit xdg_popup grab: (client fd, xdg_popup object, wl_surface).
+  /// Firefox relies on this for native menus; ignoring xdg_popup.grab leaves
+  /// the menu mapped while pointer events leak to unrelated surfaces.
+  popup_grab: Option<(RawFd, u32, u32)>,
   wm_grab: WmGrab,
   /// Deferred WM actions while the requesting client is outside `clients`.
   pending_activate: Option<u32>,
@@ -180,6 +192,16 @@ pub struct Server {
   ssd_last_click: Option<(u32, u32)>,
   /// Super+D show-desktop: saved surface ids currently minimized by us.
   show_desktop_ids: Vec<u32>,
+  /// Runtime WM preferences supplied by luna-shell over the existing IPC.
+  wm_window_gap: i32,
+  wm_edge_snap: bool,
+  wm_titlebar_double_click: bool,
+  wm_super_shortcuts: bool,
+  /// Reused by the compositor. Keeping these allocations alive avoids a burst
+  /// of allocator/free-list work at the end of every frame.
+  compose_layers: [Vec<SurfacePlacement>; 4],
+  compose_toplevels: Vec<SurfacePlacement>,
+  compose_popups: Vec<SurfacePlacement>,
 }
 
 impl Server {
@@ -235,8 +257,11 @@ impl Server {
       shell_state_dirty: true,
       session_quit: false,
       window_stack: Vec::new(),
+      popup_stack: Vec::new(),
       last_button_serial: 0,
       last_button_pressed: false,
+      pointer_grab: None,
+      popup_grab: None,
       wm_grab: WmGrab::None,
       pending_activate: None,
       pending_resize_configure: None,
@@ -251,6 +276,13 @@ impl Server {
       switcher: None,
       ssd_last_click: None,
       show_desktop_ids: Vec::new(),
+      wm_window_gap: 8,
+      wm_edge_snap: true,
+      wm_titlebar_double_click: true,
+      wm_super_shortcuts: true,
+      compose_layers: Default::default(),
+      compose_toplevels: Vec::new(),
+      compose_popups: Vec::new(),
     };
 
     if let Some(ref ipc) = server.shell_ipc {
@@ -411,14 +443,22 @@ impl Server {
       }
     }
 
+    let mut recv_buf = std::mem::take(&mut client.conn.recv_buf);
+    let mut consumed_total = 0usize;
     while !client.conn.closed {
-      let (msg, consumed) = match wire::decode_header(&client.conn.recv_buf) {
+      let (msg, consumed) = match wire::decode_header(&recv_buf[consumed_total..]) {
         Some(x) => x,
         None => break,
       };
-      client.conn.recv_buf.drain(..consumed);
+      consumed_total += consumed;
       self.handle_request(&mut client, msg);
     }
+    if consumed_total != 0 {
+      let remaining = recv_buf.len() - consumed_total;
+      recv_buf.copy_within(consumed_total.., 0);
+      recv_buf.truncate(remaining);
+    }
+    client.conn.recv_buf = recv_buf;
 
     if drop_client || client.conn.closed {
       self.epoll_del(fd);
@@ -427,6 +467,13 @@ impl Server {
       if self.ptr_client_fd == fd {
         self.ptr_entered = false;
         self.ptr_client_fd = -1;
+      }
+      if self.pointer_grab.map(|g| g.0) == Some(fd) {
+        self.pointer_grab = None;
+        self.last_button_pressed = false;
+      }
+      if self.popup_grab.map(|g| g.0) == Some(fd) {
+        self.popup_grab = None;
       }
       if self.cursor_client_fd == fd {
         self.cursor_client_fd = -1;
@@ -445,6 +492,7 @@ impl Server {
         self.focused_surface_id = 0;
       }
       self.window_stack.retain(|(f, _)| *f != fd);
+      self.popup_stack.retain(|(f, _)| *f != fd);
       if matches!(self.wm_grab, WmGrab::Move { fd: gfd, .. } | WmGrab::Resize { fd: gfd, .. } if gfd == fd) {
         self.wm_grab = WmGrab::None;
       }
@@ -482,7 +530,7 @@ impl Server {
     }
   }
 
-  fn handle_request(&mut self, client: &mut Client, msg: wire::RawMessage) {
+  fn handle_request(&mut self, client: &mut Client, msg: wire::RawMessage<'_>) {
     let iface = match client.objects.get(&msg.object_id) {
       Some(o) => o.interface,
       None => {
@@ -831,6 +879,13 @@ impl Server {
   fn req_surface(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
       0 => {
+        let current_buffer_id = match client.objects.get(&id) {
+          Some(Object { role: Role::Surface(s), .. }) => s.current_buffer_id,
+          _ => None,
+        };
+        if let Some(bid) = current_buffer_id {
+          self.buffer_release.push((client.conn.fd, bid));
+        }
         if self.active_text_input.map(|v| (v.0, v.2)) == Some((client.conn.fd, id)) {
           self.active_text_input = None;
           self.deactivate_input_methods(None);
@@ -839,6 +894,24 @@ impl Server {
           self.focused_client_fd = -1;
           self.focused_surface_id = 0;
         }
+        if self.ptr_client_fd == client.conn.fd && self.ptr_surface_id == id {
+          self.ptr_entered = false;
+          self.ptr_client_fd = -1;
+          self.ptr_surface_id = 0;
+        }
+        if self.kbd_client_fd == client.conn.fd && self.kbd_surface_id == id {
+          self.kbd_entered = false;
+          self.kbd_client_fd = -1;
+          self.kbd_surface_id = 0;
+        }
+        if self.pointer_grab.map(|g| (g.0, g.1)) == Some((client.conn.fd, id)) {
+          self.pointer_grab = None;
+          self.last_button_pressed = false;
+        }
+        if self.popup_grab.map(|g| (g.0, g.2)) == Some((client.conn.fd, id)) {
+          self.popup_grab = None;
+        }
+        self.popup_stack.retain(|&(fd, sid)| fd != client.conn.fd || sid != id);
         if self.cursor_client_fd == client.conn.fd && self.cursor_surface_id == id {
           self.cursor_client_fd = -1;
           self.cursor_surface_id = 0; // fall back to default arrow
@@ -913,11 +986,7 @@ impl Server {
             ..
           }) => {
             let clone = b.clone();
-            // Defer wl_buffer.release until after composite_and_present so
-            // Mesa EGL doesn't free the buffer while eglSwapBuffers is still
-            // waiting for the wl_callback.done event.
-            self.buffer_release.push((fd, bid));
-            Some(clone)
+            Some((bid, clone))
           }
           _ => None,
         },
@@ -940,13 +1009,24 @@ impl Server {
     }) = client.objects.get_mut(&id)
     {
       if attach {
+        // We composite directly from the client's shared storage on every
+        // screen repaint (including cursor-only repaints).  Do not release a
+        // buffer while it remains current: after wl_buffer.release the client
+        // may immediately start drawing its next frame into that storage,
+        // which made partially-written windows visibly flash.  Retire the old
+        // buffer only after this atomic replacement has been presented.
+        if let Some(old_bid) = s.current_buffer_id.take() {
+          self.buffer_release.push((fd, old_bid));
+        }
         // Atomic buffer swap: never clear before installing the replacement.
         // `new_buffer == None` is an intentional unmap (attach NULL).
         s.mapped = new_buffer.is_some();
-        if let Some(buf) = new_buffer {
+        if let Some((bid, buf)) = new_buffer {
           s.current_buffer = Some(buf);
+          s.current_buffer_id = Some(bid);
         } else {
           s.current_buffer = None;
+          s.current_buffer_id = None;
         }
       }
       s.pending_attach = false;
@@ -1203,62 +1283,51 @@ impl Server {
     walk(client, surface_id, 0)
   }
 
-  /// Collect SHM blits for a surface and its subsurface children (Firefox content path).
-  fn collect_surface_tree_blits(
+  /// Paint a surface tree without building a temporary list or cloning buffer
+  /// handles. This path runs for every visible window on every frame.
+  fn blit_surface_tree(
     client: &Client,
+    fb: &mut Framebuffer,
     surface_id: u32,
     ox: i32,
     oy: i32,
     depth: u32,
-  ) -> Vec<(i32, i32, crate::shm::ShmBuffer)> {
-    let mut out = Vec::new();
-    fn walk(
-      client: &Client,
-      sid: u32,
-      ox: i32,
-      oy: i32,
-      depth: u32,
-      out: &mut Vec<(i32, i32, crate::shm::ShmBuffer)>,
-    ) {
-      if depth > 8 {
-        return;
-      }
-      if let Some(Object {
-        role: Role::Surface(s),
-        ..
-      }) = client.objects.get(&sid)
-      {
+  ) {
+    if depth > 8 {
+      return;
+    }
+    if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&surface_id) {
+      if s.mapped {
         if let Some(buf) = &s.current_buffer {
-          if s.mapped {
-            out.push((ox, oy, buf.clone()));
-          }
+          fb.blit_shm(buf, ox, oy);
         }
       }
-      let children: Vec<(u32, i32, i32)> = client
-        .objects
-        .values()
-        .filter_map(|o| match &o.role {
-          Role::Subsurface {
-            surface_id: child,
-            parent_id,
-            x,
-            y,
-            ..
-          } if *parent_id == sid => Some((*child, *x, *y)),
-          _ => None,
-        })
-        .collect();
-      for (child, sx, sy) in children {
-        walk(client, child, ox + sx, oy + sy, depth + 1, out);
+    }
+    for obj in client.objects.values() {
+      if let Role::Subsurface { surface_id: child, parent_id, x, y, .. } = &obj.role {
+        if *parent_id == surface_id {
+          Self::blit_surface_tree(client, fb, *child, ox + *x, oy + *y, depth + 1);
+        }
       }
     }
-    walk(client, surface_id, ox, oy, depth, &mut out);
-    out
   }
 
-  fn blit_collected(fb: &mut crate::render::Framebuffer, blits: &[(i32, i32, crate::shm::ShmBuffer)]) {
-    for (x, y, buf) in blits {
-      fb.blit_shm(buf, *x, *y);
+  fn collect_gpu_surface_tree(
+    client: &Client, sid: u32, ox: i32, oy: i32, depth: u32,
+    out: &mut Vec<(i32, i32, ShmBuffer)>,
+  ) {
+    if depth > 8 { return; }
+    if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&sid) {
+      if s.mapped {
+        if let Some(buf) = &s.current_buffer { out.push((ox, oy, buf.clone())); }
+      }
+    }
+    for obj in client.objects.values() {
+      if let Role::Subsurface { surface_id, parent_id, x, y, .. } = &obj.role {
+        if *parent_id == sid {
+          Self::collect_gpu_surface_tree(client, *surface_id, ox + *x, oy + *y, depth + 1, out);
+        }
+      }
     }
   }
 
@@ -1351,6 +1420,19 @@ impl Server {
         (Some("close"), Some(id)) => {
           if let Ok(sid) = id.parse::<u32>() {
             self.close_surface(sid);
+          }
+        }
+        (Some("wm_config"), Some(key)) => {
+          if let Some(raw) = parts.next() {
+            if let Ok(value) = raw.parse::<i32>() {
+              match key {
+                "gap" => self.wm_window_gap = value.clamp(0, 32),
+                "edge_snap" => self.wm_edge_snap = value != 0,
+                "titlebar_double_click" => self.wm_titlebar_double_click = value != 0,
+                "super_shortcuts" => self.wm_super_shortcuts = value != 0,
+                _ => {}
+              }
+            }
           }
         }
         (Some("keymap"), layout) => {
@@ -1447,8 +1529,7 @@ impl Server {
         .rev()
         .filter_map(|&(fd, sid)| {
           let client = self.clients.get(&fd)?;
-          if Self::surface_is_xdg_toplevel_in(client, sid) && !self.surface_is_minimized(client, sid)
-          {
+          if Self::surface_is_xdg_toplevel_in(client, sid) {
             let (title, app_id, _, _, _) = {
               let xdg = match client.objects.get(&sid)? {
                 Object {
@@ -1468,19 +1549,20 @@ impl Server {
           }
         })
         .collect();
-      if stack_ids.is_empty() {
-        ShellIpc::collect_windows(
-          &self.clients,
-          self.focused_client_fd,
-          self.focused_surface_id,
-        )
-        .into_iter()
-        .filter(|w| !w.minimized)
-        .map(|w| w.surface_id)
-        .collect()
-      } else {
-        stack_ids
+      // window_stack is the preferred MRU order, but it can temporarily miss
+      // newly mapped or restored windows.  Append every missing toplevel from
+      // the authoritative snapshot so Alt+Tab never silently drops one.
+      let mut ids = stack_ids;
+      for w in ShellIpc::collect_windows(
+        &self.clients,
+        self.focused_client_fd,
+        self.focused_surface_id,
+      ) {
+        if !ids.contains(&w.surface_id) {
+          ids.push(w.surface_id);
+        }
       }
+      ids
     };
     if windows.is_empty() {
       return;
@@ -1503,8 +1585,14 @@ impl Server {
     } else {
       (cur_idx + 1) % windows.len()
     };
+    let selected_sid = windows.get(next_idx).copied();
     self.switcher = Some((next_idx, windows));
     self.shell_state_dirty = true;
+    // Raise and focus the selected window immediately on each Tab press so it
+    // is visually in front rather than waiting for Alt to be released.
+    if let Some(sid) = selected_sid {
+      self.activate_surface(sid);
+    }
   }
 
   fn commit_switcher(&mut self) {
@@ -1604,11 +1692,17 @@ impl Server {
       self.dirty = true;
       self.shell_state_dirty = true;
     }
-    // Do NOT send xdg_toplevel.configure for ACTIVATED-only changes.
-    // GTK/Firefox treat every configure as full damage → visible flicker on
-    // Alt-Tab / click-to-focus.  Keyboard enter is enough for input focus;
-    // decoration chrome updates on the next real resize/maximize configure.
-    if was_minimized {
+    // Keep client-side titlebars in sync with Alt-Tab/taskbar activation.
+    // xdg-shell communicates the activated state through toplevel.configure;
+    // keyboard enter alone does not update GTK/Firefox window chrome.  Notify
+    // both sides of a real focus transition, while retaining the no-op fast
+    // path when the already-focused window is activated again.
+    if focus_changed {
+      if prev_fd >= 0 && prev_sid != 0 {
+        self.send_toplevel_configure_for(prev_fd, prev_sid, None, false);
+      }
+      self.send_toplevel_configure_for(fd, surface_id, None, false);
+    } else if was_minimized {
       self.send_toplevel_configure_for(fd, surface_id, None, false);
     }
     self.ensure_kbd_entered(fd, surface_id);
@@ -1846,10 +1940,11 @@ impl Server {
       } else {
         0
       };
-      width = uw / 2;
-      height = (uh - ssd_extra).max(64);
-      let tx = if tiled == 1 { ux } else { ux + uw - width };
-      self.set_surface_screen_pos(fd, surface_id, tx, uy + ssd_extra, width, height);
+      let gap = self.wm_window_gap.clamp(0, 32);
+      width = ((uw - gap * 3) / 2).max(64);
+      height = (uh - ssd_extra - gap * 2).max(64);
+      let tx = if tiled == 1 { ux + gap } else { ux + uw - width - gap };
+      self.set_surface_screen_pos(fd, surface_id, tx, uy + ssd_extra + gap, width, height);
     } else if size_override.is_none() && cur_w > 0 && cur_h > 0 {
       width = 0;
       height = 0;
@@ -2033,11 +2128,11 @@ impl Server {
         let near_left = px <= ux + edge;
         let near_right = px >= ux + uw - edge;
         let near_top = py <= uy + edge;
-        if near_top && !near_left && !near_right {
+        if self.wm_edge_snap && near_top && !near_left && !near_right {
           self.maximize_surface(surface_id, true);
-        } else if near_left {
+        } else if self.wm_edge_snap && near_left {
           self.tile_surface(surface_id, 1);
-        } else if near_right {
+        } else if self.wm_edge_snap && near_right {
           self.tile_surface(surface_id, 2);
         } else if let Some((ox, oy, w, h)) = self.surface_geometry(fd, surface_id) {
           // Was this window tiled/maximized?  Dragging away restores floating
@@ -3346,11 +3441,13 @@ impl Server {
       .unwrap_or(0)
   }
 
-  fn draw_ssd_titlebar(&mut self, win_x: i32, win_y: i32, win_w: i32) {
+  fn draw_ssd_titlebar(&mut self, win_x: i32, win_y: i32, win_w: i32, focused: bool) {
     const BAR_H: i32 = 28;
     let bar_y = win_y - BAR_H;
-    let bar_color: u32 = 0xff2a_2a32;
-    let bar_hi: u32 = 0xff3a_3a46;
+    // The focused window uses Luna's blue accent; inactive titlebars stay
+    // deliberately neutral so Alt-Tab's result is apparent at a glance.
+    let bar_color: u32 = if focused { 0xff24_497a } else { 0xff2a_2a32 };
+    let bar_hi: u32 = if focused { 0xff4d_8fd8 } else { 0xff3a_3a46 };
     let close_c: u32 = 0xffe8_4a4a;
     let min_c: u32 = 0xffe8_c04a;
     let max_c: u32 = 0xff4a_c86a;
@@ -3389,10 +3486,10 @@ impl Server {
   }
 
   /// Visible window frame so the user can see (and grab) resize borders.
-  fn draw_window_frame(&mut self, win_x: i32, win_y: i32, win_w: i32, win_h: i32, ssd: bool) {
+  fn draw_window_frame(&mut self, win_x: i32, win_y: i32, win_w: i32, win_h: i32, ssd: bool, focused: bool) {
     const BAR_H: i32 = 28;
     const FRAME: i32 = 3;
-    let frame_c: u32 = 0xff5a_5a72;
+    let frame_c: u32 = if focused { 0xff4d_8fd8 } else { 0xff5a_5a72 };
     let top = if ssd { win_y - BAR_H } else { win_y };
     let left = win_x - FRAME;
     let right = win_x + win_w + FRAME;
@@ -3489,11 +3586,13 @@ impl Server {
       if maxed || full {
         continue;
       }
-      // Use the full buffer rect (not window_geometry).  window_geometry is the
-      // content box *inside* CSD shadows — treating its inset rim as resize
-      // stole clicks from the real client surface.
-      let Some((ox, oy, w, h)) = self.surface_buffer_rect(fd, sid) else { continue };
       let ssd = Self::uses_ssd(self.toplevel_decoration_mode(fd, sid));
+      // The visible window edges are described by window_geometry.  The full
+      // wl_buffer commonly includes transparent CSD shadow padding, especially
+      // above and below the window; using it makes the resize rim appear offset
+      // by exactly that padding.  The rim below is strictly outside this rect,
+      // so it still cannot steal clicks from the actual client contents.
+      let Some((ox, oy, w, h)) = self.surface_geometry(fd, sid) else { continue };
       // SSD titlebar sits above the buffer — treat it as part of the window.
       let top_extra = if ssd { 28 } else { 0 };
       let inner_l = ox;
@@ -4476,6 +4575,8 @@ impl Server {
             s.y = abs_y;
             s.popup = true;
           }
+          self.popup_stack.retain(|&(fd, sid)| fd != client.conn.fd || sid != surf_id);
+          self.popup_stack.push((client.conn.fd, surf_id));
 
           // xdg_popup.configure uses parent-relative coordinates (protocol spec).
           client.send(nid, 0, &[Arg::Int(rel_x), Arg::Int(rel_y), Arg::Int(pop_w), Arg::Int(pop_h)]);
@@ -5012,7 +5113,7 @@ impl Server {
     }
   }
 
-  fn req_xdg_popup(&mut self, client: &mut Client, id: u32, opcode: u16, _args: &[Arg]) {
+  fn req_xdg_popup(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
       0 => {
         if let Some(Object {
@@ -5035,12 +5136,33 @@ impl Server {
               s.popup = false;
               s.mapped = false;
             }
+            self.popup_stack.retain(|&(fd, surface)| fd != client.conn.fd || surface != sid);
           }
         }
         client.objects.remove(&id);
+        if self.popup_grab.map(|g| (g.0, g.1)) == Some((client.conn.fd, id)) {
+          self.popup_grab = None;
+        }
         self.dirty = true;
       }
-      1 => {}
+      1 => {
+        // grab(seat, serial).  The serial must name the button press that
+        // opened the popup.  Keep the topmost grab so owner-events can stay
+        // within Firefox and an outside click can dismiss the menu.
+        let serial = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
+        if serial != 0 && serial == self.last_button_serial {
+          let surface_id = client.objects.get(&id).and_then(|obj| match obj.role {
+            Role::XdgPopup { xdg_surface_id } => client.objects.get(&xdg_surface_id).and_then(|o| match o.role {
+              Role::XdgSurface { surface_id, .. } => Some(surface_id),
+              _ => None,
+            }),
+            _ => None,
+          });
+          if let Some(sid) = surface_id {
+            self.popup_grab = Some((client.conn.fd, id, sid));
+          }
+        }
+      }
       2 => {}
       _ => {}
     }
@@ -5334,8 +5456,6 @@ impl Server {
     if self.fb.width != w || self.fb.height != h {
       self.fb = Framebuffer::new(w, h);
     }
-    self.fb.clear(0xff10_1014);
-
     // Input-method popups belong above ordinary application windows, but not
     // above the shell's own modal layers.  In particular, luna-shell uses
     // OVERLAY for its launcher, settings and confirmation surfaces; letting a
@@ -5343,19 +5463,16 @@ impl Server {
     // clients appear to tear through one another when they overlapped.
     //
     // BACKGROUND(0) < BOTTOM(1) < toplevels < TOP(2) < IM/xdg popups < OVERLAY(3)
-    let mut layers: [Vec<(RawFd, u32, i32, i32)>; 4] = Default::default();
-    let mut toplevels: Vec<(RawFd, u32, i32, i32)> = Vec::new();
-    let mut popups: Vec<(RawFd, u32, i32, i32)> = Vec::new();
+    let mut layers = std::mem::take(&mut self.compose_layers);
+    let mut toplevels = std::mem::take(&mut self.compose_toplevels);
+    let mut popups = std::mem::take(&mut self.compose_popups);
+    for layer in &mut layers {
+      layer.clear();
+    }
+    toplevels.clear();
+    popups.clear();
 
     for (&fd, client) in &self.clients {
-      // Collect layer surface geometry for this client
-      let ls_map: HashMap<u32, (u32, i32, i32)> = client.objects.iter().filter_map(|(_, obj)| {
-        if let Role::LayerSurface { surface_id, layer, anchor, size_w, size_h, margin_top, margin_right, margin_bottom, margin_left, .. } = &obj.role {
-          let (x, y, _, _) = layer_surface_rect(w, h, *anchor, *size_w, *size_h, *margin_top, *margin_right, *margin_bottom, *margin_left);
-          Some((*surface_id, (*layer, x, y)))
-        } else { None }
-      }).collect();
-
       for (&surface_id, obj) in &client.objects {
         if let Role::Surface(s) = &obj.role {
           // Subsurface children are painted with their parent tree — never alone.
@@ -5363,7 +5480,16 @@ impl Server {
             continue;
           }
 
-          if let Some((layer, dx, dy)) = ls_map.get(&surface_id).copied() {
+          let layer_geometry = client.objects.values().find_map(|obj| {
+            if let Role::LayerSurface { surface_id: sid, layer, anchor, size_w, size_h, margin_top, margin_right, margin_bottom, margin_left, .. } = &obj.role {
+              if *sid == surface_id {
+                let (x, y, _, _) = layer_surface_rect(w, h, *anchor, *size_w, *size_h, *margin_top, *margin_right, *margin_bottom, *margin_left);
+                return Some((*layer, x, y));
+              }
+            }
+            None
+          });
+          if let Some((layer, dx, dy)) = layer_geometry {
             if !s.mapped && !Self::surface_tree_has_content(client, surface_id) {
               continue;
             }
@@ -5394,31 +5520,123 @@ impl Server {
     }
 
     // Stack order: raised windows render last (on top).
-    toplevels.sort_by_key(|(fd, sid, _, _)| self.stack_index(*fd, *sid));
+    let window_stack = &self.window_stack;
+    toplevels.sort_by_key(|(fd, sid, _, _)| {
+      window_stack.iter().position(|&(f, s)| f == *fd && s == *sid).unwrap_or(0)
+    });
+    let popup_stack = &self.popup_stack;
+    popups.sort_by_key(|(fd, sid, _, _)| {
+      popup_stack.iter().position(|&(f, s)| f == *fd && s == *sid).unwrap_or(0)
+    });
+
+    // A single opaque, screen-sized dma-buf can become the KMS framebuffer
+    // itself. With no input channel there is no software cursor to compose,
+    // so this path performs no CPU pixel reads or copies at all.
+    let direct_buffer = if self.input_rx.is_none()
+      && layers.iter().all(Vec::is_empty)
+      && popups.is_empty()
+      && toplevels.len() == 1
+    {
+      let (fd, sid, x, y) = toplevels[0];
+      self.clients.get(&fd).and_then(|client| {
+        let surface = match client.objects.get(&sid) {
+          Some(Object { role: Role::Surface(s), .. }) => s,
+          _ => return None,
+        };
+        let buf = surface.current_buffer.as_ref()?;
+        let has_children = client.objects.values().any(|o| {
+          matches!(&o.role, Role::Subsurface { parent_id, .. } if *parent_id == sid)
+        });
+        (x == 0
+          && y == 0
+          && !has_children
+          && buf.format == FORMAT_XRGB8888
+          && buf.width == w as i32
+          && buf.height == h as i32
+          && !Self::uses_ssd(self.toplevel_decoration_mode(fd, sid)))
+          .then(|| buf.clone())
+      })
+    } else {
+      None
+    };
+    let direct_scanout = direct_buffer
+      .as_ref()
+      .map(|buf| self.backend.present_dmabuf(buf))
+      .unwrap_or(false);
+
+    // Preserve the exact software compositor order. GPU composition is used
+    // only when every visible surface is an importable dma-buf and no CPU-only
+    // chrome/cursor primitive is required.
+    let mut gpu_surfaces = Vec::new();
+    let mut gpu_allowed = true;
+    for group in [&layers[0], &layers[1]] {
+      for (fd, sid, x, y) in group {
+        if let Some(c) = self.clients.get(fd) { Self::collect_gpu_surface_tree(c, *sid, *x, *y, 0, &mut gpu_surfaces); }
+      }
+    }
+    for (fd, sid, x, y) in &toplevels {
+      let ssd = Self::uses_ssd(self.toplevel_decoration_mode(*fd, *sid));
+      if ssd { gpu_allowed = false; }
+      if let Some(c) = self.clients.get(fd) { Self::collect_gpu_surface_tree(c, *sid, *x, *y, 0, &mut gpu_surfaces); }
+    }
+    for group in [&layers[2], &popups, &layers[3]] {
+      for (fd, sid, x, y) in group {
+        if let Some(c) = self.clients.get(fd) { Self::collect_gpu_surface_tree(c, *sid, *x, *y, 0, &mut gpu_surfaces); }
+      }
+    }
+    let mut gpu_cursor_bitmap = None;
+    let mut gpu_cursor_pos = (0, 0, 0, 0);
+    if self.input_rx.is_some() {
+      let px = (self.ptr_x * w as f32) as i32;
+      let py = (self.ptr_y * h as f32) as i32;
+      let resize_edges = match self.wm_grab {
+        WmGrab::Resize { edges, .. } => Some(edges),
+        WmGrab::None => self.hit_resize_edge(px, py).map(|v| v.2),
+        WmGrab::Move { .. } => None,
+      };
+      if resize_edges.is_none() {
+        let cursor = (self.cursor_surface_id != 0 && self.cursor_client_fd >= 0)
+          .then(|| self.clients.get(&self.cursor_client_fd))
+          .flatten()
+          .and_then(|c| c.objects.get(&self.cursor_surface_id))
+          .and_then(|o| match &o.role { Role::Surface(s) => s.current_buffer.clone(), _ => None });
+        match cursor {
+          Some(buf) if buf.dmabuf_fd().is_some() || buf.stride == buf.width * 4 => {
+            gpu_surfaces.push((px - self.cursor_hot_x, py - self.cursor_hot_y, buf));
+          }
+          _ => {
+            let (cw,ch,hx,hy,pixels)=crate::cursor_aero::gpu_bitmap(None);
+            gpu_cursor_pos=(px-hx,py-hy,cw,ch); gpu_cursor_bitmap=Some(pixels);
+          }
+        }
+      } else {
+        let (cw,ch,hx,hy,pixels)=crate::cursor_aero::gpu_bitmap(resize_edges);
+        gpu_cursor_pos=(px-hx,py-hy,cw,ch); gpu_cursor_bitmap=Some(pixels);
+      }
+    }
+    let bitmap = gpu_cursor_bitmap.as_ref().map(|pixels| crate::render::GpuBitmap {
+      x:gpu_cursor_pos.0,y:gpu_cursor_pos.1,width:gpu_cursor_pos.2,height:gpu_cursor_pos.3,pixels,
+    });
+    let gpu_scanout = !direct_scanout && gpu_allowed && !gpu_surfaces.is_empty()
+      && self.backend.present_dmabufs(&gpu_surfaces, bitmap);
+
+    if !direct_scanout && !gpu_scanout {
+      self.fb.clear(0xff10_1014);
 
     for (fd, sid, dx, dy) in &layers[0] {
-      let blits = self
-        .clients
-        .get(fd)
-        .map(|c| Self::collect_surface_tree_blits(c, *sid, *dx, *dy, 0))
-        .unwrap_or_default();
-      Self::blit_collected(&mut self.fb, &blits);
+      if let Some(client) = self.clients.get(fd) {
+        Self::blit_surface_tree(client, &mut self.fb, *sid, *dx, *dy, 0);
+      }
     }
     for (fd, sid, dx, dy) in &layers[1] {
-      let blits = self
-        .clients
-        .get(fd)
-        .map(|c| Self::collect_surface_tree_blits(c, *sid, *dx, *dy, 0))
-        .unwrap_or_default();
-      Self::blit_collected(&mut self.fb, &blits);
+      if let Some(client) = self.clients.get(fd) {
+        Self::blit_surface_tree(client, &mut self.fb, *sid, *dx, *dy, 0);
+      }
     }
     for (fd, sid, dx, dy) in &toplevels {
-      let blits = self
-        .clients
-        .get(fd)
-        .map(|c| Self::collect_surface_tree_blits(c, *sid, *dx, *dy, 0))
-        .unwrap_or_default();
-      Self::blit_collected(&mut self.fb, &blits);
+      if let Some(client) = self.clients.get(fd) {
+        Self::blit_surface_tree(client, &mut self.fb, *sid, *dx, *dy, 0);
+      }
       // Server-side chrome only when the client explicitly requested SSD (mode 2).
       let ssd = Self::uses_ssd(self.toplevel_decoration_mode(*fd, *sid));
       let maxed_or_full = self.clients.get(fd).and_then(|c| {
@@ -5439,6 +5657,7 @@ impl Server {
           _ => None,
         })
       }).unwrap_or(false);
+      let focused = self.focused_client_fd == *fd && self.focused_surface_id == *sid;
       if ssd {
         // Frame around window geometry (excl. any client shadow padding).
         let (fx, fy, fw, fh) = self.surface_geometry(*fd, *sid).unwrap_or_else(|| {
@@ -5449,35 +5668,31 @@ impl Server {
             .unwrap_or((640, 480));
           (*dx, *dy, tw, th)
         });
-        self.draw_ssd_titlebar(fx, fy, fw);
+        self.draw_ssd_titlebar(fx, fy, fw, focused);
         if !maxed_or_full {
-          self.draw_window_frame(fx, fy, fw, fh, true);
+          self.draw_window_frame(fx, fy, fw, fh, true, focused);
+        }
+      } else if focused && !maxed_or_full {
+        // CSD window: draw a focus ring so the active window is visually distinct.
+        if let Some((fx, fy, fw, fh)) = self.surface_geometry(*fd, *sid) {
+          self.draw_window_frame(fx, fy, fw, fh, false, true);
         }
       }
     }
     for (fd, sid, dx, dy) in &layers[2] {
-      let blits = self
-        .clients
-        .get(fd)
-        .map(|c| Self::collect_surface_tree_blits(c, *sid, *dx, *dy, 0))
-        .unwrap_or_default();
-      Self::blit_collected(&mut self.fb, &blits);
+      if let Some(client) = self.clients.get(fd) {
+        Self::blit_surface_tree(client, &mut self.fb, *sid, *dx, *dy, 0);
+      }
     }
     for (fd, sid, dx, dy) in &popups {
-      let blits = self
-        .clients
-        .get(fd)
-        .map(|c| Self::collect_surface_tree_blits(c, *sid, *dx, *dy, 0))
-        .unwrap_or_default();
-      Self::blit_collected(&mut self.fb, &blits);
+      if let Some(client) = self.clients.get(fd) {
+        Self::blit_surface_tree(client, &mut self.fb, *sid, *dx, *dy, 0);
+      }
     }
     for (fd, sid, dx, dy) in &layers[3] {
-      let blits = self
-        .clients
-        .get(fd)
-        .map(|c| Self::collect_surface_tree_blits(c, *sid, *dx, *dy, 0))
-        .unwrap_or_default();
-      Self::blit_collected(&mut self.fb, &blits);
+      if let Some(client) = self.clients.get(fd) {
+        Self::blit_surface_tree(client, &mut self.fb, *sid, *dx, *dy, 0);
+      }
     }
 
     // Software cursor — topmost.  Prefer the client's wl_pointer.set_cursor
@@ -5526,22 +5741,30 @@ impl Server {
       }
     }
 
-    self.backend.present(&self.fb);
+      self.backend.present(&self.fb);
+    }
+    self.compose_layers = layers;
+    self.compose_toplevels = toplevels;
+    self.compose_popups = popups;
 
     // Release buffers AFTER presentation so the client (Mesa EGL) doesn't
     // free its backing buffer while eglSwapBuffers is still pending on
     // wl_callback.done.  Sending release here, before frame_done, lets Mesa
     // reuse the buffer as early as possible while still being safe.
-    let releases = std::mem::take(&mut self.buffer_release);
-    for (fd, bid) in releases {
+    // Drain in place so the queue retains its allocation across frames.
+    for (fd, bid) in self.buffer_release.drain(..) {
       if let Some(client) = self.clients.get_mut(&fd) {
-        client.send(bid, 0, &[]);
+        // wl_buffer.destroy is legal while the compositor still retains the
+        // underlying storage.  In that case the protocol object is gone and
+        // there is no resource left on which a release event may be sent.
+        if matches!(client.objects.get(&bid), Some(Object { role: Role::Buffer(_), .. })) {
+          client.send(bid, 0, &[]);
+        }
       }
     }
 
     let ts = now_ms();
-    let pending = std::mem::take(&mut self.frame_done);
-    for (fd, cb) in pending {
+    for (fd, cb) in self.frame_done.drain(..) {
       if let Some(client) = self.clients.get_mut(&fd) {
         client.send(cb, 0, &[Arg::Uint(ts)]);
         client.send(1, 1, &[Arg::Uint(cb)]);
@@ -5613,6 +5836,8 @@ impl Server {
       self.inject_key(key, false);
     }
     self.kbd_mods = 0;
+    self.last_button_pressed = false;
+    self.pointer_grab = None;
     self.ptr_entered = false;
     self.kbd_entered = false;
   }
@@ -5731,7 +5956,26 @@ impl Server {
     candidates.sort_by(|a, b| {
       b.0.cmp(&a.0).then_with(|| self.stack_index(b.1, b.2).cmp(&self.stack_index(a.1, a.2)))
     });
-    candidates.into_iter().next().map(|(_, fd, sid, ptr_id, kbd_id, sw, sh, ox, oy)| (fd, sid, ptr_id, kbd_id, sw, sh, ox, oy))
+    let best = candidates.into_iter().next()
+      .map(|(_, fd, sid, ptr_id, kbd_id, sw, sh, ox, oy)| (fd, sid, ptr_id, kbd_id, sw, sh, ox, oy));
+    // An explicit popup grab is owner-events: surfaces belonging to the same
+    // client still receive input normally.  Everywhere else routes to the
+    // grabbing popup (with coordinates outside its bounds), allowing Firefox
+    // to track and close native menus without activating the shell below.
+    if let Some((grab_fd, _, grab_sid)) = self.popup_grab {
+      if best.map(|t| t.0) == Some(grab_fd) {
+        return best;
+      }
+      if let Some(client) = self.clients.get(&grab_fd) {
+        let ptr_id = client.objects.iter().find_map(|(&oid, o)|
+          matches!(o.role, Role::Pointer).then_some(oid)).unwrap_or(0);
+        if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&grab_sid) {
+          let (sw, sh) = Self::surface_tree_size(client, grab_sid).unwrap_or((1, 1));
+          return Some((grab_fd, grab_sid, ptr_id, 0, sw, sh, s.x, s.y));
+        }
+      }
+    }
+    best
   }
 
   fn to_surface_fixed(&self, nx: f32, ny: f32, origin_x: i32, origin_y: i32) -> (i32, i32) {
@@ -5745,6 +5989,23 @@ impl Server {
     if !matches!(self.wm_grab, WmGrab::None) {
       self.update_wm_grab();
       return;
+    }
+    // A press establishes an implicit grab.  Keep motion and the matching
+    // release on that surface; raising/configuring a Firefox window during
+    // click-to-focus must not move pointer focus halfway through the click.
+    if let Some((fd, _surf_id, ptr_id, ox, oy)) = self.pointer_grab {
+      if self.clients.contains_key(&fd) {
+        let (fx, fy) = self.to_surface_fixed(nx, ny, ox, oy);
+        let ts = now_ms();
+        if let Some(client) = self.clients.get_mut(&fd) {
+          client.send(ptr_id, 2, &[Arg::Uint(ts), Arg::Fixed(fx), Arg::Fixed(fy)]);
+          client.send(ptr_id, 5, &[]);
+          client.conn.flush();
+        }
+        return;
+      }
+      self.pointer_grab = None;
+      self.last_button_pressed = false;
     }
     let (px, py) = self.screen_ptr();
     // Keep compositor cursor over SSD chrome / resize frame (outside client buffer).
@@ -5837,11 +6098,58 @@ impl Server {
   }
 
   fn inject_ptr_button(&mut self, button: u32, pressed: bool) {
+    // A press outside the topmost explicit popup dismisses it.  xdg-shell
+    // requires the compositor to send popup_done; merely routing the click to
+    // the window underneath leaves Firefox's menu state active indefinitely.
+    if pressed {
+      if let Some((fd, popup_id, surf_id)) = self.popup_grab {
+        let (px, py) = self.screen_ptr();
+        let inside = self.clients.get(&fd).and_then(|client| {
+          let Object { role: Role::Surface(s), .. } = client.objects.get(&surf_id)? else { return None };
+          let (w, h) = Self::surface_tree_size(client, surf_id)?;
+          Some(px >= s.x && py >= s.y && px < s.x + w && py < s.y + h)
+        }).unwrap_or(false);
+        if !inside {
+          let serial = self.next_serial();
+          if let Some(client) = self.clients.get_mut(&fd) {
+            // xdg_popup.popup_done
+            client.send(popup_id, 1, &[]);
+            client.conn.flush();
+          }
+          self.popup_grab = None;
+          self.pointer_grab = None;
+          self.last_button_serial = serial;
+          self.last_button_pressed = false;
+          return;
+        }
+      }
+    }
     // Left button release ends an interactive move/resize grab.
     if !pressed && button == 0x110 && !matches!(self.wm_grab, WmGrab::None) {
       self.last_button_pressed = false;
       self.end_wm_grab();
       return;
+    }
+    // The matching press may have been consumed while dismissing an explicit
+    // popup.  Do not leak an orphan release to the surface revealed below it.
+    if !pressed && self.pointer_grab.is_none() && !self.last_button_pressed {
+      return;
+    }
+    // A server-side titlebar has no client to issue
+    // xdg_toplevel.show_window_menu, so forward its right click to the shell.
+    if button == 0x111 && pressed {
+      let (px, py) = self.screen_ptr();
+      if let Some(("move", fd, sid)) = self.hit_ssd(px, py) {
+        self.raise_surface(fd, sid);
+        self.focused_client_fd = fd;
+        self.focused_surface_id = sid;
+        self.pending_shell_menu = Some((sid, px, py));
+        self.last_button_serial = self.next_serial();
+        self.last_button_pressed = false;
+        self.dirty = true;
+        self.shell_state_dirty = true;
+        return;
+      }
     }
     // Server-side decoration chrome (above client surface).
     if button == 0x110 && pressed {
@@ -5862,7 +6170,7 @@ impl Server {
               Some((t, prev)) if prev == sid && now.wrapping_sub(t) < 400
             );
             self.ssd_last_click = Some((now, sid));
-            if dbl {
+            if dbl && self.wm_titlebar_double_click {
               self.ssd_last_click = None;
               self.raise_surface(fd, sid);
               self.focused_client_fd = fd;
@@ -5933,7 +6241,20 @@ impl Server {
         return;
       }
     }
-    let Some((fd, surf_id, ptr_id, _, _sw, _sh, ox, oy)) = self.find_input_target() else { return };
+    let target = if !pressed {
+      self.pointer_grab
+        .map(|(fd, sid, ptr, ox, oy)| (fd, sid, ptr, 0, 0, 0, ox, oy))
+        .or_else(|| self.find_input_target())
+    } else {
+      self.find_input_target()
+    };
+    let Some((fd, surf_id, ptr_id, _, _sw, _sh, ox, oy)) = target else {
+      if !pressed {
+        self.pointer_grab = None;
+        self.last_button_pressed = false;
+      }
+      return;
+    };
     if ptr_id == 0 {
       return;
     }
@@ -5962,6 +6283,7 @@ impl Server {
     if pressed {
       self.last_button_pressed = true;
       self.last_button_serial = serial;
+      self.pointer_grab = Some((fd, surf_id, ptr_id, ox, oy));
       // Click-to-focus.  Object ids are per-client — always check the surface
       // on the fd returned by find_input_target, never a global id lookup.
       let is_toplevel = self
@@ -6000,6 +6322,9 @@ impl Server {
     client.send(ptr_id, 3, &[Arg::Uint(serial), Arg::Uint(ts), Arg::Uint(button), Arg::Uint(state)]);
     client.send(ptr_id, 5, &[]);
     client.conn.flush();
+    if !pressed {
+      self.pointer_grab = None;
+    }
   }
 
   fn inject_ptr_axis(&mut self, axis: u32, value: f32) {
@@ -6068,12 +6393,12 @@ impl Server {
       return;
     }
     // Super+D — show desktop / restore (minimize all floating toplevels).
-    if pressed && keycode == 32 && (self.kbd_mods & 64) != 0 && (self.kbd_mods & 8) == 0 {
+    if self.wm_super_shortcuts && pressed && keycode == 32 && (self.kbd_mods & 64) != 0 && (self.kbd_mods & 8) == 0 {
       self.toggle_show_desktop();
       return;
     }
     // Super+Arrow WM shortcuts (ignore when Alt held for Alt+Tab).
-    if pressed && (self.kbd_mods & 64) != 0 && (self.kbd_mods & 8) == 0 {
+    if self.wm_super_shortcuts && pressed && (self.kbd_mods & 64) != 0 && (self.kbd_mods & 8) == 0 {
       let focus = self.focused_surface_id;
       if focus != 0 {
         match keycode {

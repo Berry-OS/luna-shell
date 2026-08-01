@@ -690,6 +690,15 @@ pub fn blit_resize_cursor(fb: &mut crate::render::Framebuffer, x: i32, y: i32, e
     blit_embed_frame(fb, frame, x, y);
 }
 
+/// Raw premultiplied cursor bitmap for GPU overlay composition.
+pub fn gpu_bitmap(edges: Option<u32>) -> (u32, u32, i32, i32, Vec<u32>) {
+    let frame = match edges {
+        Some(5 | 10) => &ROLE_NWSE[0], Some(9 | 6) => &ROLE_NESW[0],
+        Some(4 | 8) => &ROLE_EW[0], Some(_) => &ROLE_NS[0], None => &ROLE_DEFAULT[0],
+    };
+    (frame.w as u32, frame.h as u32, frame.hot_x, frame.hot_y, frame.pixels.to_vec())
+}
+
 fn blit_embed_frame(fb: &mut crate::render::Framebuffer, frame: &EmbedFrame, x: i32, y: i32) {
     let w = frame.w as u32;
     let h = frame.h as u32;

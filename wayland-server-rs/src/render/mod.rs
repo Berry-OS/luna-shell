@@ -12,6 +12,9 @@ pub mod software;
 #[cfg(all(target_os = "linux", feature = "dri"))]
 pub mod dri;
 
+#[cfg(all(target_os = "linux", feature = "gpu"))]
+pub mod gpu;
+
 #[cfg(all(target_os = "linux", feature = "dri"))]
 pub mod vt;
 
@@ -22,6 +25,8 @@ pub mod webgl;
 pub mod webgl_server;
 
 use crate::shm::{ShmBuffer, FORMAT_XRGB8888};
+
+pub struct GpuBitmap<'a> { pub x:i32, pub y:i32, pub width:u32, pub height:u32, pub pixels:&'a [u32] }
 
 /// `stat()` + `open()` a DRM render node, returning its `dev_t` when both work.
 ///
@@ -179,6 +184,19 @@ pub enum InputEvent {
 pub trait Backend {
     fn size(&self) -> (u32, u32);
     fn present(&mut self, fb: &Framebuffer);
+
+    /// Present a client dma-buf without touching its pixels. Returns false
+    /// when the backend or scanout hardware cannot use this buffer directly.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn present_dmabuf(&mut self, _buf: &ShmBuffer) -> bool {
+        false
+    }
+
+    /// Composite ordered dma-buf surfaces on the GPU and scan out the result.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn present_dmabufs(&mut self, _surfaces: &[(i32, i32, ShmBuffer)], _bitmap: Option<GpuBitmap<'_>>) -> bool {
+        false
+    }
     /// Take input channel once (WebGL backend): (receiver, eventfd for epoll wakeup).
     #[cfg(not(target_arch = "wasm32"))]
     fn take_input_channel(

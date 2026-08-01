@@ -91,9 +91,11 @@
 #define LUNA_MOD_SUPER       0x0008
 
 #define LUNA_SHELL_VERSION "1.2"
+#define MAX_WINDOWS    128
 #define MAX_WIN_SLOTS  12
 #define MAX_TRAY_SLOTS 8
 #define MAX_SWITCHER_SLOTS 12
+#define MAX_WIFI_NETWORKS 8
 
 static int g_should_close = 0;
 static int g_desktop_mode = 0;
@@ -139,6 +141,12 @@ typedef struct {
     char hostname[64];
     char cursor_theme[64]; /* "aero" | "miku" | custom theme dir name */
     char kb_layout[64];    /* XKB layout, e.g. "jp,us" | "us" | "de,us" */
+    int  window_gap;       /* tiled window inset in pixels: 0 | 8 | 16 */
+    int  edge_snap;
+    int  titlebar_double_click;
+    int  super_shortcuts;
+    int  dock_magnification;
+    int  session_restore;
 } LunaSettings;
 
 static LunaSettings g_settings;
@@ -168,6 +176,12 @@ static void settings_defaults(void) {
     snprintf(g_settings.wallpaper, sizeof(g_settings.wallpaper), "night");
     snprintf(g_settings.hostname, sizeof(g_settings.hostname), "Luna Desktop");
     snprintf(g_settings.cursor_theme, sizeof(g_settings.cursor_theme), "aero");
+    g_settings.window_gap = 8;
+    g_settings.edge_snap = 1;
+    g_settings.titlebar_double_click = 1;
+    g_settings.super_shortcuts = 1;
+    g_settings.dock_magnification = 1;
+    g_settings.session_restore = 1;
     /* Prefer env / locale-aware default already applied by apply_xkb_session_env. */
     {
         const char* lay = getenv("XKB_DEFAULT_LAYOUT");
@@ -211,6 +225,18 @@ static void settings_load(void) {
                 snprintf(g_settings.cursor_theme, sizeof(g_settings.cursor_theme), "%s", val);
             else if (!strcmp(key, "kb_layout"))
                 snprintf(g_settings.kb_layout, sizeof(g_settings.kb_layout), "%s", val);
+            else if (!strcmp(key, "window_gap"))
+                g_settings.window_gap = atoi(val);
+            else if (!strcmp(key, "edge_snap"))
+                g_settings.edge_snap = atoi(val) != 0;
+            else if (!strcmp(key, "titlebar_double_click"))
+                g_settings.titlebar_double_click = atoi(val) != 0;
+            else if (!strcmp(key, "super_shortcuts"))
+                g_settings.super_shortcuts = atoi(val) != 0;
+            else if (!strcmp(key, "dock_magnification"))
+                g_settings.dock_magnification = atoi(val) != 0;
+            else if (!strcmp(key, "session_restore"))
+                g_settings.session_restore = atoi(val) != 0;
         }
     }
     fclose(f);
@@ -244,6 +270,12 @@ static void settings_save(void) {
     fprintf(f, "hostname=%s\n", g_settings.hostname);
     fprintf(f, "cursor_theme=%s\n", g_settings.cursor_theme);
     fprintf(f, "kb_layout=%s\n", g_settings.kb_layout);
+    fprintf(f, "window_gap=%d\n", g_settings.window_gap);
+    fprintf(f, "edge_snap=%d\n", g_settings.edge_snap);
+    fprintf(f, "titlebar_double_click=%d\n", g_settings.titlebar_double_click);
+    fprintf(f, "super_shortcuts=%d\n", g_settings.super_shortcuts);
+    fprintf(f, "dock_magnification=%d\n", g_settings.dock_magnification);
+    fprintf(f, "session_restore=%d\n", g_settings.session_restore);
     fclose(f);
 }
 
@@ -284,8 +316,10 @@ static int g_settings_idx          = -1;
 static int g_settings_sheet_idx    = -1;
 static int g_settings_panel_apps   = -1;
 static int g_settings_panel_disp   = -1;
+static int g_settings_panel_wm     = -1;
 static int g_stab_apps_idx         = -1;
 static int g_stab_disp_idx         = -1;
+static int g_stab_wm_idx           = -1;
 static int g_win_menu_idx  = -1;
 static int g_clip_menu_idx = -1;
 static int g_mb_clip_idx   = -1;
@@ -294,8 +328,43 @@ static uint32_t g_win_menu_target = 0;
 static int g_mb_logo_idx  = -1;
 static int g_mb_cc_idx    = -1;
 static int g_mb_wifi_idx  = -1;
+static int g_wifi_menu_idx = -1;
+static int g_wifi_selected = -1;
+
+/* ── Per-frame child element cache (populated once in bind_indices) ──
+ * Eliminates O(n) element scans from update_window_list_ui,
+ * update_tray_ui, update_switcher_ui, win_menu_set_maximize_label,
+ * and update_stats which run at 8–120 Hz. */
+static int g_win_label_idx[MAX_WIN_SLOTS];          /* span.win_label child of win_N */
+static int g_tray_glyph_idx[MAX_TRAY_SLOTS];        /* span.tray_glyph child of tray_N */
+static int g_mb_app_idx             = -1;           /* mb_app element */
+static int g_mb_bat_icon_idx        = -1;           /* luna_icon child of mb_bat */
+static int g_mb_wifi_icon_idx       = -1;           /* luna_icon child of mb_wifi text span */
+static int g_sw_title_idx[MAX_SWITCHER_SLOTS];      /* span.sw_title child of sw_N */
+static int g_sw_app_idx[MAX_SWITCHER_SLOTS];        /* span.sw_app child of sw_N */
+static int g_wm_maximize_label_idx  = -1;           /* mi_label child of wm_maximize */
+static int g_wm_fullscreen_label_idx = -1;          /* mi_label child of wm_fullscreen */
+
+typedef enum { WIFI_NONE, WIFI_CONNMAN, WIFI_NMCLI } WifiBackend;
+typedef struct {
+    char name[96];
+    char id[192];
+    int connected;
+    int signal;
+} WifiNetwork;
+static WifiBackend g_wifi_backend = WIFI_NONE;
+static WifiNetwork g_wifi_networks[MAX_WIFI_NETWORKS];
+static int g_wifi_count = 0;
+static int g_wifi_powered = 0;
 
 static double g_last_shell_poll = -10.0;
+static struct timespec g_shell_state_mtime = { .tv_sec = -1, .tv_nsec = 0 };
+static off_t g_shell_state_size = -1;
+
+/* Cached system readings — updated in update_stats(), read everywhere else
+ * to avoid synchronous sysfs I/O on every window-list or tray update. */
+static int  g_cached_bat = -1;
+static char g_cached_net[16] = "Offline";
 
 /* ── Compositor window list + system tray (via luna-shell/state.json) ── */
 
@@ -319,7 +388,11 @@ typedef struct {
     uint32_t surface_id; /* parsed from id when applicable */
 } LunaTrayEntry;
 
-static LunaWinEntry  g_wins[MAX_WIN_SLOTS];
+/* Keep the complete compositor snapshot, not only the handful of chips that
+ * fit in the menu bar.  Window lookup, Dock grouping, session restore and the
+ * Alt-Tab overlay must continue to work when more than MAX_WIN_SLOTS windows
+ * are open.  A fixed array keeps this bounded and allocation-free. */
+static LunaWinEntry  g_wins[MAX_WINDOWS];
 static int           g_win_count = 0;
 static LunaTrayEntry g_tray[MAX_TRAY_SLOTS];
 static int           g_tray_count = 0;
@@ -361,7 +434,8 @@ static void shell_paths_init(void) {
 }
 
 static void shell_send_cmd(const char* cmd) {
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (!cmd || !*cmd) return;
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) return;
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -376,11 +450,54 @@ static void shell_send_cmd(const char* cmd) {
         close(fd);
         return;
     }
-    size_t n = strlen(cmd);
-    if (n > 0) {
-        send(fd, cmd, n, 0);
-        send(fd, "\n", 1, 0);
+    /* Commands are small, but stream writes are still allowed to be partial.
+     * MSG_NOSIGNAL also prevents a compositor restart from killing the shell
+     * with SIGPIPE between connect() and send(). */
+    char wire[128];
+    int wn = snprintf(wire, sizeof(wire), "%s\n", cmd);
+    if (wn > 0 && (size_t)wn < sizeof(wire)) {
+        size_t off = 0, len = (size_t)wn;
+        while (off < len) {
+            ssize_t sent = send(fd, wire + off, len - off, MSG_NOSIGNAL);
+            if (sent > 0) {
+                off += (size_t)sent;
+            } else if (sent < 0 && errno == EINTR) {
+                continue;
+            } else {
+                break;
+            }
+        }
     }
+    close(fd);
+}
+
+/* Native tray items are deliberately not Wayland surfaces.  A status item
+ * owns no pixels on Wayland (the shell owns the panel), so a tiny Unix socket
+ * is both cheaper and safer than keeping a hidden xdg/layer surface alive.
+ * Service ids are restricted before they become a pathname. */
+static void tray_send_action(const char* id, const char* action) {
+    static const char prefix[] = "service:";
+    if (!id || strncmp(id, prefix, sizeof(prefix) - 1) != 0 || !action || !*action)
+        return;
+    const char* name = id + sizeof(prefix) - 1;
+    if (!*name) return;
+    for (const char* p = name; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') return;
+
+    const char* xdg = getenv("XDG_RUNTIME_DIR");
+    if (!xdg || !*xdg) xdg = "/tmp";
+    char path[sizeof(((struct sockaddr_un*)0)->sun_path)];
+    int n = snprintf(path, sizeof(path), "%s/luna-shell/tray-%s.sock", xdg, name);
+    if (n < 0 || (size_t)n >= sizeof(path)) return;
+
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, path, (size_t)n + 1);
+    (void)sendto(fd, action, strlen(action), MSG_DONTWAIT,
+                 (struct sockaddr*)&addr, sizeof(addr));
     close(fd);
 }
 
@@ -434,6 +551,14 @@ static int g_shell_state_changed = 0;
 static uint32_t g_surf_dirty = 0xffffffffu;
 static double   g_last_bg_paint = 0.0;
 static int      g_wl_poll_timeout_ms = 0;
+/* Single-surface backends used to repaint the whole desktop unconditionally.
+ * Keep a separate bit for them: g_surf_dirty describes Wayland layers, while
+ * this flag says that the KMS/X11 framebuffer needs another complete frame. */
+static int      g_frame_dirty = 1;
+/* Event wait used by the single-surface backends.  KMS and X11 both need to
+ * sleep when the framebuffer is clean; otherwise X11 busy-spins and a KMS
+ * session without libinput does the same. */
+static int      g_single_poll_timeout_ms = 0;
 static void shell_request_repaint(int surf_idx); /* -1 = all; else LUNA_SURF_* */
 
 static uint64_t hash_shell_snapshot(const LunaWinEntry* wins, int wc,
@@ -467,9 +592,20 @@ static uint64_t hash_shell_snapshot(const LunaWinEntry* wins, int wc,
 }
 
 static void load_shell_state(void) {
+    /* The compositor rewrites this snapshot only when its state changes.
+     * Avoid opening and parsing it at the 8--20 Hz polling rate while the
+     * desktop is otherwise idle: on the direct KMS backend that synchronous
+     * I/O runs on the render thread and periodically makes us miss a vblank. */
+    struct stat st;
+    if (stat(g_shell_state_path, &st) != 0) return;
+    if (st.st_size == g_shell_state_size &&
+        st.st_mtim.tv_sec == g_shell_state_mtime.tv_sec &&
+        st.st_mtim.tv_nsec == g_shell_state_mtime.tv_nsec)
+        return;
+
     FILE* f = fopen(g_shell_state_path, "r");
     if (!f) return;
-    LunaWinEntry wins[MAX_WIN_SLOTS];
+    LunaWinEntry wins[MAX_WINDOWS];
     LunaTrayEntry tray[MAX_TRAY_SLOTS];
     int wc = 0, tc = 0;
     int sw_count = 0, sw_idx = 0;
@@ -481,7 +617,7 @@ static void load_shell_state(void) {
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = 0;
         if (line[0] == 'W' && line[1] == '\t') {
-            if (wc >= MAX_WIN_SLOTS) continue;
+            if (wc >= MAX_WINDOWS) continue;
             unsigned id = 0;
             int focused = 0, minimized = 0, maximized = 0, fullscreen = 0;
             int wx = 0, wy = 0;
@@ -556,6 +692,8 @@ static void load_shell_state(void) {
         }
     }
     fclose(f);
+    g_shell_state_size = st.st_size;
+    g_shell_state_mtime = st.st_mtim;
 
     uint64_t h = hash_shell_snapshot(wins, wc, tray, tc, sw_count, sw_idx, sw_ids);
     int state_changed = (h != g_shell_state_hash);
@@ -616,13 +754,17 @@ static void tray_slot_style(int slot, LunaTrayEntry* t) {
 }
 
 static void update_window_list_ui(void) {
-    /* Focused first so overflow:hidden clips the tail — chips never shrink. */
+    /* Focused first, then usable windows, then minimized ones.  This avoids a
+     * minimized window occupying one of the scarce chips while a visible
+     * window is hidden, without sorting or allocating on the refresh path. */
     int order[MAX_WIN_SLOTS];
     int n = 0;
     for (int i = 0; i < g_win_count && n < MAX_WIN_SLOTS; i++)
         if (g_wins[i].focused) order[n++] = i;
     for (int i = 0; i < g_win_count && n < MAX_WIN_SLOTS; i++)
-        if (!g_wins[i].focused) order[n++] = i;
+        if (!g_wins[i].focused && !g_wins[i].minimized) order[n++] = i;
+    for (int i = 0; i < g_win_count && n < MAX_WIN_SLOTS; i++)
+        if (!g_wins[i].focused && g_wins[i].minimized) order[n++] = i;
 
     for (int s = 0; s < MAX_WIN_SLOTS; s++) {
         int idx = g_win_slot_idx[s];
@@ -635,21 +777,13 @@ static void update_window_list_ui(void) {
         LunaWinEntry* w = &g_wins[order[s]];
         g_win_slot_id[s] = w->id;
         set_hidden(idx, 0);
-        char label_id[32];
-        snprintf(label_id, sizeof(label_id), "win_%d", s);
-        /* label is child span — find by walking or use set_text on parent */
-        for (int i = 0; i < luna_element_count(); i++) {
-            LunaElement* e = luna_element_at(i);
-            if (e->parent_idx == idx && strstr(e->class_name, "win_label")) {
-                luna_set_text(i, w->title);
-                break;
-            }
-        }
+        if (g_win_label_idx[s] >= 0)
+            luna_set_text(g_win_label_idx[s], w->title);
         win_slot_style(idx, w);
     }
     /* macOS-style active app name next to the logo */
     {
-        int app_idx = luna_get_element_by_id("mb_app");
+        int app_idx = g_mb_app_idx;
         if (app_idx >= 0) {
             const char* name = "Desktop";
             for (int i = 0; i < g_win_count; i++) {
@@ -839,25 +973,14 @@ static void update_switcher_ui(void) {
                 break;
             }
         }
-        for (int i = 0; i < luna_element_count(); i++) {
-            LunaElement* e = luna_element_at(i);
-            if (e->parent_idx == idx && strstr(e->class_name, "sw_title")) {
-                luna_set_text(i, title);
-                break;
-            }
-        }
-        for (int i = 0; i < luna_element_count(); i++) {
-            LunaElement* e = luna_element_at(i);
-            if (e->parent_idx == idx && strstr(e->class_name, "sw_app")) {
-                luna_set_text(i, app && app[0] ? app : "app");
-                break;
-            }
-        }
+        if (g_sw_title_idx[s] >= 0) luna_set_text(g_sw_title_idx[s], title);
+        if (g_sw_app_idx[s] >= 0)   luna_set_text(g_sw_app_idx[s], app && app[0] ? app : "app");
         luna_remove_class(idx, "active");
         if (s == g_switcher_index) luna_add_class(idx, "active");
         luna_update_element_style(idx);
     }
     luna_mark_layout_dirty();
+    shell_request_repaint(0); /* switcher lives in bg layer */
 }
 
 static void position_menu_at(int menu_idx, float x, float y) {
@@ -890,27 +1013,10 @@ static void position_menu_at(int menu_idx, float x, float y) {
 }
 
 static void win_menu_set_maximize_label(LunaWinEntry* w) {
-    int item = luna_get_element_by_id("wm_maximize");
-    if (item < 0) return;
-    const char* label = (w && (w->maximized || w->fullscreen)) ? "Restore" : "Maximize";
-    for (int i = 0; i < luna_element_count(); i++) {
-        LunaElement* e = luna_element_at(i);
-        if (e->parent_idx == item && strstr(e->class_name, "mi_label")) {
-            luna_set_text(i, label);
-            break;
-        }
-    }
-    int fs = luna_get_element_by_id("wm_fullscreen");
-    if (fs >= 0) {
-        const char* flabel = (w && w->fullscreen) ? "Exit Fullscreen" : "Fullscreen";
-        for (int i = 0; i < luna_element_count(); i++) {
-            LunaElement* e = luna_element_at(i);
-            if (e->parent_idx == fs && strstr(e->class_name, "mi_label")) {
-                luna_set_text(i, flabel);
-                break;
-            }
-        }
-    }
+    const char* label  = (w && (w->maximized || w->fullscreen)) ? "Restore" : "Maximize";
+    const char* flabel = (w && w->fullscreen) ? "Exit Fullscreen" : "Fullscreen";
+    if (g_wm_maximize_label_idx >= 0)  luna_set_text(g_wm_maximize_label_idx,  label);
+    if (g_wm_fullscreen_label_idx >= 0) luna_set_text(g_wm_fullscreen_label_idx, flabel);
 }
 
 static void update_tray_ui(void) {
@@ -918,6 +1024,12 @@ static void update_tray_ui(void) {
     int builtin = 2;
     int app_slots = MAX_TRAY_SLOTS - builtin;
     if (app_slots < 1) app_slots = 1;
+    int have_wifi_service = 0;
+    for (int i = 0; i < g_tray_count; i++)
+        if (!strcmp(g_tray[i].id, "service:luna-wifi")) {
+            have_wifi_service = 1;
+            break;
+        }
 
     for (int s = 0; s < app_slots; s++) {
         int idx = g_tray_slot_idx[s];
@@ -930,32 +1042,28 @@ static void update_tray_ui(void) {
         LunaTrayEntry* t = &g_tray[s];
         snprintf(g_tray_slot_key[s], sizeof(g_tray_slot_key[s]), "%.63s", t->id);
         set_hidden(idx, 0);
-        for (int i = 0; i < luna_element_count(); i++) {
-            LunaElement* e = luna_element_at(i);
-            if (e->parent_idx == idx && strstr(e->class_name, "tray_glyph")) {
-                luna_set_text(i, tray_glyph(t->icon));
-                break;
-            }
-        }
+        if (g_tray_glyph_idx[s] >= 0)
+            luna_set_text(g_tray_glyph_idx[s], tray_glyph(t->icon));
         tray_slot_style(idx, t);
     }
 
-    /* Built-in tray: Wi-Fi + battery */
+    /* Built-in tray: Wi-Fi + battery — use cached values to avoid per-call I/O. */
     char buf[32];
-    int bat = read_battery_percent();
+    int bat = g_cached_bat;
     int wifi_idx = g_tray_slot_idx[app_slots];
     int bat_idx  = g_tray_slot_idx[app_slots + 1];
     if (wifi_idx >= 0) {
-        set_hidden(wifi_idx, 0);
-        LunaTrayEntry tw = { .id = "builtin:wifi", .icon = "wifi" };
-        snprintf(tw.tooltip, sizeof(tw.tooltip), "%s", read_net_status());
-        tray_slot_style(wifi_idx, &tw);
-        for (int i = 0; i < luna_element_count(); i++) {
-            LunaElement* e = luna_element_at(i);
-            if (e->parent_idx == wifi_idx && strstr(e->class_name, "tray_glyph")) {
-                luna_set_text(i, tray_glyph("wifi"));
-                break;
-            }
+        if (have_wifi_service) {
+            /* The native service occupies an ordinary app slot.  Do not draw
+             * the old synthetic indicator alongside it. */
+            set_hidden(wifi_idx, 1);
+        } else {
+            set_hidden(wifi_idx, 0);
+            LunaTrayEntry tw = { .id = "builtin:wifi", .icon = "wifi" };
+            snprintf(tw.tooltip, sizeof(tw.tooltip), "%s", g_cached_net);
+            tray_slot_style(wifi_idx, &tw);
+            if (g_tray_glyph_idx[app_slots] >= 0)
+                luna_set_text(g_tray_glyph_idx[app_slots], tray_glyph("wifi"));
         }
     }
     if (bat_idx >= 0) {
@@ -964,13 +1072,8 @@ static void update_tray_ui(void) {
         if (bat >= 0) snprintf(tb.tooltip, sizeof(tb.tooltip), "Battery %d%%", bat);
         else snprintf(tb.tooltip, sizeof(tb.tooltip), "AC Power");
         tray_slot_style(bat_idx, &tb);
-        for (int i = 0; i < luna_element_count(); i++) {
-            LunaElement* e = luna_element_at(i);
-            if (e->parent_idx == bat_idx && strstr(e->class_name, "tray_glyph")) {
-                luna_set_text(i, tray_glyph("bat"));
-                break;
-            }
-        }
+        if (g_tray_glyph_idx[app_slots + 1] >= 0)
+            luna_set_text(g_tray_glyph_idx[app_slots + 1], tray_glyph("bat"));
         (void)buf;
     }
     luna_mark_layout_dirty();
@@ -979,6 +1082,7 @@ static void update_tray_ui(void) {
 
 static double g_last_clock = -10.0;
 static double g_last_stats = -10.0;
+static double g_last_disk  = -60.0;
 static double g_now = 0.0;
 static double g_toast_deadline = 0.0;
 static char   g_lp_query[160] = "";
@@ -1016,8 +1120,11 @@ static void set_hidden(int idx, int hidden) {
     else luna_remove_class(idx, "hidden");
     luna_update_element_style(idx);
     luna_mark_layout_dirty();
-    /* Dirty-render backend: visibility toggles must explicitly request paint. */
-    shell_request_repaint(-1);
+    /* Mark the KMS/X11 framebuffer dirty.  WL callers own surface-specific
+     * shell_request_repaint() calls; blasting all surfaces here was the main
+     * cause of full-desktop repaints on every window-list / tray update.
+     * Overlay show/hide is handled by wl_surfs_update() via was_shown. */
+    g_frame_dirty = 1;
 }
 
 static int is_shown(int idx) {
@@ -1035,6 +1142,167 @@ static void wire_subtree(int root, LunaEventHandler fn) {
             if (p == root) { luna_set_on_click(i, fn); break; }
         }
     }
+}
+
+/* Wi-Fi control intentionally uses argv, never a shell command assembled from
+ * an SSID or password.  This avoids shell injection and quoting bugs. */
+static void wifi_exec(const char* const argv[]) {
+    pid_t pid = fork();
+    if (pid != 0) return;
+    execvp(argv[0], (char* const*)argv);
+    _exit(127);
+}
+
+/* ConnMan obtains Wi-Fi credentials through an Agent, not through `config`.
+ * Run connmanctl interactively and feed the agent response over stdin.  Keeping
+ * the passphrase out of argv also prevents it being exposed by process tools. */
+static int wifi_connman_connect(const char* service, const char* passphrase) {
+    if (!service || !*service || !passphrase ||
+        strchr(service, '\n') || strchr(service, '\r') ||
+        strchr(passphrase, '\n') || strchr(passphrase, '\r')) return 0;
+
+    int input[2];
+    if (pipe(input) != 0) return 0;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(input[0]);
+        close(input[1]);
+        return 0;
+    }
+    if (pid == 0) {
+        dup2(input[0], STDIN_FILENO);
+        close(input[0]);
+        close(input[1]);
+        execlp("connmanctl", "connmanctl", (char*)NULL);
+        _exit(127);
+    }
+
+    close(input[0]);
+    FILE* f = fdopen(input[1], "w");
+    if (!f) {
+        close(input[1]);
+        return 0;
+    }
+    fprintf(f, "agent on\nconnect %s\n%s\nquit\n", service, passphrase);
+    fclose(f);
+    return 1;
+}
+
+static int command_available(const char* name) {
+    const char* path = getenv("PATH");
+    if (!path) return 0;
+    char copy[2048];
+    snprintf(copy, sizeof(copy), "%s", path);
+    for (char* d = strtok(copy, ":"); d; d = strtok(NULL, ":")) {
+        char file[512];
+        snprintf(file, sizeof(file), "%s/%s", d, name);
+        if (access(file, X_OK) == 0) return 1;
+    }
+    return 0;
+}
+
+static void trim_line(char* s) {
+    size_t n = strlen(s);
+    while (n && isspace((unsigned char)s[n - 1])) s[--n] = 0;
+    char* p = s;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (p != s) memmove(s, p, strlen(p) + 1);
+}
+
+static void wifi_refresh(void) {
+    g_wifi_count = 0;
+    g_wifi_powered = 0;
+    g_wifi_backend = command_available("connmanctl") ? WIFI_CONNMAN :
+                     (command_available("nmcli") ? WIFI_NMCLI : WIFI_NONE);
+    FILE* f = NULL;
+    char line[512];
+    if (g_wifi_backend == WIFI_CONNMAN) {
+        f = popen("connmanctl technologies 2>/dev/null", "r");
+        int in_wifi = 0;
+        if (f) {
+            while (fgets(line, sizeof(line), f)) {
+                if (line[0] == '/') in_wifi = strstr(line, "/technology/wifi") != NULL;
+                else if (in_wifi && strstr(line, "Powered") && strstr(line, "True")) g_wifi_powered = 1;
+            }
+            pclose(f);
+        }
+        if (!g_wifi_powered) return;
+        f = popen("connmanctl services 2>/dev/null", "r");
+        if (!f) return;
+        while (g_wifi_count < MAX_WIFI_NETWORKS && fgets(line, sizeof(line), f)) {
+            char* path = strstr(line, "wifi_");
+            if (!path) continue;
+            char* begin = path;
+            while (begin > line && !isspace((unsigned char)begin[-1])) begin--;
+            if (begin > line && begin[-1] == '/') begin--;
+            char id[192];
+            snprintf(id, sizeof(id), "%s", begin);
+            trim_line(id);
+            *begin = 0;
+            char* label = line;
+            while (*label && (isspace((unsigned char)*label) || strchr("*AOR", *label))) label++;
+            trim_line(label);
+            WifiNetwork* n = &g_wifi_networks[g_wifi_count++];
+            snprintf(n->name, sizeof(n->name), "%.95s", *label ? label : "Hidden network");
+            snprintf(n->id, sizeof(n->id), "%s", id);
+            n->connected = strchr(line, '*') != NULL;
+            n->signal = -1;
+        }
+        pclose(f);
+    } else if (g_wifi_backend == WIFI_NMCLI) {
+        f = popen("nmcli -t -f WIFI general 2>/dev/null", "r");
+        if (f && fgets(line, sizeof(line), f)) g_wifi_powered = strstr(line, "enabled") != NULL;
+        if (f) pclose(f);
+        if (!g_wifi_powered) return;
+        f = popen("nmcli -t -f IN-USE,SSID,SIGNAL device wifi list 2>/dev/null", "r");
+        if (!f) return;
+        while (g_wifi_count < MAX_WIFI_NETWORKS && fgets(line, sizeof(line), f)) {
+            trim_line(line);
+            char* first = strchr(line, ':');
+            char* last = strrchr(line, ':');
+            if (!first || !last || first == last) continue;
+            *first++ = 0; *last++ = 0;
+            WifiNetwork* n = &g_wifi_networks[g_wifi_count++];
+            snprintf(n->name, sizeof(n->name), "%s", *first ? first : "Hidden network");
+            snprintf(n->id, sizeof(n->id), "%s", first);
+            n->connected = line[0] == '*';
+            n->signal = atoi(last);
+        }
+        pclose(f);
+    }
+}
+
+static void wifi_update_ui(void) {
+    int p = luna_get_element_by_id("wifi_power");
+    if (p >= 0) {
+        if (g_wifi_powered) luna_add_class(p, "on"); else luna_remove_class(p, "on");
+        luna_update_element_style(p);
+    }
+    int st = luna_get_element_by_id("wifi_status");
+    if (st >= 0) luna_set_text(st, g_wifi_backend == WIFI_NONE ? "ConnMan / NetworkManager not found" :
+        (!g_wifi_powered ? "Wi-Fi is turned off" : (g_wifi_count ? "Available networks" : "No networks found")));
+    for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+        char id[24]; snprintf(id, sizeof(id), "wifi_%d", i);
+        int row = luna_get_element_by_id(id);
+        if (row < 0) continue;
+        if (i >= g_wifi_count) { set_hidden(row, 1); continue; }
+        set_hidden(row, 0);
+        if (g_wifi_networks[i].connected) luna_add_class(row, "connected"); else luna_remove_class(row, "connected");
+        for (int j = 0; j < luna_element_count(); j++) {
+            LunaElement* child = luna_element_at(j);
+            if (child->parent_idx != row) continue;
+            if (strstr(child->class_name, "mi_label")) luna_set_text(j, g_wifi_networks[i].name);
+            if (strstr(child->class_name, "wifi_signal")) {
+                char sig[20];
+                if (g_wifi_networks[i].connected) snprintf(sig, sizeof(sig), "Connected");
+                else if (g_wifi_networks[i].signal >= 0) snprintf(sig, sizeof(sig), "%d%%", g_wifi_networks[i].signal);
+                else sig[0] = 0;
+                luna_set_text(j, sig);
+            }
+        }
+        luna_update_element_style(row);
+    }
+    luna_mark_layout_dirty();
 }
 
 static void center_element(int idx) {
@@ -1584,11 +1852,18 @@ static void dismiss_clip_menu(void) {
     if (is_shown(g_clip_menu_idx)) set_hidden(g_clip_menu_idx, 1);
 }
 
+static void dismiss_wifi_menu(void) {
+    if (is_shown(g_wifi_menu_idx)) set_hidden(g_wifi_menu_idx, 1);
+    g_wifi_selected = -1;
+    set_hidden(luna_get_element_by_id("wifi_credentials"), 1);
+}
+
 static void dismiss_popovers(void) {
     dismiss_luna_menu(g_luna_menu_idx);
     dismiss_cc(g_cc_idx);
     dismiss_win_menu();
     dismiss_clip_menu();
+    dismiss_wifi_menu();
 }
 
 static void on_luna_menu(LunaElement* e) {
@@ -1605,9 +1880,100 @@ static void on_control_center(LunaElement* e) {
     dismiss_luna_menu(g_luna_menu_idx);
     dismiss_win_menu();
     dismiss_clip_menu();
+    dismiss_wifi_menu();
     if (is_shown(g_cc_idx)) { dismiss_cc(g_cc_idx); return; }
     set_hidden(g_cc_idx, 0);
     position_control_center();
+}
+
+static void on_wifi_menu(LunaElement* e) {
+    (void)e;
+    dismiss_luna_menu(g_luna_menu_idx);
+    dismiss_cc(g_cc_idx);
+    dismiss_win_menu();
+    dismiss_clip_menu();
+    if (is_shown(g_wifi_menu_idx)) { dismiss_wifi_menu(); return; }
+    wifi_refresh();
+    wifi_update_ui();
+    set_hidden(g_wifi_menu_idx, 0);
+    position_menu_near(g_wifi_menu_idx, g_mb_wifi_idx, luna_window_width - 330.0f);
+}
+
+static void on_wifi_power(LunaElement* e) {
+    (void)e;
+    if (g_wifi_backend == WIFI_CONNMAN) {
+        const char* const argv[] = { "connmanctl", g_wifi_powered ? "disable" : "enable", "wifi", NULL };
+        wifi_exec(argv);
+    } else if (g_wifi_backend == WIFI_NMCLI) {
+        const char* const argv[] = { "nmcli", "radio", "wifi", g_wifi_powered ? "off" : "on", NULL };
+        wifi_exec(argv);
+    }
+    g_wifi_powered = !g_wifi_powered;
+    wifi_update_ui();
+}
+
+static int wifi_row_number(LunaElement* e) {
+    for (int idx = elem_idx_of(e); idx != -1; idx = luna_element_at(idx)->parent_idx) {
+        const char* id = luna_element_at(idx)->id;
+        if (!strncmp(id, "wifi_", 5) && isdigit((unsigned char)id[5])) return atoi(id + 5);
+    }
+    return -1;
+}
+
+static void on_wifi_network(LunaElement* e) {
+    int i = wifi_row_number(e);
+    if (i < 0 || i >= g_wifi_count) return;
+    WifiNetwork* n = &g_wifi_networks[i];
+    if (n->connected) {
+        if (g_wifi_backend == WIFI_CONNMAN) {
+            const char* const argv[] = { "connmanctl", "disconnect", n->id, NULL }; wifi_exec(argv);
+        } else {
+            const char* const argv[] = { "nmcli", "connection", "down", "id", n->name, NULL }; wifi_exec(argv);
+        }
+        toast_show("Wi-Fi", "Disconnecting...", 2.0);
+        dismiss_wifi_menu();
+        return;
+    }
+    g_wifi_selected = i;
+    int label = luna_get_element_by_id("wifi_selected");
+    if (label >= 0) { char text[150]; snprintf(text, sizeof(text), "Connect to %s", n->name); luna_set_text(label, text); }
+    int pass = luna_get_element_by_id("wifi_password");
+    if (pass >= 0) luna_set_value(pass, "");
+    set_hidden(luna_get_element_by_id("wifi_credentials"), 0);
+    luna_mark_layout_dirty();
+}
+
+static void on_wifi_connect(LunaElement* e) {
+    (void)e;
+    if (g_wifi_selected < 0 || g_wifi_selected >= g_wifi_count) return;
+    WifiNetwork* n = &g_wifi_networks[g_wifi_selected];
+    int pi = luna_get_element_by_id("wifi_password");
+    const char* password = pi >= 0 ? luna_get_value(pi) : "";
+    if (g_wifi_backend == WIFI_CONNMAN) {
+        if (!wifi_connman_connect(n->id, password ? password : "")) {
+            toast_show("Wi-Fi", "Could not start connection", 2.0);
+            return;
+        }
+    } else if (g_wifi_backend == WIFI_NMCLI) {
+        if (password && *password) {
+            const char* const connect[] = { "nmcli", "device", "wifi", "connect", n->name, "password", password, NULL }; wifi_exec(connect);
+        } else {
+            const char* const connect[] = { "nmcli", "device", "wifi", "connect", n->name, NULL }; wifi_exec(connect);
+        }
+    }
+    if (pi >= 0) luna_set_value(pi, "");
+    toast_show("Wi-Fi", "Connecting...", 2.0);
+    dismiss_wifi_menu();
+}
+
+static void on_wifi_scan(LunaElement* e) {
+    (void)e;
+    if (g_wifi_backend == WIFI_CONNMAN) {
+        const char* const argv[] = { "connmanctl", "scan", "wifi", NULL }; wifi_exec(argv);
+    } else if (g_wifi_backend == WIFI_NMCLI) {
+        const char* const argv[] = { "nmcli", "device", "wifi", "rescan", NULL }; wifi_exec(argv);
+    }
+    toast_show("Wi-Fi", "Scanning for networks...", 2.0);
 }
 
 static void launchpad_close(void) {
@@ -1672,6 +2038,10 @@ static void on_mouse_release_hook(int hit, int drag_moved) {
         !hit_inside(hit, g_mb_cc_idx) &&
         !hit_inside(hit, g_mb_wifi_idx))
         dismiss_cc(g_cc_idx);
+    if (is_shown(g_wifi_menu_idx) &&
+        !hit_inside(hit, g_wifi_menu_idx) &&
+        !hit_inside(hit, g_mb_wifi_idx))
+        dismiss_wifi_menu();
     if (is_shown(g_win_menu_idx) && !hit_inside(hit, g_win_menu_idx)) {
         /* Keep open when the click was on a win_item (handler opens/repositions). */
         int on_win = 0;
@@ -1791,6 +2161,39 @@ static void settings_mark_cursor(const char* theme) {
     luna_mark_layout_dirty();
 }
 
+static void settings_mark_toggle(const char* id, int enabled) {
+    int idx = luna_get_element_by_id(id);
+    if (idx < 0) return;
+    if (enabled) luna_add_class(idx, "on");
+    else luna_remove_class(idx, "on");
+    luna_update_element_style(idx);
+}
+
+static void settings_mark_gap(void) {
+    const int gaps[] = { 0, 8, 16 };
+    for (int i = 0; i < 3; i++) {
+        char id[24];
+        snprintf(id, sizeof(id), "wm_gap_%d", gaps[i]);
+        int idx = luna_get_element_by_id(id);
+        if (idx < 0) continue;
+        if (g_settings.window_gap == gaps[i]) luna_add_class(idx, "selected");
+        else luna_remove_class(idx, "selected");
+        luna_update_element_style(idx);
+    }
+}
+
+static void apply_wm_settings(void) {
+    char cmd[80];
+    snprintf(cmd, sizeof(cmd), "wm_config gap %d", g_settings.window_gap);
+    shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config edge_snap %d", g_settings.edge_snap);
+    shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config titlebar_double_click %d", g_settings.titlebar_double_click);
+    shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config super_shortcuts %d", g_settings.super_shortcuts);
+    shell_send_cmd(cmd);
+}
+
 static void settings_populate_ui(void) {
     /* Fill app command inputs */
     for (int i = 0; i < APP_COUNT; i++) {
@@ -1806,11 +2209,19 @@ static void settings_populate_ui(void) {
     settings_mark_wallpaper(g_settings.wallpaper);
     settings_mark_cursor(g_settings.cursor_theme);
     settings_mark_kb(g_settings.kb_layout);
+    settings_mark_toggle("wm_snap", g_settings.edge_snap);
+    settings_mark_toggle("wm_double_click", g_settings.titlebar_double_click);
+    settings_mark_toggle("wm_shortcuts", g_settings.super_shortcuts);
+    settings_mark_toggle("wm_dock_mag", g_settings.dock_magnification);
+    settings_mark_toggle("wm_restore", g_settings.session_restore);
+    settings_mark_gap();
     /* Show apps tab by default */
     set_hidden(g_settings_panel_apps, 0);
     set_hidden(g_settings_panel_disp, 1);
+    set_hidden(g_settings_panel_wm, 1);
     if (g_stab_apps_idx >= 0) { luna_add_class(g_stab_apps_idx, "active"); luna_update_element_style(g_stab_apps_idx); }
     if (g_stab_disp_idx  >= 0) { luna_remove_class(g_stab_disp_idx, "active"); luna_update_element_style(g_stab_disp_idx); }
+    if (g_stab_wm_idx    >= 0) { luna_remove_class(g_stab_wm_idx, "active"); luna_update_element_style(g_stab_wm_idx); }
 }
 
 static void on_settings_open(LunaElement* e) {
@@ -1860,6 +2271,7 @@ static void on_settings_save(LunaElement* e) {
     apply_wallpaper(g_settings.wallpaper);
     cursor_theme_reload(g_settings.cursor_theme);
     apply_keyboard_layout(g_settings.kb_layout);
+    apply_wm_settings();
     g_cursor_reload_pending = 1;
     set_hidden(g_settings_idx, 1);
     toast_show("Settings", "Settings saved successfully.", 3.0);
@@ -1877,6 +2289,7 @@ static void on_settings_tab(LunaElement* e) {
     const char* id = luna_element_at(tab_idx)->id;
     int is_apps = !strcmp(id, "stab_apps");
     int is_disp = !strcmp(id, "stab_disp");
+    int is_wm = !strcmp(id, "stab_wm");
 
     if (g_stab_apps_idx >= 0) {
         if (is_apps) luna_add_class(g_stab_apps_idx, "active");
@@ -1888,8 +2301,50 @@ static void on_settings_tab(LunaElement* e) {
         else luna_remove_class(g_stab_disp_idx, "active");
         luna_update_element_style(g_stab_disp_idx);
     }
+    if (g_stab_wm_idx >= 0) {
+        if (is_wm) luna_add_class(g_stab_wm_idx, "active");
+        else luna_remove_class(g_stab_wm_idx, "active");
+        luna_update_element_style(g_stab_wm_idx);
+    }
     set_hidden(g_settings_panel_apps, !is_apps);
     set_hidden(g_settings_panel_disp, !is_disp);
+    set_hidden(g_settings_panel_wm, !is_wm);
+}
+
+static void on_wm_toggle(LunaElement* e) {
+    const char* id = NULL;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* cand = luna_element_at(i)->id;
+        if (cand && !strncmp(cand, "wm_", 3)) { id = cand; break; }
+    }
+    if (!id) return;
+    int* value = NULL;
+    if (!strcmp(id, "wm_snap")) value = &g_settings.edge_snap;
+    else if (!strcmp(id, "wm_double_click")) value = &g_settings.titlebar_double_click;
+    else if (!strcmp(id, "wm_shortcuts")) value = &g_settings.super_shortcuts;
+    else if (!strcmp(id, "wm_dock_mag")) value = &g_settings.dock_magnification;
+    else if (!strcmp(id, "wm_restore")) value = &g_settings.session_restore;
+    if (!value) return;
+    *value = !*value;
+    settings_mark_toggle(id, *value);
+    apply_wm_settings();
+    settings_save();
+    shell_request_repaint(-1);
+}
+
+static void on_wm_gap(LunaElement* e) {
+    const char* id = NULL;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* cand = luna_element_at(i)->id;
+        if (cand && !strncmp(cand, "wm_gap_", 7)) { id = cand; break; }
+    }
+    if (!id) return;
+    int gap = atoi(id + 7);
+    if (gap != 0 && gap != 8 && gap != 16) return;
+    g_settings.window_gap = gap;
+    settings_mark_gap();
+    apply_wm_settings();
+    settings_save();
 }
 
 static void on_wallpaper_select(LunaElement* e) {
@@ -1939,6 +2394,7 @@ static void confirm_open(int action) {
     int t  = luna_get_element_by_id("confirm_title");
     int m  = luna_get_element_by_id("confirm_msg");
     int ok = luna_get_element_by_id("confirm_ok");
+    int icon = luna_get_element_by_id("confirm_icon");
     int danger = (action == ACT_SHUTDOWN || action == ACT_RESTART);
     if (ok >= 0) {
         if (danger) { luna_add_class(ok, "danger"); luna_remove_class(ok, "primary"); }
@@ -1947,19 +2403,37 @@ static void confirm_open(int action) {
     }
     switch (action) {
     case ACT_SHUTDOWN:
-        if (t >= 0)  luna_set_text(t,  "Shut Down");
-        if (m >= 0)  luna_set_text(m,  "Are you sure you want to shut down your computer now?");
+        if (t >= 0)  luna_set_text(t,  "Shut Down?");
+        if (m >= 0)  luna_set_text(m,  "Open applications will close. Save your work before continuing.");
         if (ok >= 0) luna_set_text(ok, "Shut Down");
+        if (icon >= 0) {
+            luna_set_text(icon, "\xef\x80\x91"); /* power-off, U+F011 */
+            luna_remove_class(icon, "restart");
+            luna_remove_class(icon, "logout");
+            luna_update_element_style(icon);
+        }
         break;
     case ACT_RESTART:
-        if (t >= 0)  luna_set_text(t,  "Restart");
-        if (m >= 0)  luna_set_text(m,  "Are you sure you want to restart your computer now?");
+        if (t >= 0)  luna_set_text(t,  "Restart?");
+        if (m >= 0)  luna_set_text(m,  "Open applications will close, then the computer will restart.");
         if (ok >= 0) luna_set_text(ok, "Restart");
+        if (icon >= 0) {
+            luna_set_text(icon, "\xef\x80\xa1"); /* rotate, U+F021 */
+            luna_add_class(icon, "restart");
+            luna_remove_class(icon, "logout");
+            luna_update_element_style(icon);
+        }
         break;
     case ACT_LOGOUT:
-        if (t >= 0)  luna_set_text(t,  "Log Out");
-        if (m >= 0)  luna_set_text(m,  "Quit the Luna session and return to the console?");
+        if (t >= 0)  luna_set_text(t,  "Log Out?");
+        if (m >= 0)  luna_set_text(m,  "Open applications will close and the session will end.");
         if (ok >= 0) luna_set_text(ok, "Log Out");
+        if (icon >= 0) {
+            luna_set_text(icon, "\xef\x82\x8b"); /* sign-out, U+F08B */
+            luna_remove_class(icon, "restart");
+            luna_add_class(icon, "logout");
+            luna_update_element_style(icon);
+        }
         break;
     }
     set_hidden(g_confirm_idx, 0);
@@ -2002,15 +2476,16 @@ static void on_cc_toggle(LunaElement* e) {
     int now_on = strstr(t->class_name, "on") == NULL;
     if (now_on) luna_add_class(idx, "on");
     else         luna_remove_class(idx, "on");
-    char knob_id[80];
-    snprintf(knob_id, sizeof(knob_id), "%s_knob", t->id);
-    int k = luna_get_element_by_id(knob_id);
-    if (k != -1) {
-        luna_element_at(k)->rel_x = now_on ? 21.0f : 3.0f;
-        luna_element_at(k)->pos_overridden_x = 1;
-    }
+    /* Keep the knob's layout position stable and let the .on CSS transform
+     * provide the entire animation.  Overriding rel_x here used to add a
+     * second 18 px movement on top of translateX(), and made the transformed
+     * child jump out from under the pointer during release hit-testing. */
     luna_update_element_style(idx);
     luna_mark_layout_dirty();
+    if (!strcmp(t->id, "cc_wifi")) {
+        wifi_refresh();
+        on_wifi_power(e);
+    }
 }
 
 static void slider_tick(const char* thumb_id, const char* fill_id, const char* track_id) {
@@ -2116,6 +2591,13 @@ static const char* read_net_status(void) {
  * vertical lift) so the enlarged icons stay inside the dock's fixed-height
  * layer surface — no clipping, no input-region carving needed. */
 static void dock_magnify_tick(void) {
+    if (!g_settings.dock_magnification) {
+        for (int i = 0; i < g_dock_icon_count; i++) {
+            LunaElement* icon = luna_element_at(g_dock_icon_idx[i]);
+            if (icon) icon->transform_scale = 1.0f;
+        }
+        return;
+    }
     if (g_dock_icon_count == 0) return;
 
     /* The dock only reacts while the pointer hovers its vertical band; away
@@ -2200,6 +2682,7 @@ static void session_path(char* buf, size_t n) {
 }
 
 static void session_save(void) {
+    if (!g_settings.session_restore) return;
     ensure_config_dir();
     /* Force a fresh window list so shutdown captures the latest set. */
     {
@@ -2258,6 +2741,11 @@ static void session_save(void) {
 }
 
 static void session_restore_schedule(void) {
+    if (!g_settings.session_restore) {
+        g_session_restore_done = 1;
+        g_session_restore_active = 0;
+        return;
+    }
     if (getenv("LUNA_NO_SESSION_RESTORE")) {
         g_session_restore_done = 1;
         return;
@@ -2575,9 +3063,11 @@ static int clip_populate_menu(void) {
         size_t len = (size_t)strtoul(lenbuf, NULL, 10);
         if (!fgets(mime, sizeof(mime), f)) break;
         if (len > 2 * 1024 * 1024) break;
-        char* data = (char*)malloc(len + 1);
-        if (!data) break;
-        if (fread(data, 1, len, f) != len) { free(data); break; }
+        /* Clipboard previews only need one record at a time.  Keep the
+         * maximum-sized workspace in BSS so opening this menu never churns
+         * the allocator (formerly one malloc/free, up to 2 MiB, per row). */
+        static char data[2 * 1024 * 1024 + 1];
+        if (fread(data, 1, len, f) != len) break;
         data[len] = 0;
         int c = fgetc(f); /* trailing newline */
         (void)c;
@@ -2597,7 +3087,6 @@ static int clip_populate_menu(void) {
                 }
             }
         }
-        free(data);
         count++;
     }
     fclose(f);
@@ -2648,7 +3137,12 @@ static void on_tray_click(LunaElement* e) {
             int slot = atoi(id + 5);
             int app_slots = MAX_TRAY_SLOTS - 2;
             if (slot == app_slots) {
-                on_control_center(e);
+                /* Keep the built-in tray icon consistent with the Wi-Fi item
+                 * in the menubar.  Opening Control Center here made the
+                 * actual network list unreachable when luna-shell was
+                 * started directly and this was the only visible Wi-Fi
+                 * affordance. */
+                on_wifi_menu(e);
                 return;
             }
             if (slot == app_slots + 1) {
@@ -2661,6 +3155,16 @@ static void on_tray_click(LunaElement* e) {
                 shell_send_cmd(cmd);
                 return;
             }
+            if (slot >= 0 && slot < g_tray_count &&
+                !strncmp(g_tray[slot].id, "service:", 8)) {
+                /* A native item has no client to activate.  It receives the
+                 * action directly; Wi-Fi also opens the shell-owned network
+                 * menu so direct and service-backed launches behave alike. */
+                tray_send_action(g_tray[slot].id, "activate");
+                if (!strcmp(g_tray[slot].id, "service:luna-wifi"))
+                    on_wifi_menu(e);
+                return;
+            }
             if (slot >= 0 && slot < g_tray_count && g_tray[slot].tooltip[0]) {
                 toast_show(g_tray[slot].label, g_tray[slot].tooltip, 3.0);
             }
@@ -2669,7 +3173,14 @@ static void on_tray_click(LunaElement* e) {
     }
 }
 
-/* Returns 1 if the bar width actually changed. */
+/* Returns 1 if the bar width actually changed.
+ *
+ * These fills are leaf nodes whose width cannot affect a sibling or parent.
+ * Updating them used to mark the entire document layout dirty every time a
+ * CPU sample changed.  On KMS that full layout pass landed on the
+ * render thread and showed up as a regular hitch.  Keep the resolved width in
+ * sync directly; the next unrelated layout pass will preserve it through the
+ * matching css_width value. */
 static int set_bar_fill(const char* fill_id, float pct) {
     int fi = luna_get_element_by_id(fill_id);
     if (fi == -1) return 0;
@@ -2683,7 +3194,7 @@ static int set_bar_fill(const char* fill_id, float pct) {
     if (fabsf(fill->css_width - nw) < 0.5f && fill->has_css_width) return 0;
     fill->css_width = nw;
     fill->has_css_width = 1;
-    luna_mark_layout_dirty();
+    fill->w = nw;
     return 1;
 }
 
@@ -2728,70 +3239,112 @@ static int text_would_change(int idx, const char* buf) {
     return e && strcmp(e->text, buf) != 0;
 }
 
+/* Spread procfs/sysfs/filesystem reads across five one-second phases so that
+ * no rendered frame pays for more than one status-I/O class.  CPU, memory,
+ * battery and network remain fresh enough for desktop chrome; disk is still
+ * limited to one statvfs call per 30 seconds. */
 static void update_stats(void) {
-    if (g_now - g_last_stats < 2.0) return;
+    if (g_now - g_last_stats < 1.0) return;
     g_last_stats = g_now;
     char buf[64];
     int dirty_mb = 0, dirty_bg = 0, dirty_cc = 0;
 
-    float cpu = read_cpu_percent();
-    int idx = luna_get_element_by_id("st_cpu_val");
-    snprintf(buf, sizeof(buf), "%d%%", (int)cpu);
-    if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg = 1; }
-    if (set_bar_fill("st_cpu_fill", cpu)) dirty_bg = 1;
-    if (set_bar_fill("cc_cpu_fill", cpu)) dirty_cc = 1;
-
-    int mem = read_mem_percent(NULL);
-    idx = luna_get_element_by_id("st_mem_val");
-    snprintf(buf, sizeof(buf), "%d%%", mem);
-    if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg = 1; }
-    if (set_bar_fill("st_mem_fill", (float)mem)) dirty_bg = 1;
-    if (set_bar_fill("cc_mem_fill", (float)mem)) dirty_cc = 1;
-
-    struct statvfs vfs;
-    if (statvfs("/", &vfs) == 0 && vfs.f_blocks > 0) {
-        double total = (double)vfs.f_blocks * vfs.f_frsize;
-        double avail = (double)vfs.f_bavail * vfs.f_frsize;
-        double used_pct = 100.0 * (total - avail) / total;
-        idx = luna_get_element_by_id("st_disk_val");
-        snprintf(buf, sizeof(buf), "%.0fG free", avail / (1024.0 * 1024.0 * 1024.0));
+    /* One I/O class per tick prevents a periodic cluster of blocking procfs,
+     * sysfs and filesystem calls from landing in the same rendered frame. */
+    static int phase = 0;
+    int idx;
+    switch (phase) {
+    case 0: {
+        float cpu = read_cpu_percent();
+        idx = luna_get_element_by_id("st_cpu_val");
+        snprintf(buf, sizeof(buf), "%d%%", (int)cpu);
         if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg = 1; }
-        if (set_bar_fill("st_disk_fill", (float)used_pct)) dirty_bg = 1;
+        if (set_bar_fill("st_cpu_fill", cpu)) dirty_bg = 1;
+        if (set_bar_fill("cc_cpu_fill", cpu)) dirty_cc = 1;
+        break;
     }
-
-    idx = luna_get_element_by_id("mb_bat");
-    {
-        int bat = read_battery_percent();
-        const char* icon = bat >= 0 ? "\uf240" : "\uf1e6";
-        if (bat >= 0) snprintf(buf, sizeof(buf), "%d%%", bat);
+    case 1: {
+        int mem = read_mem_percent(NULL);
+        idx = luna_get_element_by_id("st_mem_val");
+        snprintf(buf, sizeof(buf), "%d%%", mem);
+        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg = 1; }
+        if (set_bar_fill("st_mem_fill", (float)mem)) dirty_bg = 1;
+        if (set_bar_fill("cc_mem_fill", (float)mem)) dirty_cc = 1;
+        break;
+    }
+    case 2: {
+        g_cached_bat = read_battery_percent();
+        idx = luna_get_element_by_id("mb_bat");
+        const char* icon = g_cached_bat >= 0 ? "\uf240" : "\uf1e6";
+        if (g_cached_bat >= 0) snprintf(buf, sizeof(buf), "%d%%", g_cached_bat);
         else snprintf(buf, sizeof(buf), "AC");
         /* Keep icon and label in their browser-equivalent DOM nodes.  Packing
            both into mb_bat duplicates the child glyph and defeats flex's
            anonymous text-item layout. */
-        for (int i = 0; i < luna_element_count(); i++) {
-            LunaElement* e = luna_element_at(i);
-            if (e->parent_idx == idx && strstr(e->class_name, "luna_icon")) {
-                luna_set_text(i, icon);
-                break;
+        if (g_mb_bat_icon_idx >= 0) luna_set_text(g_mb_bat_icon_idx, icon);
+        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_mb = 1; }
+        break;
+    }
+    case 3:
+        snprintf(g_cached_net, sizeof(g_cached_net), "%s", read_net_status());
+        idx = luna_get_element_by_id("mb_wifi");
+        if (g_mb_wifi_icon_idx >= 0) luna_set_text(g_mb_wifi_icon_idx, "\uf1eb");
+        if (text_would_change(idx, g_cached_net)) {
+            luna_set_text(idx, g_cached_net);
+            dirty_mb = 1;
+        }
+        break;
+    case 4:
+        if (g_now - g_last_disk >= 30.0) {
+            g_last_disk = g_now;
+            struct statvfs vfs;
+            if (statvfs("/", &vfs) == 0 && vfs.f_blocks > 0) {
+                double total = (double)vfs.f_blocks * vfs.f_frsize;
+                double avail = (double)vfs.f_bavail * vfs.f_frsize;
+                double used_pct = 100.0 * (total - avail) / total;
+                idx = luna_get_element_by_id("st_disk_val");
+                snprintf(buf, sizeof(buf), "%.0fG free", avail / (1024.0 * 1024.0 * 1024.0));
+                if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg = 1; }
+                if (set_bar_fill("st_disk_fill", (float)used_pct)) dirty_bg = 1;
             }
         }
-        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_mb = 1; }
+        break;
     }
-    idx = luna_get_element_by_id("mb_wifi");
-    snprintf(buf, sizeof(buf), "%s", read_net_status());
-    for (int i = 0; i < luna_element_count(); i++) {
-        LunaElement* e = luna_element_at(i);
-        if (e->parent_idx == idx && strstr(e->class_name, "luna_icon")) {
-            luna_set_text(i, "\uf1eb");
-            break;
-        }
-    }
-    if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_mb = 1; }
+    phase = (phase + 1) % 5;
 
     if (dirty_mb) shell_request_repaint(1); /* menubar */
     if (dirty_bg) shell_request_repaint(0); /* widgets on bg_layer */
     /* control_center is g_surfs[6]; bit is ignored on non-WL backends. */
     if (dirty_cc && is_shown(g_cc_idx)) shell_request_repaint(6);
+}
+
+/* Bound event sleep by the next scheduled shell job.  Input descriptors wake
+ * poll immediately, so longer idle sleeps do not add input latency. */
+static int shell_wait_timeout_ms(int max_ms, double repaint_deadline) {
+    double next = g_now + (double)max_ms / 1000.0;
+#define SOONER(deadline) do { \
+        double d_ = (deadline); \
+        if (d_ > 0.0 && d_ < next) next = d_; \
+    } while (0)
+    SOONER(g_last_shell_poll + (g_switcher_visible ? 0.05 : 0.12));
+    SOONER(g_last_clock + 1.0);
+    SOONER(g_last_stats + 1.0);
+    SOONER(g_toast_deadline);
+    SOONER(g_session_restore_at);
+    SOONER(repaint_deadline);
+    if (g_cur_theme.active_role >= 0 &&
+        g_cur_theme.active_role < LUNA_CUR_MAX_ROLES) {
+        LunaCurAnim* a = &g_cur_theme.roles[g_cur_theme.active_role];
+        if (a->loaded && a->nframes > 1)
+            SOONER(a->frame_until);
+    }
+#undef SOONER
+    double remain = next - g_now;
+    if (remain <= 0.0) return 0;
+    int ms = (int)ceil(remain * 1000.0);
+    if (ms < 1) ms = 1;
+    if (ms > max_ms) ms = max_ms;
+    return ms;
 }
 
 static void update_launchpad_filter(void) {
@@ -2842,6 +3395,8 @@ static void register_handlers(void) {
     luna_register_js_handler("onSettingsMax",   on_settings_max);
     luna_register_js_handler("onSettingsSave",  on_settings_save);
     luna_register_js_handler("onSettingsTab",   on_settings_tab);
+    luna_register_js_handler("onWmToggle",      on_wm_toggle);
+    luna_register_js_handler("onWmGap",         on_wm_gap);
     luna_register_js_handler("onWpSelect",      on_wallpaper_select);
     luna_register_js_handler("onKbSelect",      on_kb_select);
     luna_register_js_handler("onCurSelect",     on_cursor_select);
@@ -2879,13 +3434,16 @@ static void bind_indices(void) {
     g_settings_sheet_idx = luna_get_element_by_id("settings_sheet");
     g_settings_panel_apps = luna_get_element_by_id("settings_panel_apps");
     g_settings_panel_disp = luna_get_element_by_id("settings_panel_disp");
+    g_settings_panel_wm   = luna_get_element_by_id("settings_panel_wm");
     g_stab_apps_idx     = luna_get_element_by_id("stab_apps");
     g_stab_disp_idx     = luna_get_element_by_id("stab_disp");
+    g_stab_wm_idx       = luna_get_element_by_id("stab_wm");
     g_win_menu_idx      = luna_get_element_by_id("win_menu");
     g_clip_menu_idx     = luna_get_element_by_id("clip_menu");
     g_mb_logo_idx       = luna_get_element_by_id("mb_logo");
     g_mb_cc_idx         = luna_get_element_by_id("mb_cc");
     g_mb_wifi_idx       = luna_get_element_by_id("mb_wifi");
+    g_wifi_menu_idx     = luna_get_element_by_id("wifi_menu");
 
     /* The redesigned markup keeps the about box's visual class but no longer
      * includes sheet_box.  The shared class supplies its absolute positioning,
@@ -2925,7 +3483,7 @@ static void bind_indices(void) {
         app_set_dot(&g_apps[i], 0);
     }
     wire_subtree(luna_get_element_by_id("mb_logo"),       on_luna_menu);
-    wire_subtree(luna_get_element_by_id("mb_wifi"),       on_control_center);
+    wire_subtree(luna_get_element_by_id("mb_wifi"),       on_wifi_menu);
     wire_subtree(luna_get_element_by_id("mb_cc"),         on_control_center);
     wire_subtree(luna_get_element_by_id("mi_about"),      on_about);
     wire_subtree(luna_get_element_by_id("mi_settings"),   on_settings_open);
@@ -2939,6 +3497,13 @@ static void bind_indices(void) {
     wire_subtree(luna_get_element_by_id("cc_wifi"),       on_cc_toggle);
     wire_subtree(luna_get_element_by_id("cc_bt"),         on_cc_toggle);
     wire_subtree(luna_get_element_by_id("cc_night"),      on_cc_toggle);
+    wire_subtree(luna_get_element_by_id("wifi_power"),    on_wifi_power);
+    wire_subtree(luna_get_element_by_id("wifi_connect"),  on_wifi_connect);
+    wire_subtree(luna_get_element_by_id("wifi_scan"),     on_wifi_scan);
+    for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+        char id[16]; snprintf(id, sizeof(id), "wifi_%d", i);
+        wire_subtree(luna_get_element_by_id(id), on_wifi_network);
+    }
 
     /* Wire wallpaper selection thumbs */
     const char* wp_ids[] = {"wp_night","wp_ocean","wp_forest","wp_sunset"};
@@ -2980,6 +3545,17 @@ static void bind_indices(void) {
     /* Wire settings tab buttons */
     wire_subtree(g_stab_apps_idx, on_settings_tab);
     wire_subtree(g_stab_disp_idx, on_settings_tab);
+    wire_subtree(g_stab_wm_idx, on_settings_tab);
+    {
+        const char* toggle_ids[] = {
+            "wm_snap", "wm_double_click", "wm_shortcuts", "wm_dock_mag", "wm_restore"
+        };
+        for (size_t i = 0; i < sizeof(toggle_ids) / sizeof(toggle_ids[0]); i++)
+            wire_subtree(luna_get_element_by_id(toggle_ids[i]), on_wm_toggle);
+        const char* gap_ids[] = { "wm_gap_0", "wm_gap_8", "wm_gap_16" };
+        for (size_t i = 0; i < sizeof(gap_ids) / sizeof(gap_ids[0]); i++)
+            wire_subtree(luna_get_element_by_id(gap_ids[i]), on_wm_gap);
+    }
 
     wire_subtree(g_mb_clip_idx, on_clipboard_menu);
     wire_subtree(luna_get_element_by_id("clip_clear"), on_clip_clear);
@@ -3007,6 +3583,7 @@ static void bind_indices(void) {
     wire_subtree(luna_get_element_by_id("settings_cancel"), on_settings_close);
     wire_subtree(luna_get_element_by_id("settings_ok"), on_settings_save);
     wire_subtree(luna_get_element_by_id("confirm_backdrop"), on_confirm_cancel);
+    wire_subtree(luna_get_element_by_id("ctl_close"),        on_confirm_cancel);
     wire_subtree(luna_get_element_by_id("confirm_cancel"), on_confirm_cancel);
     wire_subtree(luna_get_element_by_id("confirm_ok"), on_confirm_ok);
 
@@ -3018,6 +3595,69 @@ static void bind_indices(void) {
         LunaElement* e = luna_element_at(i);
         if (strstr(e->class_name, "dock_icon"))
             g_dock_icon_idx[g_dock_icon_count++] = i;
+    }
+
+    /* ── Hot-path child element cache ──
+     * One linear pass at bind time; O(1) lookups in every render tick. */
+    g_mb_app_idx = luna_get_element_by_id("mb_app");
+    memset(g_win_label_idx,  -1, sizeof(g_win_label_idx));
+    memset(g_tray_glyph_idx, -1, sizeof(g_tray_glyph_idx));
+    memset(g_sw_title_idx,   -1, sizeof(g_sw_title_idx));
+    memset(g_sw_app_idx,     -1, sizeof(g_sw_app_idx));
+    g_mb_bat_icon_idx        = -1;
+    g_mb_wifi_icon_idx       = -1;
+    g_wm_maximize_label_idx  = -1;
+    g_wm_fullscreen_label_idx = -1;
+
+    int mb_bat_parent  = luna_get_element_by_id("mb_bat");
+    int mb_wifi_parent = luna_get_element_by_id("mb_wifi");
+    int wm_max_parent  = luna_get_element_by_id("wm_maximize");
+    int wm_fs_parent   = luna_get_element_by_id("wm_fullscreen");
+
+    /* Collect sw_N parent indices once to avoid repeated ID lookups inside loop */
+    int sw_parent[MAX_SWITCHER_SLOTS];
+    for (int s = 0; s < MAX_SWITCHER_SLOTS; s++) {
+        char id[16]; snprintf(id, sizeof(id), "sw_%d", s);
+        sw_parent[s] = luna_get_element_by_id(id);
+    }
+
+    int n = luna_element_count();
+    for (int i = 0; i < n; i++) {
+        LunaElement* e = luna_element_at(i);
+        int p = e->parent_idx;
+
+        /* win_label children */
+        if (strstr(e->class_name, "win_label")) {
+            for (int s = 0; s < MAX_WIN_SLOTS; s++)
+                if (g_win_slot_idx[s] == p) { g_win_label_idx[s] = i; break; }
+            continue;
+        }
+        /* tray_glyph children */
+        if (strstr(e->class_name, "tray_glyph")) {
+            for (int s = 0; s < MAX_TRAY_SLOTS; s++)
+                if (g_tray_slot_idx[s] == p) { g_tray_glyph_idx[s] = i; break; }
+            continue;
+        }
+        /* switcher title / app labels */
+        if (strstr(e->class_name, "sw_title")) {
+            for (int s = 0; s < MAX_SWITCHER_SLOTS; s++)
+                if (sw_parent[s] == p) { g_sw_title_idx[s] = i; break; }
+            continue;
+        }
+        if (strstr(e->class_name, "sw_app")) {
+            for (int s = 0; s < MAX_SWITCHER_SLOTS; s++)
+                if (sw_parent[s] == p) { g_sw_app_idx[s] = i; break; }
+            continue;
+        }
+        /* mb_bat / mb_wifi icons and wm_* mi_labels */
+        if (strstr(e->class_name, "luna_icon")) {
+            if (p == mb_bat_parent)  { g_mb_bat_icon_idx  = i; continue; }
+            if (p == mb_wifi_parent) { g_mb_wifi_icon_idx = i; continue; }
+        }
+        if (strstr(e->class_name, "mi_label")) {
+            if (p == wm_max_parent) { g_wm_maximize_label_idx  = i; continue; }
+            if (p == wm_fs_parent)  { g_wm_fullscreen_label_idx = i; continue; }
+        }
     }
 
     /* Initial Control Center knob positions (wifi & bt start "on") */
@@ -3251,26 +3891,49 @@ static void kms_cursor_fini(void);
  * Returns 1 on success (caller should skip the built-in glyph). */
 static int cursor_blit_theme(uint32_t* dst, int dst_w, int dst_h, int stride_px,
                              int cursor_type, int* hot_x, int* hot_y) {
-    if (!luna_cur_theme_select(&g_cur_theme, cursor_type)) return 0;
+    int requested_role = cursor_type;
+    if (!luna_cur_theme_select(&g_cur_theme, requested_role)) {
+        /* A third-party theme may intentionally provide only its arrow.  Do
+         * not turn every unsupported hover role into a transparent cursor. */
+        if (!luna_cur_theme_select(&g_cur_theme, 0)) {
+            g_cur_theme.active_role = requested_role;
+            return 0;
+        }
+    }
     const LunaCurFrame* f = luna_cur_theme_frame(&g_cur_theme);
-    if (!f || !f->argb || f->w <= 0 || f->h <= 0) return 0;
+    if (!f || !f->argb || f->w <= 0 || f->h <= 0) {
+        g_cur_theme.active_role = requested_role;
+        return 0;
+    }
 
     memset(dst, 0, (size_t)dst_h * (size_t)stride_px * sizeof(uint32_t));
 
-    /* Nearest-neighbour fit into the destination (identity for 32→32/64). */
-    int copy_w = f->w < dst_w ? f->w : dst_w;
-    int copy_h = f->h < dst_h ? f->h : dst_h;
-    for (int y = 0; y < copy_h; y++) {
-        const uint32_t* src = f->argb + y * f->w;
-        uint32_t* row = dst + y * stride_px;
-        memcpy(row, src, (size_t)copy_w * sizeof(uint32_t));
+    /* Fit large Windows cursors instead of cropping their right/bottom edges.
+     * Preserve aspect ratio, and use nearest-neighbour sampling so pixel-art
+     * themes remain crisp. */
+    double scale = 1.0;
+    if (f->w > dst_w || f->h > dst_h) {
+        double sx = (double)dst_w / (double)f->w;
+        double sy = (double)dst_h / (double)f->h;
+        scale = sx < sy ? sx : sy;
     }
-    *hot_x = f->hot_x;
-    *hot_y = f->hot_y;
+    int copy_w = (int)floor((double)f->w * scale + 0.5);
+    int copy_h = (int)floor((double)f->h * scale + 0.5);
+    if (copy_w < 1) copy_w = 1;
+    if (copy_h < 1) copy_h = 1;
+    for (int y = 0; y < copy_h; y++) {
+        int sy = y * f->h / copy_h;
+        uint32_t* row = dst + y * stride_px;
+        for (int x = 0; x < copy_w; x++)
+            row[x] = f->argb[sy * f->w + x * f->w / copy_w];
+    }
+    *hot_x = (int)floor((double)f->hot_x * scale + 0.5);
+    *hot_y = (int)floor((double)f->hot_y * scale + 0.5);
     if (*hot_x < 0) *hot_x = 0;
     if (*hot_y < 0) *hot_y = 0;
     if (*hot_x >= dst_w) *hot_x = dst_w / 2;
     if (*hot_y >= dst_h) *hot_y = dst_h / 2;
+    g_cur_theme.active_role = requested_role;
     return 1;
 }
 
@@ -3538,7 +4201,11 @@ static int kms_init_gbm_egl(void) {
     if (!eglMakeCurrent(g_kms.dpy, g_kms.surf, g_kms.surf, g_kms.ctx)) {
         fprintf(stderr, "[luna-shell/kms] eglMakeCurrent failed\n"); return 0;
     }
-    eglSwapInterval(g_kms.dpy, 1);
+    /* KMS has no window-system compositor to pace us.  drmModePageFlip() below
+     * is the one (and only) vblank throttle.  Asking EGL to wait as well can
+     * serialize the render at eglSwapBuffers and then wait for a second vblank
+     * at PageFlip, which presents as a very regular 30 Hz hitch on console. */
+    eglSwapInterval(g_kms.dpy, 0);
     return 1;
 }
 
@@ -3755,16 +4422,12 @@ static void kms_swap_buffers(void) {
             g_should_close = 1;
             return;
         }
+        /* The scanout BO is handed straight from EGL/GBM to KMS: no CPU copy.
+         * Release the previous BO only after the flip fence/event says KMS is
+         * finished with it.  Cursor planes are independent of primary-plane
+         * flips, so do not re-program/move the cursor on every frame; those two
+         * synchronous DRM ioctls were needless render-thread jitter. */
         gbm_surface_release_buffer(g_kms.gbm_surf, g_kms.prev_bo);
-        /* Some drivers clear the cursor plane across a page flip — re-push. */
-        if (g_kms.cursor_ok && g_kms.cursor_shown) {
-            if (drmModeSetCursor2(g_kms.fd, g_kms.crtc_id, g_kms.cursor_handle,
-                                  g_kms.cursor_w, g_kms.cursor_h,
-                                  g_kms.cursor_hot_x, g_kms.cursor_hot_y) != 0)
-                drmModeSetCursor(g_kms.fd, g_kms.crtc_id, g_kms.cursor_handle,
-                                 g_kms.cursor_w, g_kms.cursor_h);
-            kms_cursor_move();
-        }
     }
     g_kms.prev_bo = bo;
 }
@@ -3794,7 +4457,21 @@ static int kms_backend_start(void) {
 }
 
 static void kms_backend_get_fb_size(int* w, int* h) { *w = g_kms.width; *h = g_kms.height; }
-static void kms_backend_poll_events(void)           { kms_process_input(); }
+static void kms_backend_poll_events(void) {
+    if (g_single_poll_timeout_ms > 0) {
+        struct pollfd pfd = {
+            .fd = g_kms.li ? libinput_get_fd(g_kms.li) : -1,
+            .events = POLLIN,
+        };
+        int pr;
+        do {
+            /* fd=-1 makes poll a timer if libinput initialization failed,
+             * instead of leaving the render loop at 100% CPU. */
+            pr = poll(&pfd, 1, g_single_poll_timeout_ms);
+        } while (pr < 0 && errno == EINTR);
+    }
+    kms_process_input();
+}
 static void kms_backend_set_cursor(int cursor_type) {
     if (!g_kms.cursor_ok) return;
     if (cursor_type == g_kms.cursor_type && g_kms.cursor_shown) return;
@@ -3873,11 +4550,14 @@ static LunaSurface g_surfs[] = {
     { .name="bg",           .root_id="bg_layer",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, .anchor=ZWLR_ANCHOR_ALL,
       .exclusive_zone=0, .is_kbd=0 },
-    /* menubar: thin bar at the top */
+    /* Keep the layer surface and its exclusive zone exactly as tall as the
+     * 32px #menubar CSS box.  A 28px surface clipped the window chips and let
+     * toplevel windows occupy their bottom four pixels, making the two layers
+     * appear to overlap. */
     { .name="menubar",      .root_id="menubar",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_TOP,
       .anchor=ZWLR_ANCHOR_TOP|ZWLR_ANCHOR_LEFT|ZWLR_ANCHOR_RIGHT,
-      .exclusive_zone=28, .fixed_h=28 },
+      .exclusive_zone=32, .fixed_h=32 },
     /* dock: floating bar at the bottom */
     { .name="dock",         .root_id="dock",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_TOP,
@@ -3914,10 +4594,15 @@ static LunaSurface g_surfs[] = {
       .anchor=ZWLR_ANCHOR_TOP|ZWLR_ANCHOR_RIGHT,
       .margin_top=38, .margin_right=14, .fixed_w=340, .fixed_h=76,
       .is_overlay=1 },
+    /* wifi_menu: full-output overlay so position_menu_near works on Wayland */
+    { .name="wifi_menu",    .root_id="wifi_menu",
+      .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
+      .is_overlay=1 },
 };
 #define LUNA_SURF_COUNT (int)(sizeof(g_surfs)/sizeof(g_surfs[0]))
 
 static void shell_request_repaint(int surf_idx) {
+    g_frame_dirty = 1;
     if (surf_idx < 0) {
         g_surf_dirty = (1u << LUNA_SURF_COUNT) - 1u;
         return;
@@ -4027,7 +4712,9 @@ static void wlp_motion(void* d, struct wl_pointer* p, uint32_t t, wl_fixed_t x, 
     g_wl.pointer_x = wl_fixed_to_double(x);
     g_wl.pointer_y = wl_fixed_to_double(y);
     wl_refresh_pointer_doc_pos();
-    wl_cursor_apply();
+    /* set_cursor is needed on enter and when the glyph changes, not for every
+     * motion event.  Avoiding a Wayland request per sample removes pointer
+     * latency on high-polling-rate mice. */
     luna_mouse_move(g_wl.mouse_x, g_wl.mouse_y);
 }
 static void wlp_button(void* d, struct wl_pointer* p, uint32_t s, uint32_t t, uint32_t button, uint32_t state) {
@@ -5070,7 +5757,21 @@ static void x11_process_events(void) {
     }
 }
 
-static void x11_backend_poll_events(void) { x11_process_events(); }
+static void x11_backend_poll_events(void) {
+    /* XPending is non-blocking.  Sleep on the X connection when its queue is
+     * empty so a clean desktop becomes event-driven. */
+    if (!XPending(g_x11.display) && g_single_poll_timeout_ms > 0) {
+        struct pollfd pfd = {
+            .fd = ConnectionNumber(g_x11.display),
+            .events = POLLIN,
+        };
+        int pr;
+        do {
+            pr = poll(&pfd, 1, g_single_poll_timeout_ms);
+        } while (pr < 0 && errno == EINTR);
+    }
+    x11_process_events();
+}
 static void x11_backend_set_cursor(int cursor_type) { (void)cursor_type; }
 
 static void x11_backend_terminate(void) {
@@ -5247,7 +5948,10 @@ int main(int argc, char** argv) {
     apply_wallpaper(g_settings.wallpaper);
     cursor_theme_reload(g_settings.cursor_theme);
     apply_keyboard_layout(g_settings.kb_layout);
+    apply_wm_settings();
     read_cpu_percent(); /* prime /proc/stat delta */
+    g_cached_bat = read_battery_percent();
+    snprintf(g_cached_net, sizeof(g_cached_net), "%s", read_net_status());
 
     g_now = plat_time();
     toast_show("Welcome to Luna", "Your desktop is ready.", 8.0);
@@ -5271,15 +5975,6 @@ int main(int argc, char** argv) {
             luna_resize((float)fbw, (float)fbh);
             prev_ww = fbw; prev_wh = fbh;
         }
-        /* The Wayland backend clears per surface inside wl_surf_render(); a
-         * clear here would only scribble on whichever surface happens to be
-         * current from the previous frame. */
-        if (g_backend != &g_wl_backend) {
-            glViewport(0, 0, fbw, fbh);
-            glClearColor(0.04f, 0.05f, 0.12f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-        }
-
         reap_children();
         update_clock();
         update_stats();
@@ -5314,24 +6009,46 @@ int main(int argc, char** argv) {
                 if (luna_visuals_settling_under(g_surfs[i].root_idx))
                     shell_request_repaint(i);
             }
-            int painted = 0;
             for (int i = 0; i < LUNA_SURF_COUNT; i++) {
-                uint32_t before = g_surf_dirty;
                 wl_surf_render(&g_surfs[i], i);
-                if ((before & (1u << i)) && !(g_surf_dirty & (1u << i)))
-                    painted = 1;
             }
-            /* Idle: block briefly for events instead of spinning at 100% CPU. */
+            /* Interactive easing is capped at roughly 60 fps.  When idle,
+             * sleep until input or the next real shell/background deadline. */
             int settling = luna_visuals_settling();
-            g_wl_poll_timeout_ms = painted ? 0 : (settling ? 8 : (desktop_busy ? 32 : 16));
+            g_wl_poll_timeout_ms = settling
+                ? shell_wait_timeout_ms(17, g_now + 1.0 / 60.0)
+                : shell_wait_timeout_ms(250,
+                      desktop_busy ? 0.0 : g_last_bg_paint + 0.25);
         } else {
-            luna_render(fbw, fbh);
-            /* The default framebuffer contents are undefined after EGL swap
-             * on the X11 backend.  Capture while the completed Luna frame is
-             * still current, otherwise --screenshot can return a black image
-             * even though the window itself was rendered correctly. */
-            luna_flush_pending_screenshot();
-            g_backend->swap_buffers();
+            /* Compute this once: it scans the element array.  The result is
+             * also the complete redraw decision for the single KMS/X11
+             * framebuffer. */
+            int settling = luna_visuals_settling();
+            /* Pointer/hover easing runs at vblank cadence, but CSS wallpaper
+             * animation is intentionally 15 fps when nothing is changing.
+             * The KMS hardware cursor remains full-rate without repainting the
+             * primary plane, saving GPU work and memory bandwidth. */
+            double idle_frame_deadline = g_last_bg_paint + 1.0 / 15.0;
+            if (g_now >= idle_frame_deadline)
+                g_frame_dirty = 1;
+            if (g_frame_dirty || settling) {
+                glViewport(0, 0, fbw, fbh);
+                glClearColor(0.04f, 0.05f, 0.12f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                luna_render(fbw, fbh);
+                /* The default framebuffer contents are undefined after EGL swap
+                 * on the X11 backend.  Capture while the completed Luna frame is
+                 * still current, otherwise --screenshot can return a black image
+                 * even though the window itself was rendered correctly. */
+                luna_flush_pending_screenshot();
+                g_backend->swap_buffers();
+                g_frame_dirty = 0;
+                g_last_bg_paint = g_now;
+                g_single_poll_timeout_ms = settling ? 0
+                    : shell_wait_timeout_ms(67, g_last_bg_paint + 1.0 / 15.0);
+            } else {
+                g_single_poll_timeout_ms = shell_wait_timeout_ms(67, idle_frame_deadline);
+            }
         }
         /* Wayland surfaces perform their own swap in wl_surf_render(); keep
          * the existing post-render capture point for that backend. */

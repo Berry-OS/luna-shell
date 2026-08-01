@@ -14,14 +14,14 @@ use crate::types::{wl_argument, wl_array};
 
 pub const WAYLAND_HEADER_SIZE: usize = 8;
 
-pub struct RawMessage {
+pub struct RawMessage<'a> {
     pub object_id: u32,
     pub opcode: u16,
     pub size: usize,
-    pub payload: Vec<u8>,
+    pub payload: &'a [u8],
 }
 
-pub fn decode_one(buf: &[u8]) -> Option<(RawMessage, usize)> {
+pub fn decode_one(buf: &[u8]) -> Option<(RawMessage<'_>, usize)> {
     if buf.len() < WAYLAND_HEADER_SIZE {
         return None;
     }
@@ -33,7 +33,7 @@ pub fn decode_one(buf: &[u8]) -> Option<(RawMessage, usize)> {
     if size < WAYLAND_HEADER_SIZE || buf.len() < size {
         return None;
     }
-    let payload = buf[WAYLAND_HEADER_SIZE..size].to_vec();
+    let payload = &buf[WAYLAND_HEADER_SIZE..size];
     Some((RawMessage { object_id, opcode, size, payload }, size))
 }
 
@@ -140,13 +140,22 @@ pub fn build_message(object_id: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 
+pub struct ParsedEvent {
+    pub args: Vec<wl_argument>,
+    // Storage for wl_array descriptors. Array data itself borrows the receive buffer.
+    _arrays: Vec<wl_array>,
+}
+
 pub unsafe fn parse_event_args(
     sig: &[u8],
     payload: &[u8],
     fds: &mut std::collections::VecDeque<i32>,
     objects: &std::collections::HashMap<u32, *mut crate::proxy::Proxy>,
-) -> Vec<wl_argument> {
-    let mut out: Vec<wl_argument> = Vec::new();
+) -> ParsedEvent {
+    let nargs = sig.iter().filter(|&&c| !matches!(c, b'?' | b'0'..=b'9')).count();
+    let narrays = sig.iter().filter(|&&c| c == b'a').count();
+    let mut out: Vec<wl_argument> = Vec::with_capacity(nargs);
+    let mut arrays: Vec<wl_array> = Vec::with_capacity(narrays);
     let mut offset = 0usize;
 
     macro_rules! read_u32 {
@@ -195,32 +204,25 @@ pub unsafe fn parse_event_args(
                     continue;
                 }
                 if offset + len > payload.len() { break 'outer; }
-                // Leak CString copy for C string lifetime.
-                let s = std::ffi::CString::from_vec_with_nul(
-                    payload[offset..offset+len].to_vec()
-                ).unwrap_or_default();
-                let ptr = s.into_raw();
+                // Wayland strings include their trailing NUL; the receive buffer
+                // remains alive until the listener returns.
+                let ptr = payload.as_ptr().add(offset) as *const c_char;
                 out.push(wl_argument { s: ptr });
                 let pad_len = len + (4 - len % 4) % 4;
                 offset += pad_len.min(payload.len() - offset.min(payload.len()));
             }
             b'a' => {
                 let sz = read_u32!() as usize;
-                let arr = Box::new(wl_array {
+                if offset + sz > payload.len() { break 'outer; }
+                arrays.push(wl_array {
                     size: sz,
                     alloc: sz,
-                    data: if sz > 0 {
-                        let mut v: Vec<u8> = payload[offset..offset+sz].to_vec();
-                        let ptr = v.as_mut_ptr() as *mut c_void;
-                        std::mem::forget(v);
-                        ptr
-                    } else {
-                        std::ptr::null_mut()
-                    },
+                    data: if sz > 0 { payload.as_ptr().add(offset) as *mut c_void } else { std::ptr::null_mut() },
                 });
                 let pad = (4 - sz % 4) % 4;
                 offset += sz + pad;
-                out.push(wl_argument { a: Box::into_raw(arr) });
+                let arr = arrays.last_mut().unwrap() as *mut wl_array;
+                out.push(wl_argument { a: arr });
             }
             b'h' => {
                 let mut a = wl_argument { n: 0 };
@@ -230,5 +232,5 @@ pub unsafe fn parse_event_args(
             _ => {}
         }
     }
-    out
+    ParsedEvent { args: out, _arrays: arrays }
 }

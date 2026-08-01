@@ -16,9 +16,16 @@ path = "src/bin/server.rs"
 libc = "0.2"
 tungstenite = { version = "0.24", optional = true }
 
+[build-dependencies]
+cc = "1"
+
 [features]
 default = []
 # Enable DRM/KMS (DRI) backend. Requires Linux + GPU.
 dri = []
+# GBM/EGL/GLES2 compositor. Optional so headless/software builds retain no
+# dependency on a host graphics stack; GPU initialization falls back to the
+# existing CPU compositor at runtime.
+gpu = ["dri"]
 # WebSocket + WebGL browser display backend (native Linux)
 webgl = ["dep:tungstenite"]

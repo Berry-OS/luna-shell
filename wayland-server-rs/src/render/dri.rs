@@ -9,6 +9,7 @@
 use super::vt::VtSession;
 use super::{probe_render_node, Backend, Framebuffer, InputEvent};
 use crate::input::evdev::EvdevInput;
+use crate::shm::{ShmBuffer, FORMAT_ARGB8888, FORMAT_XRGB8888};
 use libc::{c_void, ioctl, mmap, munmap, open, MAP_FAILED, MAP_SHARED, O_CLOEXEC, O_RDWR, PROT_READ, PROT_WRITE};
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
@@ -17,6 +18,7 @@ use std::sync::mpsc;
 // ioctl numbers (asm-generic/ioctl.h)
 const DRM_BASE: u64 = 0x64; // 'd'
 fn iowr<T>(nr: u64) -> u64 { (3u64 << 30) | (DRM_BASE << 8) | nr | ((std::mem::size_of::<T>() as u64) << 16) }
+fn iow<T>(nr: u64) -> u64 { (1u64 << 30) | (DRM_BASE << 8) | nr | ((std::mem::size_of::<T>() as u64) << 16) }
 fn io(nr: u64) -> u64 { (DRM_BASE << 8) | nr }
 
 #[repr(C)]
@@ -129,6 +131,34 @@ struct ModeDestroyDumb {
 }
 
 #[repr(C)]
+struct GemClose {
+  handle: u32,
+  pad: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct PrimeHandle {
+  handle: u32,
+  flags: u32,
+  fd: i32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ModeFbCmd2 {
+  fb_id: u32,
+  width: u32,
+  height: u32,
+  pixel_format: u32,
+  flags: u32,
+  handles: [u32; 4],
+  pitches: [u32; 4],
+  offsets: [u32; 4],
+  modifier: [u64; 4],
+}
+
+#[repr(C)]
 struct ModeCrtc {
   set_connectors_ptr: u64,
   count_connectors: u32,
@@ -167,6 +197,35 @@ pub struct DriBackend {
   /// card this backend drives, or `None` when the card exposes no usable render
   /// node.  Advertised to clients as `zwp_linux_dmabuf_v1.main_device`.
   render_dev: Option<u64>,
+  direct: Option<ImportedScanout>,
+  #[cfg(feature = "gpu")]
+  gpu: Option<super::gpu::GpuComposer>,
+  #[cfg(feature = "gpu")]
+  gpu_fb: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ImportKey {
+  dev: u64,
+  ino: u64,
+  width: u32,
+  height: u32,
+  stride: u32,
+  offset: u32,
+  format: u32,
+}
+
+struct ImportedScanout {
+  key: ImportKey,
+  fb_id: u32,
+  handle: u32,
+}
+
+impl ImportedScanout {
+  unsafe fn release(self, fd: RawFd) {
+    remove_fb(fd, self.fb_id);
+    close_gem(fd, self.handle);
+  }
 }
 
 struct ScanoutBuf {
@@ -461,6 +520,10 @@ impl DriBackend {
       }
 
       eprintln!("[luna-compositor] dri: double-buffered scanout {}x{}", w, h);
+      #[cfg(feature = "gpu")]
+      let gpu = super::gpu::GpuComposer::new(fd, w, h);
+      #[cfg(feature = "gpu")]
+      eprintln!("[luna-compositor] dri: GPU compositor {}", if gpu.is_some() { "enabled" } else { "unavailable; CPU fallback" });
       return Some(DriBackend {
         fd,
         bufs,
@@ -476,6 +539,11 @@ impl DriBackend {
         vt,
         input,
         render_dev: render_node_of(fd),
+        direct: None,
+        #[cfg(feature = "gpu")]
+        gpu,
+        #[cfg(feature = "gpu")]
+        gpu_fb: 0,
       });
     }
     None
@@ -487,6 +555,10 @@ impl Backend for DriBackend {
 
   fn present(&mut self, fb: &Framebuffer) {
     if !self.active {
+      return;
+    }
+    #[cfg(feature = "gpu")]
+    if self.present_gpu(fb) {
       return;
     }
     // Draw into the back buffer, then flip.  Never rewrite the front buffer
@@ -506,7 +578,42 @@ impl Backend for DriBackend {
     }
     if unsafe { self.flip_to(back) } {
       self.front = back;
+      if let Some(old) = self.direct.take() {
+        unsafe { old.release(self.fd) };
+      }
     }
+  }
+
+  fn present_dmabuf(&mut self, buf: &ShmBuffer) -> bool {
+    if !self.active || buf.width != self.width as i32 || buf.height != self.height as i32 {
+      return false;
+    }
+    let Some(dma_fd) = buf.dmabuf_fd() else { return false };
+    let Some(key) = import_key(dma_fd, buf) else { return false };
+    if self.direct.as_ref().map(|d| d.key) == Some(key) {
+      return true;
+    }
+    let Some(imported) = (unsafe { import_scanout(self.fd, dma_fd, buf, key) }) else {
+      return false;
+    };
+    if !unsafe { self.flip_fb(imported.fb_id) } {
+      unsafe { imported.release(self.fd) };
+      return false;
+    }
+    if let Some(old) = self.direct.replace(imported) {
+      unsafe { old.release(self.fd) };
+    }
+    true
+  }
+
+  fn present_dmabufs(&mut self, surfaces: &[(i32, i32, ShmBuffer)], bitmap: Option<super::GpuBitmap<'_>>) -> bool {
+    #[cfg(feature = "gpu")]
+    {
+      let Some(output) = self.gpu.as_mut().and_then(|g| g.render_dmabufs(surfaces, bitmap)) else { return false };
+      return self.commit_gpu_output(output.1, output.2);
+    }
+    #[cfg(not(feature = "gpu"))]
+    { let _ = surfaces; false }
   }
 
   fn take_input_channel(&mut self) -> Option<(mpsc::Receiver<InputEvent>, RawFd)> { self.input.as_mut().and_then(EvdevInput::take_channel) }
@@ -544,6 +651,9 @@ impl Backend for DriBackend {
       }
     }
     if self.active {
+      if let Some(old) = self.direct.take() {
+        unsafe { old.release(self.fd) };
+      }
       if let Some(input) = &self.input {
         input.set_active(true);
       }
@@ -568,6 +678,32 @@ impl Backend for DriBackend {
 }
 
 impl DriBackend {
+  #[cfg(feature = "gpu")]
+  fn present_gpu(&mut self, fb: &Framebuffer) -> bool {
+    let Some((_, handle, stride)) = self.gpu.as_mut().and_then(|g| g.render(fb)) else { return false };
+    self.commit_gpu_output(handle, stride)
+  }
+
+  #[cfg(feature = "gpu")]
+  fn commit_gpu_output(&mut self, handle: u32, stride: u32) -> bool {
+    let mut cmd = ModeFbCmd { fb_id: 0, width: self.width, height: self.height,
+      pitch: stride, bpp: 32, depth: 24, handle };
+    if unsafe { ioctl(self.fd, iowr::<ModeFbCmd>(0xAE), &mut cmd) } != 0 {
+      if let Some(g) = self.gpu.as_mut() { g.discard(); }
+      return false;
+    }
+    if !unsafe { self.flip_fb(cmd.fb_id) } {
+      unsafe { remove_fb(self.fd, cmd.fb_id) };
+      if let Some(g) = self.gpu.as_mut() { g.discard(); }
+      return false;
+    }
+    let old_fb = std::mem::replace(&mut self.gpu_fb, cmd.fb_id);
+    if let Some(g) = self.gpu.as_mut() { g.commit(); }
+    unsafe { remove_fb(self.fd, old_fb) };
+    if let Some(old) = self.direct.take() { unsafe { old.release(self.fd) }; }
+    true
+  }
+
   unsafe fn restore_crtc(&mut self) {
     let cid = self.connector_id;
     self.saved_crtc.count_connectors = 1;
@@ -580,10 +716,14 @@ impl DriBackend {
   }
 
   unsafe fn flip_to(&mut self, idx: usize) -> bool {
+    self.flip_fb(self.bufs[idx].fb_id)
+  }
+
+  unsafe fn flip_fb(&mut self, fb_id: u32) -> bool {
     let cid = self.connector_id;
     let mut crtc = ModeCrtc::default();
     crtc.crtc_id = self.crtc_id;
-    crtc.fb_id = self.bufs[idx].fb_id;
+    crtc.fb_id = fb_id;
     crtc.mode = self.mode;
     crtc.mode_valid = 1;
     crtc.count_connectors = 1;
@@ -603,6 +743,11 @@ impl Drop for DriBackend {
       }
       self.bufs[0].release(self.fd);
       self.bufs[1].release(self.fd);
+      if let Some(direct) = self.direct.take() {
+        direct.release(self.fd);
+      }
+      #[cfg(feature = "gpu")]
+      remove_fb(self.fd, self.gpu_fb);
       if self.master {
         ioctl(self.fd, io(0x1f));
         self.master = false;
@@ -627,6 +772,60 @@ unsafe fn destroy_dumb(fd: RawFd, handle: u32) {
   }
 }
 
+unsafe fn close_gem(fd: RawFd, handle: u32) {
+  if handle != 0 {
+    let mut close = GemClose { handle, pad: 0 };
+    ioctl(fd, iow::<GemClose>(0x09), &mut close);
+  }
+}
+
+fn import_key(fd: RawFd, buf: &ShmBuffer) -> Option<ImportKey> {
+  let mut st: libc::stat = unsafe { std::mem::zeroed() };
+  if unsafe { libc::fstat(fd, &mut st) } != 0 {
+    return None;
+  }
+  Some(ImportKey {
+    dev: st.st_dev as u64,
+    ino: st.st_ino as u64,
+    width: buf.width.try_into().ok()?,
+    height: buf.height.try_into().ok()?,
+    stride: buf.stride.try_into().ok()?,
+    offset: buf.offset.try_into().ok()?,
+    format: buf.format,
+  })
+}
+
+unsafe fn import_scanout(card_fd: RawFd, dma_fd: RawFd, buf: &ShmBuffer, key: ImportKey) -> Option<ImportedScanout> {
+  let mut prime = PrimeHandle { handle: 0, flags: 0, fd: dma_fd };
+  if ioctl(card_fd, iowr::<PrimeHandle>(0x2d), &mut prime) != 0 {
+    return None;
+  }
+  let fourcc = match buf.format {
+    FORMAT_ARGB8888 => 0x3432_5241, // AR24
+    FORMAT_XRGB8888 => 0x3432_5258, // XR24
+    _ => {
+      close_gem(card_fd, prime.handle);
+      return None;
+    }
+  };
+  let mut fb = ModeFbCmd2::default();
+  fb.width = key.width;
+  fb.height = key.height;
+  fb.pixel_format = fourcc;
+  fb.handles[0] = prime.handle;
+  fb.pitches[0] = key.stride;
+  fb.offsets[0] = key.offset;
+  if ioctl(card_fd, iowr::<ModeFbCmd2>(0xB8), &mut fb) != 0 {
+    close_gem(card_fd, prime.handle);
+    return None;
+  }
+  eprintln!(
+    "[luna-compositor] dri: direct scanout enabled ({}x{}, pitch={})",
+    key.width, key.height, key.stride
+  );
+  Some(ImportedScanout { key, fb_id: fb.fb_id, handle: prime.handle })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -636,5 +835,10 @@ mod tests {
     assert_eq!(std::mem::size_of::<ModeCardRes>(), 64);
     assert_eq!(std::mem::size_of::<ModeCrtc>(), 104);
     assert_eq!(iowr::<ModeCrtc>(0xA2), 0xc068_64a2);
+    assert_eq!(std::mem::size_of::<PrimeHandle>(), 12);
+    assert_eq!(std::mem::size_of::<ModeFbCmd2>(), 104);
+    assert_eq!(iowr::<PrimeHandle>(0x2d), 0xc00c_642d);
+    assert_eq!(iowr::<ModeFbCmd2>(0xB8), 0xc068_64b8);
+    assert_eq!(iow::<GemClose>(0x09), 0x4008_6409);
   }
 }

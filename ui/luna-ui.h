@@ -693,6 +693,8 @@ const char* backdrop_fs =
     "uniform vec4 uRadius4;\n"
     "uniform vec2 uBlurTexSize;\n"
     "uniform vec2 uBlurOrigin;\n"
+    "uniform float uSaturate;\n"
+    "uniform float uBrightness;\n"
     "float rr_sdf4(vec2 p, vec2 hs, vec4 r) {\n"
     "    float rc = (p.x < 0.0) ? ((p.y > 0.0) ? r.x : r.w) : ((p.y > 0.0) ? r.y : r.z);\n"
     "    vec2 q = abs(p) - hs + vec2(rc);\n"
@@ -709,7 +711,9 @@ const char* backdrop_fs =
     "    vec2 uv = vec2(screenPos.x / uBlurTexSize.x,\n"
     "                   (th - screenPos.y) / th);\n"
     "    vec4 tc = texture(uSrc, clamp(uv, vec2(0.0), vec2(1.0)));\n"
-    "    FragColor = vec4(tc.rgb, alpha);\n"
+    "    float gray = dot(tc.rgb, vec3(0.299, 0.587, 0.114));\n"
+    "    vec3 filtered = mix(vec3(gray), tc.rgb, uSaturate) * uBrightness;\n"
+    "    FragColor = vec4(clamp(filtered, 0.0, 1.0), alpha);\n"
     "}\0";
 
 #define MAX_GRAD_STOPS 8
@@ -918,9 +922,11 @@ struct LunaElement {
     LunaBgLayer bg_layers[LUNA_MAX_BG_LAYERS];
     int bg_layer_count;
 
-    /* backdrop-filter: blur() */
+    /* backdrop-filter: blur() saturate() brightness() */
     int has_backdrop_blur;
     float backdrop_blur_radius;
+    float backdrop_saturate;
+    float backdrop_brightness;
 
     int display_mode; // 0 block 1 none 2 flex 3 grid
     int flex_direction;
@@ -1228,6 +1234,8 @@ typedef struct {
     /* backdrop-filter */
     int has_backdrop_blur;
     float backdrop_blur_radius;
+    float backdrop_saturate;
+    float backdrop_brightness;
 
     int has_z_index; int z_index;
 
@@ -1255,6 +1263,7 @@ typedef struct {
 
     int has_bg_image;
     char bg_image_path[256];
+    int has_bg_image_reset; /* background-image:none clears prior image */
 
     /* CSS filter */
     int has_filter;
@@ -1368,7 +1377,7 @@ static struct {
 } blur_loc;
 static struct {
     GLint uResolution, uPos, uSize, uRadius4;
-    GLint uSrc, uBlurTexSize, uBlurOrigin;
+    GLint uSrc, uBlurTexSize, uBlurOrigin, uSaturate, uBrightness;
 } backdrop_loc;
 
 // Texture cache — path → GL texture ID (loaded once, reused)
@@ -1742,6 +1751,12 @@ static float glyph_advance(FontAtlas* atlas, int cp, int px) {
 static char g_screenshot_path[512] = {0};
 static int g_screenshot_pending = 0;
 static int g_layout_dirty = 1;
+/* Intrinsic widths are queried repeatedly while nested flex containers are
+ * resolved.  Cache them for one layout pass: the DOM/style state is immutable
+ * during a pass, and this turns the common nested-flex case from repeated
+ * full element scans into one scan per element. */
+static float g_intrinsic_width_cache[MAX_ELEMENTS];
+static unsigned char g_intrinsic_width_valid[MAX_ELEMENTS];
 static int g_render_order_dirty = 1;
 static int g_cached_eff_z[MAX_ELEMENTS];
 
@@ -3543,8 +3558,13 @@ void parse_declarations(char* declarations, StyleRule* rule) {
             else if (strcmp(key, "background") == 0)       { parse_background_shorthand(val, rule); }
             else if (strcmp(key, "background-image") == 0) {
                 char path[256];
-                if (parse_url(val, path, sizeof(path))) {
+                if (strcasecmp(val, "none") == 0) {
+                    rule->has_bg_image_reset = 1;
+                    rule->has_bg_image = 0;
+                    rule->bg_image_path[0] = '\0';
+                } else if (parse_url(val, path, sizeof(path))) {
                     rule->has_bg_image = 1;
+                    rule->has_bg_image_reset = 0;
                     strncpy(rule->bg_image_path, path, sizeof(rule->bg_image_path) - 1);
                     rule->bg_image_path[sizeof(rule->bg_image_path) - 1] = '\0';
                 }
@@ -4265,7 +4285,11 @@ void parse_declarations(char* declarations, StyleRule* rule) {
             }
             else if (strcmp(key, "backdrop-filter") == 0 ||
                      strcmp(key, "-webkit-backdrop-filter") == 0) {
-                /* Parse blur(Npx) — other functions silently ignored */
+                /* CSS filter functions compose left-to-right. Saturation and
+                 * brightness are color-only operations, so applying them in
+                 * the final backdrop sample costs no additional render pass. */
+                rule->backdrop_saturate = 1.0f;
+                rule->backdrop_brightness = 1.0f;
                 const char* bp = strstr(val, "blur(");
                 if (bp) {
                     bp += 5;
@@ -4275,6 +4299,24 @@ void parse_declarations(char* declarations, StyleRule* rule) {
                         rule->has_backdrop_blur = 1;
                         rule->backdrop_blur_radius = radius > 0.0f ? radius : 8.0f;
                     }
+                }
+                bp = strstr(val, "saturate(");
+                if (bp) {
+                    bp += 9;
+                    char* endp = NULL;
+                    rule->backdrop_saturate = strtof(bp, &endp);
+                    while (endp && isspace((unsigned char)*endp)) endp++;
+                    if (endp && *endp == '%') rule->backdrop_saturate /= 100.0f;
+                    if (rule->backdrop_saturate < 0.0f) rule->backdrop_saturate = 0.0f;
+                }
+                bp = strstr(val, "brightness(");
+                if (bp) {
+                    bp += 11;
+                    char* endp = NULL;
+                    rule->backdrop_brightness = strtof(bp, &endp);
+                    while (endp && isspace((unsigned char)*endp)) endp++;
+                    if (endp && *endp == '%') rule->backdrop_brightness /= 100.0f;
+                    if (rule->backdrop_brightness < 0.0f) rule->backdrop_brightness = 0.0f;
                 }
             }
             else if (strcmp(key, "background-clip") == 0 ||
@@ -4430,11 +4472,19 @@ static void convert_selector(const CSSSelector *cs, SimpleSelector *ss,
 /* Compute specificity for our internal format (100·id + 10·cls + 1·type).
    Structural pseudo-classes count as class-level, like real CSS. */
 static int simple_selector_spec(const SimpleSelector *ss) {
-    int pseudo = (ss->is_first_child ? 1 : 0) + (ss->is_last_child ? 1 : 0)
-               + (ss->has_nth ? 1 : 0) + (ss->has_not ? 1 : 0);
-    return (ss->sel_id[0] ? 100 : 0)
-         + (ss->sel_class_count + pseudo) * 10
-         + (ss->sel_type[0] ? 1 : 0);
+    int spec = (ss->sel_id[0] ? 100 : 0)
+             + ss->sel_class_count * 10
+             + (ss->sel_type[0] ? 1 : 0);
+    if (ss->is_first_child) spec += 10;
+    if (ss->is_last_child)  spec += 10;
+    if (ss->has_nth)        spec += 10;
+    /* :not() contributes the specificity of its argument. */
+    if (ss->has_not) {
+        if (ss->not_id[0])         spec += 100;
+        else if (ss->not_class[0]) spec += 10;
+        else if (ss->not_type[0])  spec += 1;
+    }
+    return spec;
 }
 
 /* Ingest one cssparser.h CSSRule into the global css_rules[] array.
@@ -4507,11 +4557,13 @@ static void ingest_parsed_rule(const CSSRule *pr) {
         int spec = simple_selector_spec(&rule.target);
         for (int a = 0; a < rule.ancestor_count; a++)
             spec += simple_selector_spec(&rule.ancestors[a]);
-        if (is_hover)    spec += 1000;
-        if (is_active)   spec += 2000;
-        if (is_fvis)     spec += 1600;
-        if (is_fwithin)  spec += 1550;
-        if (is_focus && !is_fvis) spec += 1500;
+        /* Dynamic pseudo-classes have class specificity. State matching is
+           handled separately while applying the sorted rules. */
+        if (is_hover)    spec += 10;
+        if (is_active)   spec += 10;
+        if (is_fvis)     spec += 10;
+        if (is_fwithin)  spec += 10;
+        if (is_focus && !is_fvis) spec += 10;
         if (has_important) spec += 10000; /* !important boosts over any selector specificity */
         rule.specificity = spec;
 
@@ -4735,10 +4787,23 @@ void update_element_style(LunaElement* e) {
     e->flex_gap = 0.0f;
     e->flex_grow = 0;
     e->flex_shrink = 1;
+    e->has_flex_basis = 0;
+    e->flex_basis = 0.0f;
+    e->flex_basis_auto = 1;
     e->flex_child = 0;
-    e->box_sizing = BOX_CONTENT;
+    /* Browser UA styles size form controls with border-box semantics.  Keep
+       ordinary elements content-box unless author CSS overrides box-sizing. */
+    e->box_sizing = (strcmp(e->type, "button") == 0 ||
+                     strcmp(e->type, "input") == 0 ||
+                     strcmp(e->type, "select") == 0 ||
+                     strcmp(e->type, "textarea") == 0)
+                        ? BOX_BORDER : BOX_CONTENT;
     e->css_width = e->css_height = 0.0f;
     e->has_css_width = e->has_css_height = 0;
+    e->has_min_width = e->has_min_height = 0;
+    e->has_max_width = e->has_max_height = 0;
+    e->css_min_width = e->css_min_height = 0.0f;
+    e->css_max_width = e->css_max_height = 0.0f;
     e->grid_col_count = e->grid_row_count = 0;
     e->grid_col_gap = e->grid_row_gap = 0.0f;
     e->grid_auto_flow = GRID_AUTO_FLOW_ROW;
@@ -4789,7 +4854,10 @@ void update_element_style(LunaElement* e) {
      * default made their metrics disagree with the browser and could push a
      * glyph outside its flex item's clip.  Copying this compact scalar set is
      * allocation-free and is only done when a style is (re)resolved. */
-    e->text_align = 0; e->has_text_align = 0;
+    /* Native browser buttons center their label even without an explicit
+       text-align declaration.  Author CSS applied below can still override. */
+    e->text_align = strcmp(e->type, "button") == 0 ? 1 : 0;
+    e->has_text_align = strcmp(e->type, "button") == 0;
     e->font_size = 16; e->font_bold = 0; e->font_face = 0;
     e->line_height = 0.0f; e->white_space = 0; e->text_overflow = 0; e->overflow_wrap = 1;
     e->letter_spacing = 0.0f; e->text_transform = 0; e->text_decoration = 0;
@@ -4850,6 +4918,8 @@ void update_element_style(LunaElement* e) {
     e->bg_pos_y = 0.5f;
     e->has_backdrop_blur = 0;
     e->backdrop_blur_radius = 0.0f;
+    e->backdrop_saturate = 1.0f;
+    e->backdrop_brightness = 1.0f;
     e->bg_layer_count = 0;
     e->grad_rad_rx = 0.0f;
     e->grad_rad_ry = 0.0f;
@@ -4869,6 +4939,11 @@ void update_element_style(LunaElement* e) {
             e->bg_image_path[0] = '\0';
             e->bg_image_tex = 0;
             e->bg_layer_count = 0;
+        }
+        if (r->has_bg_image_reset && !e->has_custom_bg) {
+            e->has_bg_image = 0;
+            e->bg_image_path[0] = '\0';
+            e->bg_image_tex = 0;
         }
         if (r->has_bg_image && !e->has_custom_bg) {
             e->has_bg_image = 1;
@@ -4911,6 +4986,8 @@ void update_element_style(LunaElement* e) {
         if (r->has_backdrop_blur) {
             e->has_backdrop_blur = 1;
             e->backdrop_blur_radius = r->backdrop_blur_radius;
+            e->backdrop_saturate = r->backdrop_saturate;
+            e->backdrop_brightness = r->backdrop_brightness;
         }
         if (r->has_color && !e->has_custom_color)  { e->t_r = r->c_r; e->t_g = r->c_g; e->t_b = r->c_b; e->t_a = r->c_a; }
         if (r->has_caret_color) {
@@ -5824,6 +5901,18 @@ void parse_html(const char* html) {
 FontAtlas* get_atlas(float size, int bold, int* out_is_fake_bold);
 float measure_text_width(FontAtlas* atlas, const char* text);
 
+static float css_outer_height(const LunaElement* e, float css_h) {
+    return e->box_sizing == BOX_CONTENT
+        ? css_h + e->pad_t + e->pad_b + e->border_width * 2.0f
+        : css_h;
+}
+
+static float css_outer_width(const LunaElement* e, float css_w) {
+    return e->box_sizing == BOX_CONTENT
+        ? css_w + e->pad_l + e->pad_r + e->border_width * 2.0f
+        : css_w;
+}
+
 static float flow_content_height(LunaElement* e) {
     int idx = (int)(e - elements);
 
@@ -5849,6 +5938,14 @@ static float flow_content_height(LunaElement* e) {
         } else {
             chh = flow_content_height(ch);   /* recurse for auto-height children */
         }
+        /* min/max constraints participate in intrinsic sizing.  In
+           particular, buttons commonly express their control height with
+           min-height; ignoring it collapses an auto-height flex row to its
+           text line and centers the controls outside the container. */
+        float min_h = css_outer_height(ch, ch->css_min_height);
+        float max_h = css_outer_height(ch, ch->css_max_height);
+        if (ch->has_min_height && chh < min_h) chh = min_h;
+        if (ch->has_max_height && chh > max_h) chh = max_h;
         chh += ch->margin_top + ch->margin_bottom;
         if (chh > maxh) maxh = chh;
         total += chh;
@@ -5887,9 +5984,16 @@ static float flow_content_height(LunaElement* e) {
 }
 
 static float intrinsic_content_width(LunaElement* e) {
-    if (e->has_css_width && !e->pct_w) return e->css_width;
-
     int idx = (int)(e - elements);
+    if (idx >= 0 && idx < elem_count && g_intrinsic_width_valid[idx])
+        return g_intrinsic_width_cache[idx];
+
+    float result;
+    if (e->has_css_width && !e->pct_w) {
+        result = e->css_width;
+        goto done;
+    }
+
     int n = 0;
     float total = 0.0f, maxw = 0.0f;
     for (int c = 0; c < elem_count; c++) {
@@ -5922,7 +6026,8 @@ static float intrinsic_content_width(LunaElement* e) {
             }
             inner += tw;
         }
-        return inner + e->pad_l + e->pad_r + e->border_width * 2.0f;
+        result = inner + e->pad_l + e->pad_r + e->border_width * 2.0f;
+        goto done;
     }
 
     if (e->text[0] && font_loaded) {
@@ -5941,13 +6046,25 @@ static float intrinsic_content_width(LunaElement* e) {
         }
         float tw = measure_text_width(atlas, txt) + e->pad_l + e->pad_r + 4.0f;
         g_text_letter_spacing = 0.0f;
-        return tw;
+        result = tw;
+        goto done;
     }
-    if (e->text[0])
-        return strlen(e->text) * (float)(e->font_size > 0 ? e->font_size : 12) * 0.55f +
-               e->pad_l + e->pad_r + 4.0f;
-    if (e->w > 0.0f && e->w < 200.0f && e->w != 100.0f) return e->w;
-    return 40.0f;
+    if (e->text[0]) {
+        result = strlen(e->text) * (float)(e->font_size > 0 ? e->font_size : 12) * 0.55f +
+                 e->pad_l + e->pad_r + 4.0f;
+        goto done;
+    }
+    if (e->w > 0.0f && e->w < 200.0f && e->w != 100.0f)
+        result = e->w;
+    else
+        result = 40.0f;
+
+done:
+    if (idx >= 0 && idx < elem_count) {
+        g_intrinsic_width_cache[idx] = result;
+        g_intrinsic_width_valid[idx] = 1;
+    }
+    return result;
 }
 
 static float flex_content_width(LunaElement* ch) {
@@ -5969,9 +6086,9 @@ static void layout_block_container(int container_idx) {
     if (cont->display_mode == DISPLAY_FLEX || cont->display_mode == DISPLAY_GRID) return;
     if (cont->display_mode == DISPLAY_NONE) return;
 
-    float inner_w = cont->w - cont->pad_l - cont->pad_r;
+    float inner_w = cont->w - cont->pad_l - cont->pad_r - cont->border_width * 2.0f;
     if (inner_w < 0.0f) inner_w = 0.0f;
-    float y = cont->pad_t;
+    float y = cont->border_width + cont->pad_t;
 
     for (int c = 0; c < elem_count; c++) {
         if (elements[c].parent_idx != container_idx) continue;
@@ -5991,8 +6108,16 @@ static void layout_block_container(int container_idx) {
             ch->h = flow_content_height(ch);
             if (ch->h < 14.0f) ch->h = 14.0f;
         }
+        if (ch->has_min_height) {
+            float min_h = css_outer_height(ch, ch->css_min_height);
+            if (ch->h < min_h) ch->h = min_h;
+        }
+        if (ch->has_max_height) {
+            float max_h = css_outer_height(ch, ch->css_max_height);
+            if (ch->h > max_h) ch->h = max_h;
+        }
 
-        ch->rel_x = cont->pad_l + ch->margin_left;
+        ch->rel_x = cont->border_width + cont->pad_l + ch->margin_left;
         ch->rel_y = y + ch->margin_top;
         y += ch->margin_top + ch->h + ch->margin_bottom;
     }
@@ -6083,11 +6208,22 @@ void update_layout() {
                 e->h = e->css_height + e->pad_t + e->pad_b + e->border_width * 2.0f;
             else
                 e->h = e->css_height;
+        } else if (!e->pct_h && !(e->has_top && e->has_bottom)) {
+            /* CSS height:auto shrink-wraps an out-of-flow root and contributes
+               the intrinsic height of flex/block descendants.  Previously
+               only children were sized intrinsically inside their parent's
+               layout pass, leaving a root column-flex at padding+border height
+               and forcing every child through flex-shrink. */
+            e->h = flow_content_height(e);
         }
-        if (e->has_min_width && e->w < e->css_min_width) e->w = e->css_min_width;
-        if (e->has_min_height && e->h < e->css_min_height) e->h = e->css_min_height;
-        if (e->has_max_width && e->w > e->css_max_width) e->w = e->css_max_width;
-        if (e->has_max_height && e->h > e->css_max_height) e->h = e->css_max_height;
+        float min_w = css_outer_width(e, e->css_min_width);
+        float min_h = css_outer_height(e, e->css_min_height);
+        float max_w = css_outer_width(e, e->css_max_width);
+        float max_h = css_outer_height(e, e->css_max_height);
+        if (e->has_min_width && e->w < min_w) e->w = min_w;
+        if (e->has_min_height && e->h < min_h) e->h = min_h;
+        if (e->has_max_width && e->w > max_w) e->w = max_w;
+        if (e->has_max_height && e->h > max_h) e->h = max_h;
         /* aspect-ratio: if one dimension known, compute the other */
         if (e->has_aspect_ratio && e->aspect_ratio > 0.0f) {
             if (e->has_css_width && !e->has_css_height)
@@ -6184,18 +6320,22 @@ static float flex_main_size(LunaElement* ch, int row_mode) {
         else size = flow_content_height(ch);
     }
     if (row_mode) {
-        if (ch->has_min_width && size < ch->css_min_width) size = ch->css_min_width;
-        if (ch->has_max_width && size > ch->css_max_width) size = ch->css_max_width;
+        float min_w = css_outer_width(ch, ch->css_min_width);
+        float max_w = css_outer_width(ch, ch->css_max_width);
+        if (ch->has_min_width && size < min_w) size = min_w;
+        if (ch->has_max_width && size > max_w) size = max_w;
     } else {
-        if (ch->has_min_height && size < ch->css_min_height) size = ch->css_min_height;
-        if (ch->has_max_height && size > ch->css_max_height) size = ch->css_max_height;
+        float min_h = css_outer_height(ch, ch->css_min_height);
+        float max_h = css_outer_height(ch, ch->css_max_height);
+        if (ch->has_min_height && size < min_h) size = min_h;
+        if (ch->has_max_height && size > max_h) size = max_h;
     }
     return size;
 }
 
 static float flex_min_main(LunaElement* ch, int row_mode) {
-    if (row_mode && ch->has_min_width) return ch->css_min_width;
-    if (!row_mode && ch->has_min_height) return ch->css_min_height;
+    if (row_mode && ch->has_min_width) return css_outer_width(ch, ch->css_min_width);
+    if (!row_mode && ch->has_min_height) return css_outer_height(ch, ch->css_min_height);
     /* A definite main-axis size must survive flex shrink.  Treating every
        item without min-* as shrinkable to zero made fixed-height action rows
        disappear from constrained dialogs (notably alert buttons). */
@@ -6219,8 +6359,10 @@ static float resolve_flex_cross_len(LunaElement* ch, int row_mode, int align,
         if (align != 3 && !ch->has_css_height && !ch->pct_h && !(ch->css_positioned & 2)) {
             float hh = flow_content_height(ch);
             if (available_cross >= 0.0f && hh > available_cross) hh = available_cross;
-            if (ch->has_min_height && hh < ch->css_min_height) hh = ch->css_min_height;
-            if (ch->has_max_height && hh > ch->css_max_height) hh = ch->css_max_height;
+            float min_h = css_outer_height(ch, ch->css_min_height);
+            float max_h = css_outer_height(ch, ch->css_max_height);
+            if (ch->has_min_height && hh < min_h) hh = min_h;
+            if (ch->has_max_height && hh > max_h) hh = max_h;
             ch->h = hh;
         }
         return ch->h;
@@ -6228,8 +6370,10 @@ static float resolve_flex_cross_len(LunaElement* ch, int row_mode, int align,
     if (align != 3 && !ch->has_css_width && !ch->pct_w && !(ch->css_positioned & 1)) {
         float ww = flex_content_width(ch);
         if (available_cross >= 0.0f && ww > available_cross) ww = available_cross;
-        if (ch->has_min_width && ww < ch->css_min_width) ww = ch->css_min_width;
-        if (ch->has_max_width && ww > ch->css_max_width) ww = ch->css_max_width;
+        float min_w = css_outer_width(ch, ch->css_min_width);
+        float max_w = css_outer_width(ch, ch->css_max_width);
+        if (ch->has_min_width && ww < min_w) ww = min_w;
+        if (ch->has_max_width && ww > max_w) ww = max_w;
         ch->w = ww;
     }
     return ch->w;
@@ -6444,15 +6588,15 @@ static void layout_flex_container(int container_idx) {
 
     int row_mode = (cont->flex_direction == FLEX_DIR_ROW);
     float gap = cont->flex_gap;
-    float inner_w = cont->w - cont->pad_l - cont->pad_r;
-    float inner_h = cont->h - cont->pad_t - cont->pad_b;
+    float inner_w = cont->w - cont->pad_l - cont->pad_r - cont->border_width * 2.0f;
+    float inner_h = cont->h - cont->pad_t - cont->pad_b - cont->border_width * 2.0f;
     if (inner_w < 0.0f) inner_w = 0.0f;
     if (inner_h < 0.0f) inner_h = 0.0f;
     float inner_main = row_mode ? inner_w : inner_h;
     float inner_cross = row_mode ? inner_h : inner_w;
     /* Main axis runs along flex-direction; cross axis is perpendicular. */
-    float pad_main  = row_mode ? cont->pad_l : cont->pad_t;
-    float pad_cross = row_mode ? cont->pad_t : cont->pad_l;
+    float pad_main  = cont->border_width + (row_mode ? cont->pad_l : cont->pad_t);
+    float pad_cross = cont->border_width + (row_mode ? cont->pad_t : cont->pad_l);
     float pad_cross_end = row_mode ? cont->pad_b : cont->pad_r;
 
     if (cont->flex_wrap == FLEX_WRAP_NOWRAP || !row_mode) {
@@ -6703,8 +6847,10 @@ static void layout_grid_container(int container_idx) {
     if (tmpl_cols < 1) tmpl_cols = cont->has_grid_auto_columns ? 0 : 1;
     if (tmpl_rows < 1) tmpl_rows = cont->has_grid_auto_rows ? 0 : 1;
 
-    float pad_l = cont->pad_l, pad_t = cont->pad_t;
-    float pad_r = cont->pad_r, pad_b = cont->pad_b;
+    float pad_l = cont->border_width + cont->pad_l;
+    float pad_t = cont->border_width + cont->pad_t;
+    float pad_r = cont->border_width + cont->pad_r;
+    float pad_b = cont->border_width + cont->pad_b;
     float col_gap = cont->grid_col_gap > 0.0f ? cont->grid_col_gap : cont->flex_gap;
     float row_gap = cont->grid_row_gap > 0.0f ? cont->grid_row_gap : cont->flex_gap;
 
@@ -6990,9 +7136,11 @@ static void apply_sticky_positions(void);
 static void sync_css_overlay_elements(void);
 
 void update_layout_pass(void) {
+    memset(g_intrinsic_width_valid, 0, sizeof(g_intrinsic_width_valid));
     update_layout();
     layout_flex_containers();
     if (size_auto_positioned_containers()) {
+        memset(g_intrinsic_width_valid, 0, sizeof(g_intrinsic_width_valid));
         update_layout();
         layout_flex_containers();
     }
@@ -8873,7 +9021,7 @@ static int count_text_lines(FontAtlas* atlas, const char* text, float box_w,
         if (white_space == 1) {
             take = fit_text_chars(atlas, p, para_len, box_w);
             if (take < para_len && text_overflow == 1 && box_w > 0.0f) {
-                float ell_w = measure_text_width(atlas, "...");
+                float ell_w = measure_text_width(atlas, "…");
                 int base = fit_text_chars(atlas, p, para_len, box_w - ell_w);
                 if (base < 0) base = 0;
                 take = base;
@@ -9039,10 +9187,10 @@ void render_text_fx(const char* text, float x, float y, float box_w, float box_h
         while (n > 0 && (line[n - 1] == ' ' || line[n - 1] == '\t')) line[--n] = '\0';
 
         if ((white_space == 1 || is_last_visible_line) && text_overflow == 1 && has_more) {
-            float ell_w = measure_text_width(atlas, "...");
+            float ell_w = measure_text_width(atlas, "…");
             while (n > 0 && measure_text_range(atlas, line, n) + ell_w > box_w)
                 line[--n] = '\0';
-            if (n + 3 < (int)sizeof(line)) strcat(line, "...");
+            if (n + 3 < (int)sizeof(line)) strcat(line, "…");
         }
 
         float line_w = measure_text_width(atlas, line);
@@ -9145,6 +9293,7 @@ void render_text(const char* text, float x, float y, float box_w, float box_h, i
  * explicitly center/end their anonymous text item on the cross axis, and
  * native text inputs retain their platform-like centered line. */
 static int css_text_vertical_align(const LunaElement* e) {
+    if (strcmp(e->type, "button") == 0) return 1;
     if (e->is_input) return 1;
     if (e->display_mode != DISPLAY_FLEX) return 0;
     if (e->flex_direction == FLEX_DIR_ROW) {
@@ -10166,7 +10315,8 @@ static void ensure_blur_fbos(int w, int h) {
 
 /* Apply backdrop blur for one element: capture current FBO, blur it, draw result. */
 static void apply_backdrop_blur(float ex, float ey, float ew, float eh,
-                                 float blur_radius, const float* rad4, int fbw, int fbh) {
+                                 float blur_radius, float saturate, float brightness,
+                                 const float* rad4, int fbw, int fbh) {
     if (!blur_program || !backdrop_program || !g_blur_fbo[0]) return;
     if (!glActiveTexture_) return;
 
@@ -10233,6 +10383,8 @@ static void apply_backdrop_blur(float ex, float ey, float ew, float eh,
     glUniform1i_(backdrop_loc.uSrc, 0);
     glUniform2f(backdrop_loc.uBlurTexSize, tw, th);
     glUniform2f(backdrop_loc.uBlurOrigin, ex - g_render_off_x, ey - g_render_off_y);
+    glUniform1f(backdrop_loc.uSaturate, saturate);
+    glUniform1f(backdrop_loc.uBrightness, brightness);
     glBindVertexArray(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -10326,7 +10478,9 @@ void luna_render(int fbw, int fbh) {
         if (e->has_backdrop_blur && e->backdrop_blur_radius > 0.0f &&
             !e->position_sticky && g_render_root < 0) {
             glDisable(GL_SCISSOR_TEST);
-            apply_backdrop_blur(dx, dy, dw, dh, e->backdrop_blur_radius, rad4, fbw, fbh);
+            apply_backdrop_blur(dx, dy, dw, dh, e->backdrop_blur_radius,
+                                e->backdrop_saturate, e->backdrop_brightness,
+                                rad4, fbw, fbh);
             set_element_scissor(i, fbw, fbh);
         }
         /* Multiple background layers (bottom to top = last to first in CSS order) */
@@ -10640,6 +10794,8 @@ static void cache_uniform_locations(void) {
         backdrop_loc.uSrc         = glGetUniformLocation(backdrop_program, "uSrc");
         backdrop_loc.uBlurTexSize = glGetUniformLocation(backdrop_program, "uBlurTexSize");
         backdrop_loc.uBlurOrigin  = glGetUniformLocation(backdrop_program, "uBlurOrigin");
+        backdrop_loc.uSaturate    = glGetUniformLocation(backdrop_program, "uSaturate");
+        backdrop_loc.uBrightness  = glGetUniformLocation(backdrop_program, "uBrightness");
     }
 }
 
