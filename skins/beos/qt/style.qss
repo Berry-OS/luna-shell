@@ -1,0 +1,91 @@
+/* Luna skin Qt QSS — apply via LUNA_QT_QSS / Qt style sheets */
+* {
+  color: #101018;
+  background-color: #d8d8d8;
+  selection-background-color: #1860b8;
+  selection-color: #ffffff;
+  font-family: Sans;
+}
+QWidget {
+  background-color: #d8d8d8;
+  color: #101018;
+}
+QMainWindow, QDialog, QFrame {
+  background-color: #d8d8d8;
+}
+QMenuBar {
+  background-color: #d8d8d8;
+  color: #101018;
+  border-bottom: 1px solid #a8a8a8;
+}
+QMenuBar::item:selected {
+  background-color: #1860b8;
+  color: #ffffff;
+}
+QMenu {
+  background-color: #f0f0f0;
+  border: 1px solid #a8a8a8;
+}
+QMenu::item:selected {
+  background-color: #1860b8;
+  color: #ffffff;
+}
+QToolBar {
+  background-color: #d8d8d8;
+  border: 1px solid #a8a8a8;
+  spacing: 2px;
+}
+QPushButton {
+  background-color: #f0f0f0;
+  color: #101018;
+  border: 1px solid #a8a8a8;
+  padding: 4px 12px;
+}
+QPushButton:hover { background-color: #d8d8d8; }
+QPushButton:pressed, QPushButton:checked {
+  background-color: #a8a8a8;
+}
+QPushButton:default {
+  background-color: #1860b8;
+  color: #ffffff;
+}
+QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QComboBox {
+  background-color: #ffffff;
+  color: #101018;
+  border: 1px solid #a8a8a8;
+  selection-background-color: #1860b8;
+  selection-color: #ffffff;
+}
+QHeaderView::section {
+  background-color: #f0f0f0;
+  color: #101018;
+  border: 1px solid #a8a8a8;
+  padding: 3px 6px;
+}
+QTabBar::tab {
+  background-color: #f0f0f0;
+  border: 1px solid #a8a8a8;
+  padding: 4px 10px;
+}
+QTabBar::tab:selected {
+  background-color: #d8d8d8;
+}
+QScrollBar:vertical, QScrollBar:horizontal {
+  background: #d8d8d8;
+  border: 1px solid #a8a8a8;
+}
+QScrollBar::handle {
+  background: #f0f0f0;
+  border: 1px solid #a8a8a8;
+  min-height: 20px;
+  min-width: 20px;
+}
+QStatusBar {
+  background-color: #d8d8d8;
+  border-top: 1px solid #a8a8a8;
+}
+QToolTip {
+  background-color: #ffffe1;
+  color: #000000;
+  border: 1px solid #000000;
+}

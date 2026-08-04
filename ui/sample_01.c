@@ -128,7 +128,7 @@ int main(void) {
     plat.get_proc = (LunaGetProcFn)glfwGetProcAddress;
     luna_set_platform(&plat);
 
-    LunaInitConfig cfg = {800, 500, (LunaGetProcFn)glfwGetProcAddress};
+    LunaInitConfig cfg = {800, 500, (LunaGetProcFn)glfwGetProcAddress, 0};
     if (!luna_init(&cfg)) {
         fprintf(stderr, "luna_init failed\n");
         return 1;

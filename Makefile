@@ -9,6 +9,8 @@ TARGET   := target/$(PROFILE)
 PORT     ?= 8081
 PREFIX   ?= /usr/local
 LUNA_LIB := $(PREFIX)/lib/luna
+# System font dir (fc-cache / GTK / other apps); skins/fonts links here.
+FONTDIR  ?= /usr/share/fonts/luna
 # e.g. make webgl APP=/usr/bin/gtk4-demo
 APP      ?= $(TARGET)/hello-gtk
 
@@ -26,7 +28,7 @@ build:
 	cargo build $(if $(filter release,$(PROFILE)),--release,)
 
 build-dri:
-	cargo build -p wayland-server-rs --features dri $(if $(filter release,$(PROFILE)),--release,)
+	cargo build -p wayland-server-rs --features dri,gpu $(if $(filter release,$(PROFILE)),--release,)
 
 build-webgl:
 	cargo build --features webgl $(if $(filter release,$(PROFILE)),--release,)
@@ -207,8 +209,9 @@ endef
 
 install: build-desktop
 	install -d $(PREFIX)/bin $(LUNA_LIB) $(PREFIX)/share/luna-desktop/shell \
-	            $(PREFIX)/share/luna-desktop/cursors $(PREFIX)/share/doc/luna-desktop
-	install -d /usr/share/fonts/luna
+	            $(PREFIX)/share/luna-desktop/cursors $(PREFIX)/share/luna-desktop/skins \
+	            $(PREFIX)/share/doc/luna-desktop
+	install -d $(FONTDIR)
 	install -m 755 luna-session $(PREFIX)/bin/luna-session
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
@@ -222,22 +225,34 @@ install: build-desktop
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 ui/luna-ui.h ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
-	install -m 644 fonts/LunaSymbols-Solid.otf fonts/LunaSymbols-Regular.otf \
-	               fonts/LunaSymbols-Brands.otf /usr/share/fonts/luna/
+	install -m 644 skins/fonts/LunaSymbols-Solid.otf skins/fonts/LunaSymbols-Regular.otf \
+	               skins/fonts/LunaSymbols-Brands.otf $(FONTDIR)/
+	-fc-cache -f $(FONTDIR) 2>/dev/null || true
 	# Cursor themes (.cur / .ani) — default is miku
 	rm -rf $(PREFIX)/share/luna-desktop/cursors/miku
 	cp -a cursors/miku $(PREFIX)/share/luna-desktop/cursors/
+	# Drop prior skins/fonts symlink (→ FONTDIR) so cp can refresh themes;
+	# fonts are re-linked below (avoids duplicating OTFs for fontconfig).
+	rm -rf $(PREFIX)/share/luna-desktop/skins/fonts
+	cp -a skins/. $(PREFIX)/share/luna-desktop/skins/
+	# Browser-previewable skins link ../_base/luna-shell.css; replace the
+	# repo symlink with a real copy next to the installed themes.
+	install -d $(PREFIX)/share/luna-desktop/skins/_base
+	install -m 644 ui/luna-shell.css $(PREFIX)/share/luna-desktop/skins/_base/luna-shell.css
+	rm -rf $(PREFIX)/share/luna-desktop/skins/fonts
+	ln -sfn $(FONTDIR) $(PREFIX)/share/luna-desktop/skins/fonts
 	#install -m 644 README.md $(PREFIX)/share/doc/luna-desktop/README.md 2>/dev/null || true
 	$(install_systemd)
 	@echo "✓ Installed to $(PREFIX)"
-	@echo "  Fonts: /usr/share/fonts/luna/LunaSymbols-*.otf"
+	@echo "  Fonts: $(FONTDIR)/LunaSymbols-*.otf"
 	@echo "  Enable boot: systemctl enable luna-desktop.service"
 
 # Install using system libwayland (skip building/installing libwayland*.so)
 install-system: build-desktop-system
 	install -d $(PREFIX)/bin $(LUNA_LIB) $(PREFIX)/share/luna-desktop/shell \
-	            $(PREFIX)/share/luna-desktop/cursors $(PREFIX)/share/doc/luna-desktop
-	install -d /usr/share/fonts/luna
+	            $(PREFIX)/share/luna-desktop/cursors $(PREFIX)/share/luna-desktop/skins \
+	            $(PREFIX)/share/doc/luna-desktop
+	install -d $(FONTDIR)
 	install -m 755 luna-session $(PREFIX)/bin/luna-session
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
@@ -248,14 +263,25 @@ install-system: build-desktop-system
 	install -D -m 644 tray/luna-wifi.desktop $(PREFIX)/share/applications/luna-wifi.desktop
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 ui/luna-ui.h ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
-	install -m 644 fonts/LunaSymbols-Solid.otf fonts/LunaSymbols-Regular.otf \
-	               fonts/LunaSymbols-Brands.otf /usr/share/fonts/luna/
+	install -m 644 skins/fonts/LunaSymbols-Solid.otf skins/fonts/LunaSymbols-Regular.otf \
+	               skins/fonts/LunaSymbols-Brands.otf $(FONTDIR)/
+	-fc-cache -f $(FONTDIR) 2>/dev/null || true
 	rm -rf $(PREFIX)/share/luna-desktop/cursors/miku
 	cp -a cursors/miku $(PREFIX)/share/luna-desktop/cursors/
+	# Drop prior skins/fonts symlink (→ FONTDIR) so cp can refresh themes;
+	# fonts are re-linked below (avoids duplicating OTFs for fontconfig).
+	rm -rf $(PREFIX)/share/luna-desktop/skins/fonts
+	cp -a skins/. $(PREFIX)/share/luna-desktop/skins/
+	# Browser-previewable skins link ../_base/luna-shell.css; replace the
+	# repo symlink with a real copy next to the installed themes.
+	install -d $(PREFIX)/share/luna-desktop/skins/_base
+	install -m 644 ui/luna-shell.css $(PREFIX)/share/luna-desktop/skins/_base/luna-shell.css
+	rm -rf $(PREFIX)/share/luna-desktop/skins/fonts
+	ln -sfn $(FONTDIR) $(PREFIX)/share/luna-desktop/skins/fonts
 	#install -m 644 README.md $(PREFIX)/share/doc/luna-desktop/README.md 2>/dev/null || true
 	$(install_systemd)
 	@echo "✓ Installed to $(PREFIX) (using system libwayland)"
-	@echo "  Fonts: /usr/share/fonts/luna/LunaSymbols-*.otf"
+	@echo "  Fonts: $(FONTDIR)/LunaSymbols-*.otf"
 	@echo "  Enable boot: systemctl enable luna-desktop.service"
 
 # Stop background compositor

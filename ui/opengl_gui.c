@@ -450,7 +450,7 @@ int main(int argc, char** argv) {
     };
     luna_set_platform(&plat);
 
-    LunaInitConfig cfg = { luna_window_width, luna_window_height, plat_proc };
+    LunaInitConfig cfg = { luna_window_width, luna_window_height, plat_proc, 0 };
     if (!luna_init(&cfg)) { fprintf(stderr, "luna_init failed\n"); return 1; }
 
     if (g_layout_path) {

@@ -690,6 +690,17 @@ pub fn blit_resize_cursor(fb: &mut crate::render::Framebuffer, x: i32, y: i32, e
     blit_embed_frame(fb, frame, x, y);
 }
 
+/// Extent of the built-in cursor for `edges` as `(hot_x, hot_y, w, h)`, so a
+/// caller can reserve the pixels it is about to overwrite without copying the
+/// bitmap itself.
+pub fn embed_frame_extent(edges: Option<u32>) -> (i32, i32, u32, u32) {
+    let frame = match edges {
+        Some(5 | 10) => &ROLE_NWSE[0], Some(9 | 6) => &ROLE_NESW[0],
+        Some(4 | 8) => &ROLE_EW[0], Some(_) => &ROLE_NS[0], None => &ROLE_DEFAULT[0],
+    };
+    (frame.hot_x, frame.hot_y, frame.w as u32, frame.h as u32)
+}
+
 /// Raw premultiplied cursor bitmap for GPU overlay composition.
 pub fn gpu_bitmap(edges: Option<u32>) -> (u32, u32, i32, i32, Vec<u32>) {
     let frame = match edges {
@@ -710,6 +721,7 @@ fn blit_embed_frame(fb: &mut crate::render::Framebuffer, frame: &EmbedFrame, x: 
             let dx = x + col as i32 - frame.hot_x;
             let dy = y + row as i32 - frame.hot_y;
             if dx < 0 || dy < 0 || dx >= fb.width as i32 || dy >= fb.height as i32 { continue; }
+            if !fb.in_clip(dx, dy) { continue; }
             let idx = dy as usize * fb.width as usize + dx as usize;
             fb.pixels[idx] = blend_px(fb.pixels[idx], px);
         }

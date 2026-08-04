@@ -43,8 +43,13 @@ pub fn decode_header(buf: &[u8]) -> Option<(RawMessage<'_>, usize)> {
     ))
 }
 
-pub fn decode_args(sig: &str, payload: &[u8], fds: &mut VecDeque<RawFd>) -> Vec<Arg> {
-    let mut out = Vec::new();
+pub fn decode_args_into(
+    sig: &str,
+    payload: &[u8],
+    fds: &mut VecDeque<RawFd>,
+    out: &mut Vec<Arg>,
+) {
+    out.clear();
     let mut off = 0usize;
 
     macro_rules! u32at {
@@ -93,12 +98,20 @@ pub fn decode_args(sig: &str, payload: &[u8], fds: &mut VecDeque<RawFd>) -> Vec<
             _ => {}
         }
     }
-    out
 }
 
-pub fn encode_args(args: &[Arg]) -> (Vec<u8>, Vec<RawFd>) {
-    let mut buf = Vec::new();
-    let mut fds = Vec::new();
+/// Append a complete message directly to a connection's persistent buffers.
+/// This avoids three short-lived Vec allocations per Wayland event.
+pub fn append_message(
+    object_id: u32,
+    opcode: u16,
+    args: &[Arg],
+    buf: &mut Vec<u8>,
+    fds: &mut Vec<RawFd>,
+) {
+    let start = buf.len();
+    buf.extend_from_slice(&object_id.to_ne_bytes());
+    buf.extend_from_slice(&0u32.to_ne_bytes());
     for a in args {
         match a {
             Arg::Int(v) => buf.extend_from_slice(&v.to_ne_bytes()),
@@ -106,7 +119,7 @@ pub fn encode_args(args: &[Arg]) -> (Vec<u8>, Vec<RawFd>) {
             Arg::Uint(v) | Arg::Object(v) | Arg::NewId(v) => {
                 buf.extend_from_slice(&v.to_ne_bytes())
             }
-            Arg::Str(s) => encode_string(&mut buf, s.as_deref()),
+            Arg::Str(s) => encode_string(buf, s.as_deref()),
             Arg::Array(data) => {
                 buf.extend_from_slice(&(data.len() as u32).to_ne_bytes());
                 buf.extend_from_slice(data);
@@ -116,7 +129,9 @@ pub fn encode_args(args: &[Arg]) -> (Vec<u8>, Vec<RawFd>) {
             Arg::Fd(fd) => fds.push(*fd),
         }
     }
-    (buf, fds)
+    let size = (buf.len() - start) as u32;
+    let word2 = (size << 16) | opcode as u32;
+    buf[start + 4..start + 8].copy_from_slice(&word2.to_ne_bytes());
 }
 
 fn encode_string(buf: &mut Vec<u8>, s: Option<&str>) {
@@ -133,12 +148,40 @@ fn encode_string(buf: &mut Vec<u8>, s: Option<&str>) {
     }
 }
 
-pub fn build_message(object_id: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
-    let size = (HEADER_SIZE + payload.len()) as u32;
-    let word2 = (size << 16) | (opcode as u32);
-    let mut msg = Vec::with_capacity(size as usize);
-    msg.extend_from_slice(&object_id.to_ne_bytes());
-    msg.extend_from_slice(&word2.to_ne_bytes());
-    msg.extend_from_slice(payload);
-    msg
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_message_writes_header_and_padded_payload_in_place() {
+        let mut bytes = Vec::with_capacity(64);
+        let initial = bytes.capacity();
+        let mut fds = Vec::new();
+        append_message(
+            7,
+            3,
+            &[Arg::Uint(42), Arg::Str(Some("ok".into()))],
+            &mut bytes,
+            &mut fds,
+        );
+
+        let (msg, used) = decode_header(&bytes).unwrap();
+        assert_eq!(used, 20);
+        assert_eq!(msg.object_id, 7);
+        assert_eq!(msg.opcode, 3);
+        assert_eq!(u32::from_ne_bytes(msg.payload[0..4].try_into().unwrap()), 42);
+        assert_eq!(&msg.payload[4..], &[3, 0, 0, 0, b'o', b'k', 0, 0]);
+        assert!(fds.is_empty());
+        assert_eq!(bytes.capacity(), initial);
+    }
+
+    #[test]
+    fn decode_args_reuses_existing_vector_storage() {
+        let mut args = Vec::with_capacity(8);
+        let capacity = args.capacity();
+        let mut fds = VecDeque::new();
+        decode_args_into("uu", &[1, 0, 0, 0, 2, 0, 0, 0], &mut fds, &mut args);
+        assert!(matches!(args.as_slice(), [Arg::Uint(1), Arg::Uint(2)]));
+        assert_eq!(args.capacity(), capacity);
+    }
 }

@@ -9,6 +9,7 @@
 
 use libc::{c_void, mmap, munmap, MAP_FAILED, MAP_SHARED, PROT_READ};
 use std::os::unix::io::RawFd;
+use std::cell::Cell;
 use std::rc::Rc;
 
 pub const FORMAT_ARGB8888: u32 = 0;
@@ -30,6 +31,10 @@ pub struct ShmPool {
     ptr: *mut c_void,
     size: usize,
     fd: RawFd,
+    /// Stable backing-object identity, captured once instead of calling fstat
+    /// for every plane in every GPU-composited frame.
+    storage_dev: u64,
+    storage_ino: u64,
     /// dmabuf pools need DMA_BUF_IOCTL_SYNC around CPU access
     is_dmabuf: bool,
 }
@@ -52,10 +57,14 @@ impl ShmPool {
             unsafe { libc::close(fd) };
             return None;
         }
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let have_identity = unsafe { libc::fstat(fd, &mut stat) } == 0;
         Some(Rc::new(ShmPool {
             ptr,
             size,
             fd,
+            storage_dev: if have_identity { stat.st_dev as u64 } else { 0 },
+            storage_ino: if have_identity { stat.st_ino as u64 } else { 0 },
             is_dmabuf,
         }))
     }
@@ -103,6 +112,10 @@ impl ShmPool {
         self.is_dmabuf.then_some(self.fd)
     }
 
+    pub fn storage_id(&self) -> (u64, u64) {
+        (self.storage_dev, self.storage_ino)
+    }
+
     pub fn slice(&self, offset: usize, len: usize) -> Option<&[u8]> {
         if offset.checked_add(len)? > self.size {
             return None;
@@ -128,11 +141,26 @@ pub struct ShmBuffer {
     pub height: i32,
     pub stride: i32,
     pub format: u32,
+    /// Incremented whenever this wl_buffer is attached in a new commit. GPU
+    /// composition uses it to skip uploading unchanged SHM storage.
+    pub content_serial: Rc<Cell<u64>>,
 }
 
 impl ShmBuffer {
     pub fn dmabuf_fd(&self) -> Option<RawFd> {
         self.pool.dmabuf_fd()
+    }
+
+    pub fn storage_id(&self) -> (u64, u64) {
+        self.pool.storage_id()
+    }
+
+    pub fn mark_updated(&self) {
+        self.content_serial.set(self.content_serial.get().wrapping_add(1));
+    }
+
+    pub fn serial(&self) -> u64 {
+        self.content_serial.get()
     }
 
     pub fn upload_ptr(&self) -> Option<*const u8> {

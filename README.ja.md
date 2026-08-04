@@ -37,6 +37,82 @@ systemd / init
 
 Dock / Launchpad のアプリは環境変数 `LUNA_APP_<NAME>`（例: `LUNA_APP_TERMINAL=foot`）で差し替えられる。レイアウトは `ui/luna-shell.html` + `ui/luna-shell.css` を実行ファイルへ埋め込み、`LUNA_DESKTOP_LAYOUT` / `LUNA_DESKTOP_CSS` または `--layout` / `--css` で外部ファイルに差し替え可能。
 
+### デスクトップスキン
+
+**System Settings → Appearance → Desktop Skin** から、シェルを終了せずに
+スキンを切り替えられる。選択内容は `~/.config/luna-shell/settings.conf`
+へ保存される。`skins/` には **Windows XP**、**Windows 95**、**BeOS**、
+**Classic Mac OS**、**Amiga Workbench**、**Nocturne Atelier** を収録している。
+
+スキンは次の外部ファイルで構成する:
+
+```text
+my-skin/
+├── skin.conf
+├── style.css
+├── layout.html        # ブラウザで編集し、同じファイルをシェルが読む
+├── gtk/<ThemeName>/   # 任意: GTK 3/4 テーマ
+│   ├── index.theme
+│   ├── gtk-3.0/gtk.css
+│   └── gtk-4.0/gtk.css
+└── qt/
+    ├── style.qss      # 任意: Qt スタイルシート
+    └── colors.conf
+```
+
+`layout.html` が開発用の本体。共有ベース CSS とスキン用 CSS を `<link>` し、
+通常のブラウザで開いた見た目がそのままデスクトップになるようにする:
+
+```html
+<link rel="stylesheet" href="../_base/luna-shell.css">
+<link rel="stylesheet" href="style.css">
+```
+
+`skins/<name>/layout.html` をブラウザで開いて HTML/CSS を直し、同じファイルを
+テーマとして使う。luna-shell は既存の HTML/CSS エンジンでその `<link>` を読む。
+共有ベースは `skins/_base/`（スキンとしては扱わない）。アイコンフォントは
+`skins/fonts/`（`_base` からは `../fonts`）に置く。`layout.html` があれば
+自動で採用され、`skin.conf` の `layout=` で名前を上書きできる。
+
+```ini
+name=My Skin
+description=Appearance に表示する短い説明
+css=style.css
+layout=layout.html
+# 配置（Wayland レイヤー表面に即時反映）:
+chrome=taskbar          # taskbar | deskbar | menubar | luna
+menubar_edge=bottom     # top | bottom
+menubar_height=34
+dock_mode=hidden        # float | hidden
+# ツールキットテーマ（新規起動のアプリ向け。起動中の GTK/Qt は再起動が必要）:
+gtk_theme=LunaWindows95
+qt_style=Fusion
+qt_qss=qt/style.qss
+# コンポジタ SSD:
+titlebar_style=2        # 0 modern | 1 classic dots | 2 flat retro
+titlebar_active=#000080
+titlebar_inactive=#808080
+titlebar_frame=#c0c0c0
+prefer_ssd=1            # クライアント未指定時にサーバ装飾を勧める
+```
+
+`chrome=taskbar` はメニューバーを画面**下**に固定し（Windows XP / 95）、
+フローティング Dock を隠してウィンドウ一覧をタスクバーに載せる。
+CSS だけでは Wayland 上のメニューバー位置は変わらないため、これらのキーで
+レイヤー表面のアンカーを付け替える。
+
+スキン切替時は GTK テーマを `~/.local/share/themes/` にリンクし、
+`settings.ini` / `GTK_THEME` / `QT_STYLE_OVERRIDE` / `LUNA_QT_QSS` を更新、
+SSD 色をコンポジタへ送る。トレイやスタートメニューは chrome の辺（下タスクバー
+なら上向き、上メニューバーなら下向き）に合わせて開く。
+
+配置先は `~/.local/share/luna-desktop/skins/`、
+`/usr/local/share/luna-desktop/skins/`、`/usr/share/luna-desktop/skins/`、
+または `LUNA_SKIN_PATH` で指定したディレクトリ。CSS と chrome 配置は即時反映。
+カスタム HTML レイアウトは次回ログイン時に読み込まれ、ネイティブ操作との接続を
+保つため `ui/luna-shell.html` の要素 ID を維持する必要がある。
+`--skin NAME` または `LUNA_DESKTOP_SKIN=NAME` でも選択できる。
+
 Wayland プロトコルは **内部バス** として使う。Weston/Mutter/Xorg は不要。GTK4 は Vespera コンポジタへ直接接続する。
 
 ### 開発マシンで試す
@@ -165,7 +241,7 @@ make demo
 ### DRI (DRM/KMS) バックエンド
 
 ```bash
-cargo build -p wayland-server-rs --features dri
+cargo build -p wayland-server-rs --features dri,gpu
 ./target/debug/luna-compositor --backend dri  # KMS が使える Linux コンソール上で
 ```
 

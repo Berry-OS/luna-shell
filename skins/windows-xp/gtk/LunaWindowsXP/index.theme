@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=LunaWindowsXP
+Comment=Luna desktop skin GTK theme
+Encoding=UTF-8
+
+[X-GNOME-Metatheme]
+GtkTheme=LunaWindowsXP
+MetacityTheme=LunaWindowsXP
+IconTheme=Adwaita
+CursorTheme=Adwaita
+ButtonLayout=icon:minimize,maximize,close

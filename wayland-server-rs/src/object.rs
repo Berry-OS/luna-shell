@@ -47,17 +47,32 @@ pub struct Surface {
   pub frame_callbacks: Vec<u32>,
   pub xdg_surface_id: Option<u32>,
   pub mapped: bool,
+  /// We have sent wl_surface.enter for the compositor's single output.
+  pub output_entered: bool,
   pub popup: bool,
   pub input_method_popup: bool,
   // Layer shell
   pub layer_surface_id: Option<u32>,
-  pub accepts_input: bool,  // false when empty input region is set
+  /// Surface-local input region from `wl_surface.set_input_region`.
+  /// `None` = entire surface (default / NULL region).  `Some(rects)` limits
+  /// hits to the union of those rectangles; an empty vec accepts no input.
+  /// luna-shell modeless dialogs rely on this so their full-screen overlay
+  /// stays click-through outside the dialog chrome.
+  pub input_region: Option<Vec<(i32, i32, i32, i32)>>,
   /// xdg_surface.set_window_geometry — content box relative to buffer origin.
   /// None → whole buffer. GTK CSD uses this to exclude drop-shadow padding.
   pub window_geom: Option<(i32, i32, i32, i32)>,
   /// When this surface is a wl_subsurface child, parent wl_surface id.
   /// Firefox / WebRender put content on subsurfaces of an empty toplevel.
   pub subsurface_parent: Option<u32>,
+  /// Damage posted since the last commit, in surface-local coordinates, as a
+  /// bounding box.  `wl_surface.damage` and `damage_buffer` both land here; we
+  /// do not track scale/transform, so the two are equivalent for us.
+  pub pending_damage: crate::render::Rect,
+  /// Damage carried by the most recent commit, consumed by the next composite.
+  /// This is what lets the compositor repaint a blinking terminal cursor
+  /// instead of the entire desktop underneath it.
+  pub damage: crate::render::Rect,
 }
 
 pub enum Role {
@@ -74,6 +89,8 @@ pub enum Role {
     /// Position relative to parent buffer origin.
     x: i32,
     y: i32,
+    /// Sibling stack rank; negative values are below the parent surface.
+    z: i32,
     /// true = commit synchronized with parent (we still present immediately).
     sync: bool,
   },
@@ -160,7 +177,7 @@ pub enum Role {
     /// (slide_x=1, slide_y=2, flip_x=4, flip_y=8, resize_x=16, resize_y=32)
     constraint_adjustment: u32,
   },
-  Region { has_rects: bool },
+  Region { rects: Vec<(i32, i32, i32, i32)> },
   LayerShell,
   LayerSurface {
     surface_id: u32,
@@ -248,12 +265,15 @@ impl Default for Surface {
       frame_callbacks: Vec::new(),
       xdg_surface_id: None,
       mapped: false,
+      output_entered: false,
       popup: false,
       input_method_popup: false,
       layer_surface_id: None,
-      accepts_input: true,
+      input_region: None,
       window_geom: None,
       subsurface_parent: None,
+      pending_damage: crate::render::Rect::EMPTY,
+      damage: crate::render::Rect::EMPTY,
     }
   }
 }

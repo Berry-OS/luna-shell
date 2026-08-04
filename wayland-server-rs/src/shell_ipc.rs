@@ -9,12 +9,27 @@ use crate::object::{Object, Role};
 use crate::server::Client;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 
 pub const STATE_FILE: &str = "luna-shell/state.json";
 pub const CMD_SOCKET: &str = "luna-shell.sock";
+
+/// Connection-scoped shell handle. Wayland object ids are scoped to one
+/// client, so exporting a bare wl_surface id lets two applications alias each
+/// other. Packing the connection fd keeps the IPC representation allocation
+/// free and makes every shell action unambiguous.
+#[inline]
+pub fn window_id(client_fd: RawFd, surface_id: u32) -> u64 {
+  (((client_fd as u32 as u64).wrapping_add(1)) << 32) | surface_id as u64
+}
+
+#[inline]
+pub fn split_window_id(id: u64) -> (RawFd, u32) {
+  (((id >> 32) as u32).wrapping_sub(1) as RawFd, id as u32)
+}
 
 #[derive(Clone, Debug)]
 pub struct TrayItem {
@@ -26,7 +41,7 @@ pub struct TrayItem {
 
 #[derive(Clone, Debug)]
 pub struct WindowInfo {
-  pub surface_id: u32,
+  pub id: u64,
   pub title: String,
   pub app_id: String,
   pub x: i32,
@@ -42,6 +57,17 @@ pub struct ShellIpc {
   runtime_dir: PathBuf,
   extra_tray: Vec<TrayItem>,
   last_export: u64,
+  /// Reused across exports.  The snapshot is rebuilt on every window title,
+  /// focus or map change; churning a fresh String for each of the dozens of
+  /// `format!`s it used to run made those moments a burst of allocator work on
+  /// the compositor's own thread.
+  out: String,
+  key_scratch: String,
+  /// Reused by collect_windows / collect_tray so a focus change does not
+  /// allocate a fresh Vec of WindowInfo/TrayItem (and drop the previous one)
+  /// on the compositor thread.
+  windows_scratch: Vec<WindowInfo>,
+  tray_scratch: Vec<TrayItem>,
 }
 
 impl ShellIpc {
@@ -87,6 +113,10 @@ impl ShellIpc {
       runtime_dir: PathBuf::from(runtime),
       extra_tray: Vec::new(),
       last_export: 0,
+      out: String::new(),
+      key_scratch: String::new(),
+      windows_scratch: Vec::new(),
+      tray_scratch: Vec::new(),
     })
   }
 
@@ -144,12 +174,13 @@ impl ShellIpc {
     }
   }
 
-  pub fn collect_windows(
+  pub fn collect_windows_into(
     clients: &HashMap<RawFd, Client>,
     focused_fd: RawFd,
     focused_surface: u32,
-  ) -> Vec<WindowInfo> {
-    let mut windows = Vec::new();
+    windows: &mut Vec<WindowInfo>,
+  ) {
+    windows.clear();
     for (&fd, client) in clients {
       for (&surface_id, obj) in &client.objects {
         let Role::Surface(s) = &obj.role else { continue };
@@ -170,7 +201,7 @@ impl ShellIpc {
           continue;
         }
         windows.push(WindowInfo {
-          surface_id,
+          id: window_id(fd, surface_id),
           title: if title.is_empty() { app_id.clone() } else { title },
           app_id,
           x: s.x,
@@ -183,22 +214,33 @@ impl ShellIpc {
       }
     }
     windows.sort_by(|a, b| a.title.cmp(&b.title));
-    windows
   }
 
-  pub fn collect_tray(
-    &self,
+  pub fn collect_windows(
     clients: &HashMap<RawFd, Client>,
     focused_fd: RawFd,
     focused_surface: u32,
-  ) -> Vec<TrayItem> {
-    let mut tray = self.extra_tray.clone();
+  ) -> Vec<WindowInfo> {
+    let mut windows = Vec::new();
+    Self::collect_windows_into(clients, focused_fd, focused_surface, &mut windows);
+    windows
+  }
+
+  fn collect_tray_into(
+    &mut self,
+    clients: &HashMap<RawFd, Client>,
+    focused_fd: RawFd,
+    focused_surface: u32,
+    tray: &mut Vec<TrayItem>,
+  ) {
+    tray.clear();
+    tray.extend(self.extra_tray.iter().cloned());
     let mut seen = HashSet::new();
-    for t in &tray {
+    for t in tray.iter() {
       seen.insert(t.id.clone());
     }
 
-    for client in clients.values() {
+    for (&fd, client) in clients {
       for (&surface_id, obj) in &client.objects {
         let Role::Surface(s) = &obj.role else { continue };
         if s.popup || s.xdg_surface_id.is_none() || s.subsurface_parent.is_some() {
@@ -212,10 +254,18 @@ impl ShellIpc {
         if is_shell_surface(&title, &app_id) {
           continue;
         }
-        let key = if app_id.is_empty() { format!("win:{}", surface_id) } else { format!("app:{}", app_id) };
-        if seen.contains(&key) {
+        // Built in a scratch buffer; only the keys that survive the dedup are
+        // promoted to owned strings.
+        self.key_scratch.clear();
+        if app_id.is_empty() {
+          let _ = write!(self.key_scratch, "win:{}", window_id(fd, surface_id));
+        } else {
+          let _ = write!(self.key_scratch, "app:{}", app_id);
+        }
+        if seen.contains(self.key_scratch.as_str()) {
           continue;
         }
+        let key = self.key_scratch.clone();
         seen.insert(key.clone());
         let label = if !app_id.is_empty() {
           app_id.clone()
@@ -234,13 +284,14 @@ impl ShellIpc {
     }
 
     if focused_surface != 0 && focused_fd >= 0 {
-      for t in &mut tray {
-        if t.id.ends_with(&format!(":{}", focused_surface)) {
-          t.icon = format!("{}_active", t.icon);
+      self.key_scratch.clear();
+      let _ = write!(self.key_scratch, "win:{}", window_id(focused_fd, focused_surface));
+      for t in tray.iter_mut() {
+        if t.id == self.key_scratch {
+          t.icon.push_str("_active");
         }
       }
     }
-    tray
   }
 
   pub fn export_state(
@@ -249,19 +300,29 @@ impl ShellIpc {
     focused_fd: RawFd,
     focused_surface: u32,
     force: bool,
-    pending_menu: &mut Option<(u32, i32, i32)>,
-    switcher: &Option<(usize, Vec<u32>)>,
+    pending_menu: &mut Option<(RawFd, u32, i32, i32)>,
+    switcher: &Option<(usize, Vec<(RawFd, u32)>)>,
   ) {
-    let windows = Self::collect_windows(clients, focused_fd, focused_surface);
-    let tray = self.collect_tray(clients, focused_fd, focused_surface);
+    let mut windows = std::mem::take(&mut self.windows_scratch);
+    let mut tray = std::mem::take(&mut self.tray_scratch);
+    Self::collect_windows_into(clients, focused_fd, focused_surface, &mut windows);
+    self.collect_tray_into(clients, focused_fd, focused_surface, &mut tray);
 
     let hash = simple_hash(&windows, &tray)
-      ^ pending_menu.map(|(id, x, y)| id as u64 ^ (x as u64) << 16 ^ (y as u64) << 32).unwrap_or(0)
+      ^ pending_menu
+        .map(|(fd, sid, x, y)| window_id(fd, sid) ^ (x as u64).rotate_left(17) ^ (y as u64).rotate_left(41))
+        .unwrap_or(0)
       ^ switcher
         .as_ref()
-        .map(|(i, ids)| *i as u64 ^ ids.len() as u64)
+        .map(|(i, ids)| {
+          ids.iter().fold(*i as u64 ^ ids.len() as u64, |h, &(fd, sid)| {
+            h.rotate_left(7) ^ window_id(fd, sid)
+          })
+        })
         .unwrap_or(0);
     if !force && hash == self.last_export {
+      self.windows_scratch = windows;
+      self.tray_scratch = tray;
       return;
     }
     self.last_export = hash;
@@ -271,41 +332,64 @@ impl ShellIpc {
       let _ = std::fs::create_dir_all(parent);
     }
 
-    let mut out = String::new();
+    // The snapshot is line-oriented and tab-separated, so tabs and newlines in
+    // client-supplied titles have to go; `push_sanitized` does that in place
+    // rather than allocating a replaced copy per field.
+    fn push_sanitized(out: &mut String, s: &str) {
+      for c in s.chars() {
+        out.push(if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c });
+      }
+    }
+
+    let mut out = std::mem::take(&mut self.out);
+    out.clear();
     for w in &windows {
-      out.push_str(&format!(
-        "W\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-        w.surface_id,
-        w.title.replace('\t', " ").replace('\n', " "),
-        w.app_id.replace('\t', " "),
-        if w.focused { 1 } else { 0 },
-        if w.minimized { 1 } else { 0 },
-        if w.maximized { 1 } else { 0 },
-        if w.fullscreen { 1 } else { 0 },
+      let _ = write!(out, "W\t{}\t", w.id);
+      push_sanitized(&mut out, &w.title);
+      out.push('\t');
+      push_sanitized(&mut out, &w.app_id);
+      let _ = write!(
+        out,
+        "\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        w.focused as u8,
+        w.minimized as u8,
+        w.maximized as u8,
+        w.fullscreen as u8,
         w.x,
         w.y,
-      ));
+      );
     }
     for t in &tray {
-      out.push_str(&format!(
-        "T\t{}\t{}\t{}\t{}\n",
-        t.id.replace('\t', " "),
-        t.label.replace('\t', " "),
-        t.icon.replace('\t', " "),
-        t.tooltip.replace('\t', " ").replace('\n', " "),
-      ));
+      out.push_str("T\t");
+      push_sanitized(&mut out, &t.id);
+      out.push('\t');
+      push_sanitized(&mut out, &t.label);
+      out.push('\t');
+      push_sanitized(&mut out, &t.icon);
+      out.push('\t');
+      push_sanitized(&mut out, &t.tooltip);
+      out.push('\n');
     }
-    if let Some((id, x, y)) = pending_menu.take() {
-      out.push_str(&format!("M\t{}\t{}\t{}\n", id, x, y));
+    if let Some((fd, sid, x, y)) = pending_menu.take() {
+      let _ = write!(out, "M\t{}\t{}\t{}\n", window_id(fd, sid), x, y);
     }
     if let Some((idx, ids)) = switcher {
-      let list: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-      out.push_str(&format!("S\t{}\t{}\n", idx, list.join(",")));
+      let _ = write!(out, "S\t{}\t", idx);
+      for (i, &(fd, sid)) in ids.iter().enumerate() {
+        if i > 0 {
+          out.push(',');
+        }
+        let _ = write!(out, "{}", window_id(fd, sid));
+      }
+      out.push('\n');
     }
 
     if let Ok(mut f) = std::fs::File::create(&path) {
       let _ = f.write_all(out.as_bytes());
     }
+    self.out = out;
+    self.windows_scratch = windows;
+    self.tray_scratch = tray;
   }
 }
 
@@ -402,7 +486,7 @@ fn simple_hash(windows: &[WindowInfo], tray: &[TrayItem]) -> u64 {
   let mut h: u64 = 0xcbf29ce484222325;
   for w in windows {
     h = h.wrapping_mul(0x100000001b3);
-    h ^= w.surface_id as u64;
+    h ^= w.id;
     h = h.wrapping_mul(0x100000001b3);
     h ^= w.focused as u64;
     h = h.wrapping_mul(0x100000001b3);
@@ -419,12 +503,32 @@ fn simple_hash(windows: &[WindowInfo], tray: &[TrayItem]) -> u64 {
       h = h.wrapping_mul(0x100000001b3);
       h ^= *b as u64;
     }
-  }
-  for t in tray {
-    for b in t.id.as_bytes() {
+    for b in w.app_id.as_bytes() {
       h = h.wrapping_mul(0x100000001b3);
       h ^= *b as u64;
     }
   }
+  for t in tray {
+    for field in [&t.id, &t.label, &t.icon, &t.tooltip] {
+      for b in field.as_bytes() {
+        h = h.wrapping_mul(0x100000001b3);
+        h ^= *b as u64;
+      }
+    }
+  }
   h
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{split_window_id, window_id};
+
+  #[test]
+  fn shell_window_ids_are_client_scoped_and_reversible() {
+    let a = window_id(7, 42);
+    let b = window_id(8, 42);
+    assert_ne!(a, b);
+    assert_eq!(split_window_id(a), (7, 42));
+    assert_eq!(split_window_id(b), (8, 42));
+  }
 }

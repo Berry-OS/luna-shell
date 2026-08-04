@@ -9,8 +9,10 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
+const SYN_REPORT: u16 = 0x00;
 const REL_X: u16 = 0x00;
 const REL_Y: u16 = 0x01;
 const REL_HWHEEL: u16 = 0x06;
@@ -186,10 +188,30 @@ fn input_loop(tx: SyncSender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, reques
       if applied.load(Ordering::Acquire) == 0 {
         continue;
       }
+      // A diagonal mouse move arrives as REL_X and REL_Y in the *same* evdev
+      // report, and one read returns as many reports as the kernel had queued.
+      // Forwarding each axis separately turned a 1 kHz mouse into 2000 channel
+      // sends, 2000 eventfd writes and 2000 compositor wake-ups a second, each
+      // one running a full pointer-focus hit test and flushing a client socket.
+      // Accumulate within a report and emit one motion per SYN_REPORT; the
+      // trailing flush covers a device that omits the terminating SYN.
+      let mut acc_dx = 0.0f32;
+      let mut acc_dy = 0.0f32;
+      let flush_motion = |dx: &mut f32, dy: &mut f32| {
+        if *dx != 0.0 || *dy != 0.0 {
+          emit(&tx, wake_fd, InputEvent::PointerRelative { dx: *dx, dy: *dy });
+          *dx = 0.0;
+          *dy = 0.0;
+        }
+      };
       for raw in &events[..bytes as usize / size_of::<InputEventRaw>()] {
-        if dev.keyboard && raw.type_ == EV_KEY && raw.code < BTN_LEFT {
+        if raw.type_ == EV_SYN && raw.code == SYN_REPORT {
+          flush_motion(&mut acc_dx, &mut acc_dy);
+        } else if dev.keyboard && raw.type_ == EV_KEY && raw.code < BTN_LEFT {
           handle_key(raw.code, raw.value, &mut pressed, &mut consumed_fn, &tx, wake_fd);
         } else if dev.pointer && raw.type_ == EV_KEY && raw.code >= BTN_LEFT {
+          // A button edge must not overtake the motion that preceded it.
+          flush_motion(&mut acc_dx, &mut acc_dy);
           emit(
             &tx,
             wake_fd,
@@ -200,42 +222,35 @@ fn input_loop(tx: SyncSender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, reques
           );
         } else if dev.pointer && raw.type_ == EV_REL {
           match raw.code {
-            REL_X => emit(
-              &tx,
-              wake_fd,
-              InputEvent::PointerRelative {
-                dx: raw.value as f32,
-                dy: 0.0,
-              },
-            ),
-            REL_Y => emit(
-              &tx,
-              wake_fd,
-              InputEvent::PointerRelative {
-                dx: 0.0,
-                dy: raw.value as f32,
-              },
-            ),
-            REL_WHEEL => emit(
-              &tx,
-              wake_fd,
-              InputEvent::PointerAxis {
-                axis: 0,
-                value: -(raw.value as f32) * 10.0,
-              },
-            ),
-            REL_HWHEEL => emit(
-              &tx,
-              wake_fd,
-              InputEvent::PointerAxis {
-                axis: 1,
-                value: -(raw.value as f32) * 10.0,
-              },
-            ),
+            REL_X => acc_dx += raw.value as f32,
+            REL_Y => acc_dy += raw.value as f32,
+            REL_WHEEL => {
+              flush_motion(&mut acc_dx, &mut acc_dy);
+              emit(
+                &tx,
+                wake_fd,
+                InputEvent::PointerAxis {
+                  axis: 0,
+                  value: -(raw.value as f32) * 10.0,
+                },
+              );
+            }
+            REL_HWHEEL => {
+              flush_motion(&mut acc_dx, &mut acc_dy);
+              emit(
+                &tx,
+                wake_fd,
+                InputEvent::PointerAxis {
+                  axis: 1,
+                  value: -(raw.value as f32) * 10.0,
+                },
+              );
+            }
             _ => {}
           }
         }
       }
+      flush_motion(&mut acc_dx, &mut acc_dy);
     }
     if !dead.is_empty() {
       for path in dead {

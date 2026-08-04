@@ -59,6 +59,10 @@
       <div id="mb_wifi" class="mb_item mb_status"><span class="luna_icon">&#xf1eb;</span> Wi-Fi</div>
       <div id="mb_bat" class="mb_item mb_status"><span class="luna_icon">&#xf240;</span> 98%</div>
       <div id="mb_cc" class="mb_item mb_status"><span class="luna_icon">&#xf1de;</span></div>
+      <div id="mb_weather" class="mb_item mb_status" title="Weather">
+        <span class="luna_icon" id="mb_weather_icon">&#xf2c9;</span>
+        <span id="mb_weather_temp">—</span>
+      </div>
       <div id="mb_clock" class="mb_item">Tue Jul 28  23:00</div>
     </div>
   </div>
@@ -207,6 +211,40 @@
     </div>
   </div>
 
+  <!-- Weather popover (Open-Meteo; mirrors qberry-weather.js) -->
+  <div id="weather_menu" class="menu_panel hidden">
+    <div id="weather_search">
+      <input type="text" id="weather_city_input" placeholder="City (e.g. Tokyo)">
+      <div id="weather_go" class="dlg_btn primary">Go</div>
+    </div>
+    <div id="weather_body">
+      <span id="weather_hint">Locating…</span>
+      <div id="weather_content" class="hidden">
+        <div id="weather_city_label">—</div>
+        <div id="weather_main">
+          <span class="luna_icon" id="weather_icon">&#xf185;</span>
+          <div>
+            <div id="weather_temp">—°C</div>
+            <div id="weather_desc">—</div>
+          </div>
+        </div>
+        <div id="weather_stats_row">
+          <span id="weather_feels">Feels —</span>
+          <span id="weather_hum">—%</span>
+          <span id="weather_wind">— km/h</span>
+        </div>
+        <div id="weather_forecast">
+          <div id="wf_0" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+          <div id="wf_1" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+          <div id="wf_2" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+          <div id="wf_3" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+          <div id="wf_4" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+        </div>
+      </div>
+      <span id="weather_error" class="hidden">Weather unavailable</span>
+    </div>
+  </div>
+
   <!-- Desktop Widgets -->
   <div id="widget_clock" class="widget">
     <div id="wg_time">23:00</div>
@@ -231,6 +269,24 @@
       <span class="st_val">142 / 512 GB</span>
     </div>
     <div class="st_bar"><div class="st_fill g_disk" style="width: 28%;"></div></div>
+  </div>
+
+  <div id="widget_weather" class="widget">
+    <div class="st_row">
+      <span class="st_label" id="wg_wx_city">Weather</span>
+      <span class="st_val" id="wg_wx_temp">—</span>
+    </div>
+    <div id="wg_wx_main">
+      <span class="luna_icon" id="wg_wx_icon">&#xf2c9;</span>
+      <span id="wg_wx_desc">Fetching…</span>
+    </div>
+    <div id="wg_wx_forecast">
+      <div id="wg_wf_0" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_1" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_2" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_3" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_4" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+    </div>
   </div>
 
   <!-- Dock -->
@@ -311,9 +367,9 @@
   </div>
 
   <!-- Confirmation Dialog Overlay -->
-  <div id="confirm_overlay" class="modal_sheet hidden">
+  <div id="confirm_overlay" class="modal_sheet modeless_dialog hidden">
     <div id="confirm_backdrop" class="modal_backdrop"></div>
-    <div id="confirm_box" class="alert_box dialog_window dialog_alert" role="alertdialog" aria-modal="true" aria-labelledby="confirm_title" aria-describedby="confirm_msg">
+    <div id="confirm_box" class="alert_box dialog_window dialog_alert" role="dialog" aria-modal="false" aria-labelledby="confirm_title" aria-describedby="confirm_msg">
       <div class="tl tl_red" id="ctl_close"></div>
       <div class="tl tl_yellow" id="ctl_min"></div>
       <div class="tl tl_green" id="ctl_max"></div>
@@ -333,7 +389,7 @@
   </div>
 
   <!-- Settings Sheet Window -->
-  <div id="settings_win" class="modal_sheet hidden">
+  <div id="settings_win" class="modal_sheet modeless_dialog hidden">
     <div id="settings_backdrop" class="modal_backdrop"></div>
     <div id="settings_sheet" class="sheet_box dialog_window">
       <div class="tl tl_red" id="stl_close"></div>
@@ -371,6 +427,23 @@
 
           <!-- Appearance Panel -->
           <div id="settings_panel_disp" class="hidden">
+            <span class="panel_heading">Desktop Skin</span>
+            <span class="pref_hint">Choose a complete desktop look. Colors apply immediately; taskbar and deskbar skins also move the shell chrome.</span>
+            <div id="skin_cards" role="radiogroup" aria-label="Desktop skin">
+              <div class="skin_card selected" id="skin_0" role="radio" tabindex="0"><div class="skin_preview skin_preview_0"></div><div class="skin_copy"><span class="skin_name" id="skin_0_name">Luna Moonlight</span><span class="skin_desc" id="skin_0_desc">The built-in Luna desktop</span></div></div>
+              <div class="skin_card hidden" id="skin_1" role="radio" tabindex="0"><div class="skin_preview skin_preview_1"></div><div class="skin_copy"><span class="skin_name" id="skin_1_name">External skin</span><span class="skin_desc" id="skin_1_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_2" role="radio" tabindex="0"><div class="skin_preview skin_preview_2"></div><div class="skin_copy"><span class="skin_name" id="skin_2_name">External skin</span><span class="skin_desc" id="skin_2_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_3" role="radio" tabindex="0"><div class="skin_preview skin_preview_3"></div><div class="skin_copy"><span class="skin_name" id="skin_3_name">External skin</span><span class="skin_desc" id="skin_3_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_4" role="radio" tabindex="0"><div class="skin_preview skin_preview_4"></div><div class="skin_copy"><span class="skin_name" id="skin_4_name">External skin</span><span class="skin_desc" id="skin_4_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_5" role="radio" tabindex="0"><div class="skin_preview skin_preview_5"></div><div class="skin_copy"><span class="skin_name" id="skin_5_name">External skin</span><span class="skin_desc" id="skin_5_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_6" role="radio" tabindex="0"><div class="skin_preview skin_preview_6"></div><div class="skin_copy"><span class="skin_name" id="skin_6_name">External skin</span><span class="skin_desc" id="skin_6_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_7" role="radio" tabindex="0"><div class="skin_preview skin_preview_7"></div><div class="skin_copy"><span class="skin_name" id="skin_7_name">External skin</span><span class="skin_desc" id="skin_7_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_8" role="radio" tabindex="0"><div class="skin_preview skin_preview_0"></div><div class="skin_copy"><span class="skin_name" id="skin_8_name">External skin</span><span class="skin_desc" id="skin_8_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_9" role="radio" tabindex="0"><div class="skin_preview skin_preview_1"></div><div class="skin_copy"><span class="skin_name" id="skin_9_name">External skin</span><span class="skin_desc" id="skin_9_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_10" role="radio" tabindex="0"><div class="skin_preview skin_preview_2"></div><div class="skin_copy"><span class="skin_name" id="skin_10_name">External skin</span><span class="skin_desc" id="skin_10_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_11" role="radio" tabindex="0"><div class="skin_preview skin_preview_0"></div><div class="skin_copy"><span class="skin_name" id="skin_11_name">External skin</span><span class="skin_desc" id="skin_11_desc">Discovered automatically</span></div></div>
+            </div>
+
             <span class="panel_heading">Desktop Wallpaper</span>
             <div id="wp_thumbs_row">
               <div class="wp_thumb wp_t_night selected" id="wp_night"></div>
@@ -406,11 +479,19 @@
             <span class="pref_hint">Changes apply immediately and are saved with the other desktop settings.</span>
 
             <div class="wm_pref" id="wm_snap" role="switch" tabindex="0">
-              <div class="wm_pref_text"><span class="wm_pref_name">Edge snapping</span><span class="wm_pref_desc">Tile at the left or right edge; maximize at the top edge.</span></div>
+              <div class="wm_pref_text"><span class="wm_pref_name">Edge snapping</span><span class="wm_pref_desc">Tile windows at the left or right edge.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_top_maximize" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Maximize at top edge</span><span class="wm_pref_desc">Use the classic behavior when dragging a window to the top edge.</span></div>
               <div class="wm_switch"><div class="wm_switch_knob"></div></div>
             </div>
             <div class="wm_pref" id="wm_double_click" role="switch" tabindex="0">
               <div class="wm_pref_text"><span class="wm_pref_name">Double-click title bar</span><span class="wm_pref_desc">Maximize or restore the active window.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_classic_titlebar" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Classic title bars</span><span class="wm_pref_desc">Use the original solid bar and traffic-light controls for server-decorated windows.</span></div>
               <div class="wm_switch"><div class="wm_switch_knob"></div></div>
             </div>
             <div class="wm_pref" id="wm_shortcuts" role="switch" tabindex="0">
@@ -445,7 +526,7 @@
   </div>
 
   <!-- About Box Window -->
-  <div id="about_win" class="modal_sheet hidden">
+  <div id="about_win" class="modal_sheet modeless_dialog hidden">
     <div id="about_backdrop" class="modal_backdrop"></div>
     <div id="about_box" class="sheet_box about_box dialog_window">
       <div class="tl tl_red" id="tl_close"></div>

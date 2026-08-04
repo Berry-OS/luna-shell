@@ -1,0 +1,148 @@
+/* Luna skin GTK theme — lightweight CSD chrome */
+@define-color luna_paper #ece9d8;
+@define-color luna_paper_hi #fffef5;
+@define-color luna_paper_lo #7f9db9;
+@define-color luna_ink #10213b;
+@define-color luna_accent #245edb;
+@define-color luna_accent_ink #ffffff;
+@define-color luna_sel #316ac5;
+@define-color luna_entry #ffffff;
+
+* {
+  color: @luna_ink;
+  font-family: Sans;
+}
+
+window, .background, decoration {
+  background-color: @luna_paper;
+  color: @luna_ink;
+}
+
+headerbar, .titlebar, .titlebar:backdrop {
+  min-height: 28px;
+  padding: 2px 6px;
+  background-image: none;
+  background-color: @luna_accent;
+  color: @luna_accent_ink;
+  border: 1px solid @luna_paper_lo;
+  border-radius: 0;
+  box-shadow: none;
+}
+headerbar:backdrop, .titlebar:backdrop {
+  background-color: @luna_paper_lo;
+  color: @luna_ink;
+}
+headerbar label, headerbar .title, .titlebar label {
+  color: @luna_accent_ink;
+  font-weight: 600;
+}
+headerbar:backdrop label, headerbar:backdrop .title {
+  color: @luna_ink;
+}
+
+headerbar button, .titlebar button {
+  background-image: none;
+  background-color: @luna_paper_hi;
+  color: @luna_ink;
+  border: 1px solid @luna_paper_lo;
+  border-radius: 0;
+  box-shadow: none;
+  min-height: 18px;
+  min-width: 18px;
+  padding: 0 4px;
+}
+headerbar button:hover {
+  background-color: @luna_paper;
+}
+headerbar button:active, headerbar button:checked {
+  background-color: @luna_paper_lo;
+}
+headerbar button.close:hover {
+  background-color: #e84a4a;
+  color: #ffffff;
+}
+
+button {
+  background-image: none;
+  background-color: @luna_paper_hi;
+  color: @luna_ink;
+  border: 1px solid @luna_paper_lo;
+  border-radius: 0;
+  box-shadow: inset 1px 1px 0 @luna_paper_hi, inset -1px -1px 0 @luna_paper_lo;
+  padding: 4px 10px;
+}
+button:hover { background-color: @luna_paper; }
+button:active, button:checked {
+  background-color: @luna_paper_lo;
+  box-shadow: inset 1px 1px 0 @luna_paper_lo;
+}
+button.suggested-action, button.default {
+  background-color: @luna_accent;
+  color: @luna_accent_ink;
+  border-color: @luna_accent;
+}
+
+entry, textview, spinbutton {
+  background-color: @luna_entry;
+  color: @luna_ink;
+  border: 1px solid @luna_paper_lo;
+  border-radius: 0;
+  box-shadow: none;
+  caret-color: @luna_ink;
+}
+
+notebook, paned, frame, list, listview, treeview, .view {
+  background-color: @luna_paper;
+  color: @luna_ink;
+  border-color: @luna_paper_lo;
+}
+notebook > header tab {
+  background-color: @luna_paper_hi;
+  border: 1px solid @luna_paper_lo;
+  border-radius: 0;
+  padding: 4px 10px;
+}
+notebook > header tab:checked {
+  background-color: @luna_paper;
+}
+
+menubar, .menubar {
+  background-color: @luna_paper;
+  color: @luna_ink;
+  border-bottom: 1px solid @luna_paper_lo;
+}
+menu, .menu, popover, popover.background {
+  background-color: @luna_paper_hi;
+  color: @luna_ink;
+  border: 1px solid @luna_paper_lo;
+  border-radius: 0;
+  box-shadow: 2px 2px 0 rgba(0,0,0,0.25);
+}
+menuitem:hover, modelbutton:hover, .menuitem:hover {
+  background-color: @luna_sel;
+  color: @luna_accent_ink;
+}
+
+scrollbar, scrollbar contents, scrollbar trough {
+  background-color: @luna_paper;
+  border: none;
+}
+scrollbar slider {
+  background-color: @luna_paper_hi;
+  border: 1px solid @luna_paper_lo;
+  border-radius: 0;
+  min-width: 12px;
+  min-height: 12px;
+}
+
+selection, *:selected, row:selected {
+  background-color: @luna_sel;
+  color: @luna_accent_ink;
+}
+
+tooltip, tooltip.background {
+  background-color: #ffffe1;
+  color: #000000;
+  border: 1px solid #000000;
+  border-radius: 0;
+}

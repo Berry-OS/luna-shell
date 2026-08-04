@@ -1,0 +1,141 @@
+/* Hallmark · theme: Amiga Workbench · chrome: menubar · enrichment: Tier A CSS
+ * audience: retro desktop users · use: live desktop skin switching
+ */
+:root {
+  --ami-orange: #f0a000;
+  --ami-orange-hi: #ffc040;
+  --ami-orange-lo: #c07000;
+  --ami-blue: #0050a0;
+  --ami-blue-hi: #2080d0;
+  --ami-blue-lo: #003070;
+  --ami-ink: #000000;
+  --ami-white: #ffffff;
+  --ami-grey: #a0a0a0;
+  --ami-desk: #0050a0;
+  --ami-shadow: #00000077;
+  --ami-clear: #00000000;
+  --color-accent: var(--ami-orange);
+  --color-accent-ink: var(--ami-ink);
+  --color-paper: var(--ami-grey);
+  --color-ink: var(--ami-ink);
+  --color-muted: #303030;
+  --color-focus: var(--ami-orange-hi);
+  --luna-accent: var(--ami-orange);
+  --luna-accent-2: var(--ami-orange-hi);
+  --luna-accent-dark: var(--ami-orange-lo);
+  --luna-gold: var(--ami-orange-hi);
+  --luna-glass: var(--ami-grey);
+  --luna-glass-card: #c8c8c8;
+  --luna-glass-edge: #606060;
+  --luna-text: var(--ami-ink);
+  --luna-text-dim: #303030;
+  --luna-text-muted: #303030;
+  --dialog-surface: var(--ami-grey);
+  --dialog-footer: #888888;
+  --dialog-divider: #606060;
+  --about-surface: var(--ami-grey);
+  --about-card: #c8c8c8;
+  --about-card-hover: var(--ami-white);
+  --about-icon: var(--ami-orange);
+  --about-border: #606060;
+  --radius-xl: 0;
+  --radius-lg: 0;
+  --radius-md: 0;
+  --radius-sm: 0;
+}
+
+html, body { background: var(--ami-desk); color: var(--ami-ink); }
+#wallpaper,
+#wallpaper.ocean,
+#wallpaper.forest,
+#wallpaper.sunset {
+  background: linear-gradient(180deg, var(--ami-blue-hi) 0%, var(--ami-blue) 40%, var(--ami-blue-lo) 100%);
+}
+#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none; }
+
+#menubar {
+  height: 24px; top: 0; bottom: auto; padding: 0 4px;
+  background: linear-gradient(180deg, var(--ami-orange-hi), var(--ami-orange) 50%, var(--ami-orange-lo));
+  border: 0; border-bottom: 2px solid #000000;
+  border-radius: 0; box-shadow: none;
+}
+#mb_left, #mb_center, #mb_right { height: 24px; }
+#mb_logo {
+  width: 24px; height: 20px; border-radius: 0;
+  background: var(--ami-blue); border: 1px solid #000000; box-shadow: none;
+}
+#mb_logo_glyph { color: var(--ami-white); }
+#mb_app, .mb_app_name, .mb_item, .mb_status, .tray_glyph, .win_label { color: var(--ami-ink); }
+.mb_item { border-radius: 0; height: 20px; }
+.mb_item:hover, .tray_item:hover { background-color: var(--ami-blue); color: var(--ami-white); }
+.mb_item:hover .luna_icon, .tray_item:hover .tray_glyph { color: var(--ami-white); }
+.win_item {
+  height: 20px; border-radius: 0;
+  background: var(--ami-blue); border: 1px solid #000000;
+}
+.win_item .win_label { color: var(--ami-white); }
+.win_item.active { background: var(--ami-blue-lo); box-shadow: inset 1px 1px #000000; }
+
+.menu_panel {
+  top: 26px; bottom: auto;
+  background: var(--ami-grey); color: var(--ami-ink);
+  border: 2px solid #000000; border-radius: 0;
+  box-shadow: 3px 3px 0 var(--ami-shadow); animation: none;
+}
+.menu_item { border-radius: 0; }
+.menu_item:hover { background: var(--ami-orange); box-shadow: none; }
+.menu_section_label, .mi_label, .mi_sym, .mi_key { color: var(--ami-ink); }
+.menu_sep { background-color: #000000; }
+
+#dock {
+  left: 50%; bottom: 12px; margin-left: -200px;
+  width: 400px; height: 52px; padding: 4px 8px; gap: 4px;
+  background: var(--ami-grey); border: 2px solid #000000;
+  border-radius: 0; box-shadow: 3px 3px 0 var(--ami-shadow);
+}
+.dock_item { width: 40px; flex-basis: 40px; }
+.dock_icon { width: 36px; height: 36px; padding-top: 8px; border-radius: 0; border: 1px solid #000000; box-shadow: none; }
+.dock_dot { background-color: var(--ami-orange); box-shadow: none; }
+.dock_sep { background: #000000; }
+
+.widget, #toast, #switcher_strip {
+  background: var(--ami-grey); color: var(--ami-ink);
+  border: 2px solid #000000; border-radius: 0;
+  box-shadow: 3px 3px 0 var(--ami-shadow);
+}
+#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, #toast_msg, .sw_title, .sw_app { color: var(--ami-ink); }
+
+.sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
+  background: var(--ami-grey); color: var(--ami-ink);
+  border: 2px solid #000000; border-radius: 0;
+  box-shadow: 4px 4px 0 var(--ami-shadow);
+}
+#settings_title {
+  background: linear-gradient(90deg, var(--ami-orange-lo), var(--ami-orange-hi));
+  color: var(--ami-ink); text-align: left; padding-left: 88px;
+  border-bottom: 2px solid #000000;
+}
+#settings_sidebar, #settings_btns, #confirm_btns { background: var(--ami-grey); }
+.panel_heading { color: var(--ami-blue); }
+.stab, .pref_label, .pref_hint, .pref_section, .wm_pref_name, .wm_pref_desc,
+.skin_name, .skin_desc, .cur_name, .cur_desc, .kb_name, .kb_desc { color: var(--ami-ink); }
+.stab:hover, .skin_card:hover, .cur_card:hover, .kb_card:hover, .wm_pref:hover { background-color: #c8c8c8; color: var(--ami-ink); }
+.stab.active, .skin_card.selected, .cur_card.selected, .kb_card.selected, .wm_choice.selected {
+  background: var(--ami-orange); color: var(--ami-ink); border-color: #000000; box-shadow: none;
+}
+.stab.active .stab_icon, .skin_card.selected .skin_name, .skin_card.selected .skin_desc { color: var(--ami-ink); }
+.pref_input, .pref_input_full, #wifi_password {
+  background: var(--ami-white); color: var(--ami-ink); border-color: #000000; border-radius: 0;
+}
+.dlg_btn {
+  background: var(--ami-grey); color: var(--ami-ink); border: 2px solid #000000;
+  border-radius: 0; box-shadow: inset 1px 1px var(--ami-white);
+}
+.dlg_btn.primary { background: var(--ami-orange); color: var(--ami-ink); }
+.dlg_btn:hover { background: #c8c8c8; color: var(--ami-ink); }
+.dlg_btn.primary:hover { background: var(--ami-orange-hi); color: var(--ami-ink); }
+.dlg_btn:focus-visible, .skin_card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 1ms; transition-duration: 1ms; }
+}

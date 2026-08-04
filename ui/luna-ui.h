@@ -21,13 +21,14 @@ extern "C" {
 #endif
 
 #ifndef LUNA_UI_MAX_ELEMENTS
-#define LUNA_UI_MAX_ELEMENTS 500
+#define LUNA_UI_MAX_ELEMENTS 700
 #endif
 #ifndef LUNA_UI_MAX_RULES
 #define LUNA_UI_MAX_RULES 600
 #endif
 
 typedef struct LunaElement LunaElement;
+typedef struct LunaContext LunaContext;
 typedef void (*LunaEventHandler)(LunaElement* e);
 typedef void (*LunaTrapDismissFn)(int trap_idx);
 typedef void (*LunaMouseReleaseHook)(int hit, int drag_moved);
@@ -51,6 +52,9 @@ typedef struct LunaPlatform {
 typedef struct LunaInitConfig {
     float width, height;
     LunaGetProcFn get_proc;
+    /* Remove native window decorations when using the GLFW integration.
+     * The host must set g_luna_glfw_window before calling luna_init(). */
+    int frameless;
 } LunaInitConfig;
 
 /*
@@ -93,6 +97,10 @@ void luna_shutdown(void);
 void luna_set_html_base_dir(const char* path);
 int  luna_load_html_file(const char* path);
 int  luna_load_css_file(const char* path);
+/* Drop the active author stylesheet without rebuilding the DOM.  Hosts use
+ * this to replace a desktop skin at runtime, then load the base sheet and the
+ * selected skin in cascade order. */
+void luna_reset_css(void);
 void luna_parse_html(const char* html);
 void luna_parse_css(const char* css);
 void luna_inject_body_background(void);
@@ -111,12 +119,58 @@ void luna_update(double now, double dt);
 int  luna_visuals_settling(void);
 /* Same, but only for root and its descendants. root_idx < 0 → whole tree. */
 int  luna_visuals_settling_under(int root_idx);
+/* Batched form: bit k of *out_mask = roots[k]'s subtree is settling (root -1 =
+ * whole tree).  Returns 1 when anything is settling.  One pass for all roots —
+ * hosts with many surfaces should prefer this over calling _under() per root. */
+int  luna_visuals_settling_mask(const int* roots, int nroots, unsigned* out_mask);
+/* 1 when a CSS @keyframes animation is actually running under root_idx. */
+int  luna_css_anim_running_under(int root_idx);
 void luna_render(int fbw, int fbh);
+/* Opt in to per-render damage tracking (off by default).  It costs a hash of
+ * each drawn element per render, which only pays for itself on hosts that can
+ * forward the result — a Wayland client posting surface damage.  A host that
+ * repaints one framebuffer wholesale should leave it off. */
+void luna_set_damage_tracking(int enabled);
+/* Region of the most recent luna_render()/luna_render_region() whose pixels
+ * differ from the previous render of the same root, in surface coordinates
+ * (x right, y down, origin at the region origin passed to _region).
+ * Returns 1 with the four out-params filled in, 0 when nothing changed.  Hosts
+ * can hand this straight to eglSwapBuffersWithDamage / wl_surface.damage. */
+int  luna_render_damage(float* x, float* y, float* w, float* h);
+/* Walk the current render root and report whether a paint would change any
+ * pixels, without issuing GL draws or updating the damage records.  Used by
+ * hosts that mark a surface dirty on a timer (clock, stats) but often find
+ * the document unchanged — skipping the GL clear/draw/swap removes the
+ * periodic hitch those timers produced on the console session. */
+int  luna_probe_damage(int root_idx, int fbw, int fbh,
+                       float origin_x, float origin_y,
+                       float region_w, float region_h);
 void luna_render_region(int root_idx, int fbw, int fbh,
                         float origin_x, float origin_y,
                         float region_w, float region_h);
+/* A LunaContext is a lightweight native-surface view of the shared Luna
+ * document.  Each context owns the OpenGL container objects that are not
+ * shared between GLFW/GLX contexts (notably the VAO), plus its DOM root and
+ * input-coordinate origin.  Programs, textures, CSS and the DOM remain shared.
+ *
+ * The host must make the target GL context current before create/destroy/render
+ * and create native contexts in the same GL share group.  Existing single-
+ * surface hosts can continue using luna_render() and luna_mouse_* unchanged. */
+LunaContext* luna_context_create(void);
+void luna_context_destroy(LunaContext* ctx);
+void luna_context_set_region(LunaContext* ctx, int root_idx,
+                             float origin_x, float origin_y,
+                             float region_w, float region_h);
+void luna_context_render(LunaContext* ctx, int fbw, int fbh);
+void luna_context_mouse_move(LunaContext* ctx, double x, double y);
+void luna_context_mouse_button(LunaContext* ctx, int button, int action,
+                               int mods, double x, double y);
+void luna_context_scroll(LunaContext* ctx, double xoffset, double yoffset);
 int  luna_element_count(void);
 LunaElement* luna_element_at(int idx);
+/* 1 when no display:none anywhere between idx and the root — i.e. changing
+ * this element's text or style can actually change pixels. */
+int  luna_element_visible(int idx);
 int  luna_get_element_by_id(const char* id);
 void luna_set_text(int idx, const char* text);
 void luna_add_class(int idx, const char* cls);
@@ -645,7 +699,14 @@ const char* img_fs =
 // bg_vs is reused as vertex shader with uPos=(elem_x,elem_y), uSize=(w,h).
 // FragPos goes from (0,0) to (w,h) with y-flip (0=bottom).
 // uBlurDir = (1/fbw, 0) horizontal or (0, 1/fbh) vertical.
-// uBlurRadius = blur radius in pixels; uBlurTexSize = (fbw, fbh).
+// uBlurRadius = blur radius in pixels; uBlurTexSize = capture texture size.
+// uFbSize = framebuffer size.  The capture texture may be *larger* than the
+//          framebuffer — it is grown to the biggest surface ever rendered and
+//          never shrunk — so the two sizes have to be kept apart: content is
+//          anchored at texture y=0 (the bottom), which is where a viewport of
+//          the framebuffer's height puts it, while UV normalisation divides by
+//          the texture's size.  uFbSize/uBlurTexSize is therefore also the
+//          upper UV bound of everything the capture actually wrote.
 // uBlurOrigin = (elem_x, elem_y) — where the element sits in screen coords
 //               so we can compute correct UV into the full-window capture texture.
 const char* blur_fs =
@@ -657,17 +718,17 @@ const char* blur_fs =
     "uniform vec2 uBlurDir;\n"
     "uniform float uBlurRadius;\n"
     "uniform vec2 uBlurTexSize;\n"
+    "uniform vec2 uFbSize;\n"
     "uniform vec2 uBlurOrigin;\n"
     "void main() {\n"
     /* FragPos: element-local, y-flipped (0=bottom, uSize.y=top).
        Screen (y-down): sx = origin.x + FragPos.x
                         sy = origin.y + (uSize.y - FragPos.y)
-       GL texture (y-up): sp.y = tex_h - sy */
-    "    float th = uBlurTexSize.y;\n"
+       GL texture (y-up): sp.y = fb_h - sy */
     "    vec2 screenPos = vec2(uBlurOrigin.x + FragPos.x,\n"
     "                          uBlurOrigin.y + (uSize.y - FragPos.y));\n"
-    "    vec2 uv = vec2(screenPos.x / uBlurTexSize.x,\n"
-    "                   (th - screenPos.y) / th);\n"
+    "    vec2 uvMax = uFbSize / uBlurTexSize;\n"
+    "    vec2 uv = vec2(screenPos.x, uFbSize.y - screenPos.y) / uBlurTexSize;\n"
     "    float r = max(uBlurRadius, 0.5);\n"
     "    float sigma = r * 0.35 + 0.5;\n"
     "    vec4 col = vec4(0.0);\n"
@@ -675,7 +736,7 @@ const char* blur_fs =
     "    for(int i = -4; i <= 4; i++) {\n"
     "        float fi = float(i) * (r / 4.0);\n"
     "        float w = exp(-(fi * fi) / (2.0 * sigma * sigma));\n"
-    "        vec2 suv = clamp(uv + uBlurDir * fi, vec2(0.0), vec2(1.0));\n"
+    "        vec2 suv = clamp(uv + uBlurDir * fi, vec2(0.0), uvMax);\n"
     "        col += texture(uSrc, suv) * w;\n"
     "        wsum += w;\n"
     "    }\n"
@@ -692,6 +753,7 @@ const char* backdrop_fs =
     "uniform vec2 uSize;\n"
     "uniform vec4 uRadius4;\n"
     "uniform vec2 uBlurTexSize;\n"
+    "uniform vec2 uFbSize;\n"
     "uniform vec2 uBlurOrigin;\n"
     "uniform float uSaturate;\n"
     "uniform float uBrightness;\n"
@@ -705,12 +767,10 @@ const char* backdrop_fs =
     "    float sdf = rr_sdf4(FragPos - halfSize, halfSize, uRadius4);\n"
     "    float alpha = 1.0 - smoothstep(-1.0, 0.5, sdf);\n"
     "    if(alpha <= 0.0) discard;\n"
-    "    float th = uBlurTexSize.y;\n"
     "    vec2 screenPos = vec2(uBlurOrigin.x + FragPos.x,\n"
     "                          uBlurOrigin.y + (uSize.y - FragPos.y));\n"
-    "    vec2 uv = vec2(screenPos.x / uBlurTexSize.x,\n"
-    "                   (th - screenPos.y) / th);\n"
-    "    vec4 tc = texture(uSrc, clamp(uv, vec2(0.0), vec2(1.0)));\n"
+    "    vec2 uv = vec2(screenPos.x, uFbSize.y - screenPos.y) / uBlurTexSize;\n"
+    "    vec4 tc = texture(uSrc, clamp(uv, vec2(0.0), uFbSize / uBlurTexSize));\n"
     "    float gray = dot(tc.rgb, vec3(0.299, 0.587, 0.114));\n"
     "    vec3 filtered = mix(vec3(gray), tc.rgb, uSaturate) * uBrightness;\n"
     "    FragColor = vec4(clamp(filtered, 0.0, 1.0), alpha);\n"
@@ -960,6 +1020,11 @@ struct LunaElement {
     int has_css_width, has_css_height;
     int has_min_width, has_min_height;
     int has_max_width, has_max_height;
+    /* Percentage max-width is resolved against the containing block.  Keeping
+       the ratio is essential: treating `max-width: 100%` as 100px clipped
+       shrink-wrapped flex rows such as the shell's window list. */
+    int max_width_pct;
+    float raw_max_width, raw_max_width_off;
 
     int grid_col_count, grid_row_count;
     float grid_col_track[MAX_GRID_TRACKS];
@@ -1151,6 +1216,7 @@ typedef struct {
     int has_min_width; float min_width;
     int has_min_height; float min_height;
     int has_max_width; float max_width;
+    int max_width_pct; float raw_max_width, raw_max_width_off;
     int has_max_height; float max_height;
     int has_box_sizing; int box_sizing;
     int has_grid_template_columns;
@@ -1338,6 +1404,69 @@ static void luna_use_program(GLuint prog) {
     if (prog != g_current_program) { glUseProgram(prog); g_current_program = prog; }
 }
 
+/* Same idea for the vertex array binding.  Every rect primitive re-bound the
+ * one shared quad VAO it had just drawn from; a document of a few hundred
+ * elements issues that call several times per element. */
+static GLuint g_current_vao = 0;
+static void luna_bind_vao(GLuint vao) {
+    if (vao != g_current_vao) { glBindVertexArray(vao); g_current_vao = vao; }
+}
+
+/* ── Uniform shadowing ──────────────────────────────────────────────────────
+ *
+ * Uniform values live in the program object, so they survive glUseProgram and
+ * every framebuffer switch: re-uploading a value the program already holds
+ * changes nothing on screen and still costs a driver entry point, an argument
+ * marshal and a dirty-flag write on the uniform block.
+ *
+ * draw_rect_full() uploads two dozen uniforms per element — resolution, filter
+ * mode, clip state, border colour, eight gradient stops — while consecutive
+ * elements typically differ in three or four of them.  Every element of every
+ * layer surface of every frame paid for the rest.  These helpers keep the last
+ * uploaded value beside the location and skip the call when it has not moved.
+ *
+ * The shadow is seeded with NaN, which compares unequal to everything
+ * including itself, so the first use of each uniform always uploads. */
+typedef struct { float v[4]; } LunaUniShadow;
+
+static float luna_uni_nan(void) {
+    /* Avoids depending on <math.h> NAN being a compile-time constant. */
+    static const unsigned u = 0x7fc00000u;
+    float f;
+    memcpy(&f, &u, sizeof f);
+    return f;
+}
+
+static void luna_uni_invalidate(LunaUniShadow* s, int n) {
+    float nan = luna_uni_nan();
+    for (int i = 0; i < n; i++)
+        s[i].v[0] = s[i].v[1] = s[i].v[2] = s[i].v[3] = nan;
+}
+
+static void uni1f(GLint loc, LunaUniShadow* s, float a) {
+    if (s->v[0] == a) return;
+    s->v[0] = a;
+    glUniform1f(loc, a);
+}
+
+static void uni2f(GLint loc, LunaUniShadow* s, float a, float b) {
+    if (s->v[0] == a && s->v[1] == b) return;
+    s->v[0] = a; s->v[1] = b;
+    glUniform2f(loc, a, b);
+}
+
+static void uni4f(GLint loc, LunaUniShadow* s, float a, float b, float c, float d) {
+    if (s->v[0] == a && s->v[1] == b && s->v[2] == c && s->v[3] == d) return;
+    s->v[0] = a; s->v[1] = b; s->v[2] = c; s->v[3] = d;
+    glUniform4f(loc, a, b, c, d);
+}
+
+static void uni1i(GLint loc, LunaUniShadow* s, int a) {
+    if (s->v[0] == (float)a) return;
+    s->v[0] = (float)a;
+    glUniform1i_(loc, a);
+}
+
 /* FBO state for backdrop-filter: blur() */
 static GLuint g_blur_fbo[2]  = {0, 0};
 static GLuint g_blur_tex[2]  = {0, 0};
@@ -1353,6 +1482,16 @@ static struct {
     GLint uFilterMode, uFilterBrightness, uFilterContrast, uFilterSaturate, uFilterHue;
     GLint uClipEnabled, uClipPos, uClipSize, uClipRadius4;
 } bg_loc;
+/* Last value uploaded to each bg_program uniform.  Laid out to mirror bg_loc so
+ * `luna_uni_invalidate` can clear the whole block in one sweep. */
+static struct {
+    LunaUniShadow uResolution, uPos, uSize, uColor, uBorderColor, uBorderWidth, uRadius4;
+    LunaUniShadow uGradient, uGradStopCount, uGradAngle, uGradCenter, uGradRadius;
+    LunaUniShadow uGradRadRx, uGradRadRy;
+    LunaUniShadow uGradColors[MAX_GRAD_STOPS], uGradStops[MAX_GRAD_STOPS];
+    LunaUniShadow uFilterMode, uFilterBrightness, uFilterContrast, uFilterSaturate, uFilterHue;
+    LunaUniShadow uClipEnabled, uClipPos, uClipSize, uClipRadius4;
+} bg_uni;
 /* Global rounded-clip state for bg_fs: set before each draw_rect_full call */
 static int   g_bg_clip_enabled = 0;
 static float g_bg_clip_pos[2]  = {0, 0};
@@ -1364,20 +1503,29 @@ static struct {
     GLint uShadowColor, uElemSize, uRadius4, uBlur, uSpread, uInsetMode, uShadowInset, uOffset;
 } sh_loc;
 static struct {
+    LunaUniShadow uResolution, uPos, uSize;
+    LunaUniShadow uShadowColor, uElemSize, uRadius4, uBlur, uSpread, uInsetMode, uShadowInset, uOffset;
+} sh_uni;
+static struct {
     GLint uResolution, textColor;
     GLint uGradMode, uGradStopCount, uGradAngle, uElemBounds;
     GLint uGradColors[MAX_GRAD_STOPS], uGradStops[MAX_GRAD_STOPS];
 } tx_loc;
 static struct {
+    LunaUniShadow uResolution, textColor;
+    LunaUniShadow uGradMode, uGradStopCount, uGradAngle, uElemBounds;
+    LunaUniShadow uGradColors[MAX_GRAD_STOPS], uGradStops[MAX_GRAD_STOPS];
+} tx_uni;
+static struct {
     GLint uResolution, uPos, uSize, uRadius, uAlpha, uImage;
 } img_loc;
 static struct {
     GLint uResolution, uPos, uSize;
-    GLint uSrc, uBlurDir, uBlurRadius, uBlurTexSize, uBlurOrigin;
+    GLint uSrc, uBlurDir, uBlurRadius, uBlurTexSize, uFbSize, uBlurOrigin;
 } blur_loc;
 static struct {
     GLint uResolution, uPos, uSize, uRadius4;
-    GLint uSrc, uBlurTexSize, uBlurOrigin, uSaturate, uBrightness;
+    GLint uSrc, uBlurTexSize, uFbSize, uBlurOrigin, uSaturate, uBrightness;
 } backdrop_loc;
 
 // Texture cache — path → GL texture ID (loaded once, reused)
@@ -1461,6 +1609,7 @@ static int            g_brand_font_info_ok = 0;
  * a tiny integer: changing faces does not add an allocation or a draw call. */
 static int            g_font_face_hint = 0;
 
+#define LUNA_ASCII_ATLAS_SIZE 512
 #define LUNA_DYN_ATLAS_W 1024
 #define LUNA_DYN_ATLAS_H 1024
 #define LUNA_MAX_DYN_GLYPHS 4096
@@ -1478,6 +1627,23 @@ typedef struct {
 static unsigned char g_dyn_pixels[LUNA_DYN_ATLAS_W * LUNA_DYN_ATLAS_H];
 static GLuint g_dyn_tex = 0;
 static int    g_dyn_dirty = 0;
+/* Rows of the atlas that changed since the last upload, as a half-open range.
+ * Baking one new glyph used to re-upload the whole 1 MB atlas; a CJK label or
+ * a font-size the shell had not drawn before therefore cost a megabyte of PCIe
+ * traffic in the middle of a frame. */
+static int    g_dyn_dirty_y0 = 0, g_dyn_dirty_y1 = 0;
+
+static void dyn_mark_rows(int y0, int y1) {
+    if (y0 < 0) y0 = 0;
+    if (y1 > LUNA_DYN_ATLAS_H) y1 = LUNA_DYN_ATLAS_H;
+    if (y1 <= y0) return;
+    if (!g_dyn_dirty) { g_dyn_dirty_y0 = y0; g_dyn_dirty_y1 = y1; }
+    else {
+        if (y0 < g_dyn_dirty_y0) g_dyn_dirty_y0 = y0;
+        if (y1 > g_dyn_dirty_y1) g_dyn_dirty_y1 = y1;
+    }
+    g_dyn_dirty = 1;
+}
 static int    g_dyn_pack_x = 1, g_dyn_pack_y = 1, g_dyn_pack_row_h = 0;
 static LunaDynGlyph g_dyn_glyphs[LUNA_MAX_DYN_GLYPHS];
 static int g_dyn_glyph_count = 0;
@@ -1595,7 +1761,8 @@ static void dyn_atlas_reset(void) {
     g_dyn_pack_x = 1; g_dyn_pack_y = 1; g_dyn_pack_row_h = 0;
     g_dyn_glyph_count = 0;
     for (int i = 0; i < LUNA_GLYPH_HASH; i++) g_dyn_hash[i] = -1;
-    g_dyn_dirty = 1;
+    g_dyn_dirty = 0;
+    dyn_mark_rows(0, LUNA_DYN_ATLAS_H);   /* the clear itself has to reach GL */
 }
 
 static LunaDynGlyph* dyn_find_glyph(int cp, int px) {
@@ -1647,13 +1814,17 @@ static LunaDynGlyph* dyn_bake_glyph(int cp, int px) {
     if (hit) return hit;
     if (g_dyn_glyph_count >= LUNA_MAX_DYN_GLYPHS) return NULL;
 
-    float scale = stbtt_ScaleForPixelHeight(finfo, (float)px);
+    /* CSS font-size maps the font em square to CSS pixels.  ScaleForPixelHeight
+     * instead fits ascent-to-descent into that height and makes Inter roughly
+     * 17% smaller than a browser. */
+    float raster_scale = stbtt_ScaleForMappingEmToPixels(finfo, (float)px);
     int ascent, descent, lineGap;
     stbtt_GetFontVMetrics(finfo, &ascent, &descent, &lineGap);
     int advance, lsb;
     stbtt_GetCodepointHMetrics(finfo, cp, &advance, &lsb);
     int x0, y0, x1, y1;
-    stbtt_GetCodepointBitmapBox(finfo, cp, scale, scale, &x0, &y0, &x1, &y1);
+    stbtt_GetCodepointBitmapBox(finfo, cp, raster_scale, raster_scale,
+                                &x0, &y0, &x1, &y1);
     int gw = x1 - x0;
     int gh = y1 - y0;
     if (gw < 1) gw = 1;
@@ -1676,7 +1847,8 @@ static LunaDynGlyph* dyn_bake_glyph(int cp, int px) {
     int ax = g_dyn_pack_x + pad;
     int ay = g_dyn_pack_y + pad;
     stbtt_MakeCodepointBitmap(finfo, &g_dyn_pixels[ay * LUNA_DYN_ATLAS_W + ax],
-                              gw, gh, LUNA_DYN_ATLAS_W, scale, scale, cp);
+                              gw, gh, LUNA_DYN_ATLAS_W,
+                              raster_scale, raster_scale, cp);
 
     LunaDynGlyph* g = &g_dyn_glyphs[g_dyn_glyph_count];
     g->codepoint = cp;
@@ -1686,13 +1858,13 @@ static LunaDynGlyph* dyn_bake_glyph(int cp, int px) {
     g->x1 = (float)(ax + gw); g->y1 = (float)(ay + gh);
     g->xoff = (float)x0;
     g->yoff = (float)y0;
-    g->xadvance = (float)advance * scale;
+    g->xadvance = (float)advance * raster_scale;
     unsigned h = (unsigned)((cp * 2654435761u) ^ (unsigned)(px * 97) ^ (unsigned)(g_font_face_hint * 193)) % LUNA_GLYPH_HASH;
     g->next = g_dyn_hash[h];
     g_dyn_hash[h] = g_dyn_glyph_count;
     g_dyn_glyph_count++;
     g_dyn_pack_x += need_w + 1;
-    g_dyn_dirty = 1;
+    dyn_mark_rows(ay, ay + gh);
     return g;
 }
 
@@ -1708,26 +1880,40 @@ static void dyn_flush_atlas(void) {
         return;
     }
     if (!g_dyn_dirty) return;
+    /* Rows are contiguous at the atlas stride, so the changed band uploads as
+     * one sub-rectangle — typically a few dozen rows rather than 1024. */
     glBindTexture(GL_TEXTURE_2D, g_dyn_tex);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, LUNA_DYN_ATLAS_W, LUNA_DYN_ATLAS_H,
-                    GL_RED, GL_UNSIGNED_BYTE, g_dyn_pixels);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, g_dyn_dirty_y0,
+                    LUNA_DYN_ATLAS_W, g_dyn_dirty_y1 - g_dyn_dirty_y0,
+                    GL_RED, GL_UNSIGNED_BYTE,
+                    &g_dyn_pixels[(size_t)g_dyn_dirty_y0 * LUNA_DYN_ATLAS_W]);
     g_dyn_dirty = 0;
 }
 
 // Shared VAO/VBO for rectangle drawing — created once, reused every frame.
 static GLuint g_rect_vao = 0, g_rect_vbo = 0;
 
+struct LunaContext {
+    GLuint rect_vao;
+    GLuint text_vao;
+    int root_idx;
+    float origin_x, origin_y;
+    float region_w, region_h;
+};
+
 /*
  * CSS font sizes must not be snapped to a sparse set of atlas sizes.  In
- * particular, the shell uses 9.5px labels, 13.5px controls, and a 46px
- * clock; selecting the old nearest atlas (12/16/22/32) visibly changed both
+ * particular, the shipped UIs use sizes from 6px skin labels through 9.5px
+ * shell labels and 13.5px controls up to a 46px clock; selecting the old
+ * nearest atlas (12/16/22/32) visibly changed both
  * glyph metrics and flex intrinsic sizing relative to a browser.  These are
  * the half-pixel CSS sizes used by the shipped UI, baked once at startup and
  * reused by the batched text path on every frame.
  */
-#define NUM_FONT_SIZES 20
+#define NUM_FONT_SIZES 25
 static const float font_sizes[NUM_FONT_SIZES] = {
-    9.5f, 10.0f, 10.5f, 11.0f, 11.5f, 12.0f, 12.5f, 13.0f, 13.5f,
+    6.0f, 7.0f, 8.0f, 8.5f, 9.0f, 9.5f, 10.0f, 10.5f, 11.0f,
+    11.5f, 12.0f, 12.5f, 13.0f, 13.5f,
     14.0f, 15.0f, 16.0f, 18.0f, 19.0f, 20.0f, 22.0f, 24.0f, 25.0f,
     28.0f, 46.0f
 };
@@ -2193,27 +2379,42 @@ static int parse_gradient_stops(const char** p_in, StyleRule* rule) {
         strncpy(token, start, len);
         trim_whitespace(token);
 
-        char color_buf[64] = {0};
+        char color_buf[96] = {0};
         float pos = -1.0f;
-        char* sp = strrchr(token, ' ');
+        /* A stop position is separated from the color by whitespace at the
+           top level.  strrchr() also found spaces inside rgba()/hsl(), so
+           `rgba(141, 123, 255, 0.38)` was split before its alpha component and
+           became an opaque color. */
+        char* sp = NULL;
+        int token_depth = 0;
+        for (char* q = token; *q; q++) {
+            if (*q == '(') token_depth++;
+            else if (*q == ')' && token_depth > 0) token_depth--;
+            else if (isspace((unsigned char)*q) && token_depth == 0) sp = q;
+        }
         if (sp) {
             char posbuf[24] = {0};
             strncpy(posbuf, sp + 1, 23);
             trim_whitespace(posbuf);
             int plen = (int)strlen(posbuf);
-            if (plen > 0 && (posbuf[plen - 1] == '%' || isdigit((unsigned char)posbuf[0]))) {
-                if (posbuf[plen - 1] == '%') posbuf[plen - 1] = '\0';
-                pos = (float)atof(posbuf) / 100.0f;
+            char* pos_end = NULL;
+            float parsed_pos = strtof(posbuf, &pos_end);
+            while (pos_end && isspace((unsigned char)*pos_end)) pos_end++;
+            int is_percent = pos_end && *pos_end == '%' && pos_end[1] == '\0';
+            int is_unitless_zero = pos_end && *pos_end == '\0' && parsed_pos == 0.0f;
+            if (plen > 0 && (is_percent || is_unitless_zero)) {
+                pos = is_percent ? parsed_pos / 100.0f : 0.0f;
                 int clen = (int)(sp - token);
-                if (clen > 63) clen = 63;
+                if (clen > (int)sizeof(color_buf) - 1)
+                    clen = (int)sizeof(color_buf) - 1;
                 strncpy(color_buf, token, clen);
                 color_buf[clen] = '\0';
                 trim_whitespace(color_buf);
             } else {
-                strncpy(color_buf, token, sizeof(color_buf) - 1);
+                snprintf(color_buf, sizeof(color_buf), "%s", token);
             }
         } else {
-            strncpy(color_buf, token, sizeof(color_buf) - 1);
+            snprintf(color_buf, sizeof(color_buf), "%s", token);
         }
 
         parse_color(color_buf,
@@ -3047,9 +3248,62 @@ static int parse_cursor_type(const char* val) {
 // LunaElement helpers
 // ============================================================
 
+/* id → element index map.  luna-shell resolves dozens of ids per frame (clock,
+ * stats, sliders, dock, popovers), and each lookup used to strcmp its way down
+ * the whole element array.  Element ids are only ever written when an element
+ * is appended, so the table just needs extending as elem_count grows. */
+#define LUNA_ID_MAP_SIZE 1024   /* power of two, comfortably > MAX_ELEMENTS */
+static int g_id_map[LUNA_ID_MAP_SIZE];
+static int g_id_map_ready = 0;
+static int g_id_map_built = 0;  /* elements already inserted */
+
+static unsigned luna_id_hash(const char* s) {
+    unsigned h = 2166136261u;
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+
+static void id_map_insert(int idx) {
+    const char* id = elements[idx].id;
+    if (!id[0]) return;
+    unsigned h = luna_id_hash(id) & (LUNA_ID_MAP_SIZE - 1);
+    while (g_id_map[h] != -1) {
+        /* Duplicate id: the first element wins, exactly as the old
+         * front-to-back linear scan did. */
+        if (strcmp(elements[g_id_map[h]].id, id) == 0) return;
+        h = (h + 1) & (LUNA_ID_MAP_SIZE - 1);
+    }
+    g_id_map[h] = idx;
+}
+
+/* Returns 0 when the table cannot stay sparse enough to probe cheaply, in
+ * which case the caller falls back to the plain scan. */
+static int id_map_sync(void) {
+    if (elem_count * 2 > LUNA_ID_MAP_SIZE) return 0;
+    if (!g_id_map_ready || g_id_map_built > elem_count) {
+        for (int i = 0; i < LUNA_ID_MAP_SIZE; i++) g_id_map[i] = -1;
+        g_id_map_built = 0;
+        g_id_map_ready = 1;
+    }
+    for (; g_id_map_built < elem_count; g_id_map_built++)
+        id_map_insert(g_id_map_built);
+    return 1;
+}
+
 int get_element_by_id(const char* id) {
-    for (int i = 0; i < elem_count; i++)
-        if (strcmp(elements[i].id, id) == 0) return i;
+    if (!id || !id[0]) return -1;
+    if (!id_map_sync()) {
+        for (int i = 0; i < elem_count; i++)
+            if (strcmp(elements[i].id, id) == 0) return i;
+        return -1;
+    }
+    unsigned h = luna_id_hash(id) & (LUNA_ID_MAP_SIZE - 1);
+    for (int probe = 0; probe < LUNA_ID_MAP_SIZE; probe++) {
+        int idx = g_id_map[h];
+        if (idx == -1) return -1;
+        if (strcmp(elements[idx].id, id) == 0) return idx;
+        h = (h + 1) & (LUNA_ID_MAP_SIZE - 1);
+    }
     return -1;
 }
 
@@ -3204,6 +3458,9 @@ static void apply_element_inline_style(LunaElement* e) {
         e->raw_left_off = rule.raw_left_off;
         if (e->position_fixed || e->position_mode == POS_ABSOLUTE)
             e->css_positioned |= 1;
+        /* Layout reads non-% left from rel_x (same as stylesheet path). */
+        if (e->position_mode != POS_RELATIVE && !rule.pct_left)
+            e->rel_x = rule.left;
     }
     if (rule.has_top) {
         e->has_top = 1;
@@ -3212,6 +3469,9 @@ static void apply_element_inline_style(LunaElement* e) {
         e->raw_top_off = rule.raw_top_off;
         if (e->position_fixed || e->position_mode == POS_ABSOLUTE)
             e->css_positioned |= 2;
+        /* Layout reads non-% top from rel_y (same as stylesheet path). */
+        if (e->position_mode != POS_RELATIVE && !rule.pct_top)
+            e->rel_y = rule.top;
     }
     if (rule.has_display) {
         e->display_none = rule.display_none;
@@ -3262,15 +3522,36 @@ int element_has_class(LunaElement* e, const char* cls) {
     return 0;
 }
 
+void update_element_style(LunaElement* e);
+
+/* Class changes on an ancestor invalidate descendant selectors such as
+ * `#app.ts-2 .skin-list-row`.  Restyle the node and every descendant. */
+static void restyle_element_and_descendants(LunaElement* e) {
+    int root = (int)(e - elements);
+    if (root < 0 || root >= elem_count) return;
+    update_element_style(e);
+    for (int i = 0; i < elem_count; i++) {
+        if (i == root) continue;
+        for (int p = elements[i].parent_idx; p != -1; p = elements[p].parent_idx) {
+            if (p == root) {
+                update_element_style(&elements[i]);
+                break;
+            }
+        }
+    }
+}
+
 void add_class(LunaElement* e, const char* cls) {
     if (element_has_class(e, cls)) return;
     if (strlen(e->class_name) + strlen(cls) + 2 < sizeof(e->class_name)) {
         if (strlen(e->class_name) > 0) strcat(e->class_name, " ");
         strcat(e->class_name, cls);
+        restyle_element_and_descendants(e);
     }
 }
 
 void remove_class(LunaElement* e, const char* cls) {
+    if (!element_has_class(e, cls)) return;
     char buf[96] = {0}, result[96] = {0};
     snprintf(buf, sizeof(buf), "%s", e->class_name);
     char* tok = strtok(buf, " ");
@@ -3282,6 +3563,7 @@ void remove_class(LunaElement* e, const char* cls) {
         tok = strtok(NULL, " ");
     }
     snprintf(e->class_name, sizeof(e->class_name), "%s", result);
+    restyle_element_and_descendants(e);
 }
 
 void set_bg(int idx, float r, float g, float b, float a) {
@@ -3470,13 +3752,23 @@ static int match_selector_chain(StyleRule* r, int a, int node) {
 }
 
 int selector_matches(StyleRule* r, LunaElement* e) {
-    /* Pseudo-element rules never match regular DOM nodes. */
-    if (r->pseudo_elem) return 0;
+    /* ::before / ::after rules target the HOST selector but apply to the
+     * generated pseudo node (generated_pseudo == 1/2).  Regular DOM nodes
+     * must never match those rules. */
+    if (r->pseudo_elem) {
+        if (e->generated_pseudo != r->pseudo_elem) return 0;
+        if (e->parent_idx < 0 || e->parent_idx >= elem_count) return 0;
+        LunaElement* host = &elements[e->parent_idx];
+        if (!simple_selector_matches(&r->target, host)) return 0;
+        return match_selector_chain(r, 0, e->parent_idx);
+    }
+    if (e->generated_pseudo) return 0;
     if (!simple_selector_matches(&r->target, e)) return 0;
     return match_selector_chain(r, 0, (int)(e - elements));
 }
 
-/* Like selector_matches but for pseudo-element rules — ignores pseudo_elem guard */
+/* Like selector_matches but for pseudo-element rules against a HOST element
+ * (used while spawning synthetic ::before / ::after nodes). */
 static int selector_matches_pseudo(StyleRule* r, LunaElement* e) {
     if (!simple_selector_matches(&r->target, e)) return 0;
     return match_selector_chain(r, 0, (int)(e - elements));
@@ -3504,6 +3796,294 @@ static void apply_one_declaration(const char* key, const char* val, StyleRule* r
     char buf[CSS_MAX_VALUE + CSS_MAX_STR + 4];
     snprintf(buf, sizeof(buf), "%s: %s;", key, val);
     parse_declarations(buf, rule);
+}
+
+/* Apply a font-family value: only icon/brand faces select a dedicated atlas. */
+static void apply_font_family_value(StyleRule* rule, const char* val) {
+    rule->has_font_face = 1;
+    if (strstr(val, "Luna Symbols")) rule->font_face = 1;
+    else if (strstr(val, "Luna Brands")) rule->font_face = 2;
+    else rule->font_face = 0;
+}
+
+/* Absolute / relative CSS font-size keywords → px (medium = 16). */
+static int font_size_keyword_px(const char* tok, float* out_px) {
+    static const struct { const char* name; float px; } kws[] = {
+        {"xx-small", 9.0f}, {"x-small", 10.0f}, {"small", 13.0f},
+        {"medium", 16.0f}, {"large", 18.0f}, {"x-large", 24.0f},
+        {"xx-large", 32.0f}, {"xxx-large", 48.0f},
+        /* relative sizes approximate against the initial medium */
+        {"smaller", 13.0f}, {"larger", 19.0f},
+    };
+    for (size_t i = 0; i < sizeof(kws) / sizeof(kws[0]); i++) {
+        if (strcasecmp(tok, kws[i].name) == 0) { *out_px = kws[i].px; return 1; }
+    }
+    return 0;
+}
+
+static int font_token_is_weight(const char* t, int* out_bold) {
+    if (strcasecmp(t, "bold") == 0 || strcasecmp(t, "bolder") == 0) {
+        if (out_bold) *out_bold = 1;
+        return 1;
+    }
+    if (strcasecmp(t, "normal") == 0 || strcasecmp(t, "lighter") == 0) {
+        if (out_bold) *out_bold = 0;
+        return 1;
+    }
+    char* end = NULL;
+    long n = strtol(t, &end, 10);
+    if (end && end != t && *end == '\0' && n >= 1 && n <= 1000) {
+        if (out_bold) *out_bold = (n >= 600);
+        return 1;
+    }
+    return 0;
+}
+
+static int font_token_is_stretch(const char* t) {
+    static const char* kws[] = {
+        "ultra-condensed", "extra-condensed", "condensed", "semi-condensed",
+        "normal", "semi-expanded", "expanded", "extra-expanded", "ultra-expanded"
+    };
+    for (size_t i = 0; i < sizeof(kws) / sizeof(kws[0]); i++)
+        if (strcasecmp(t, kws[i]) == 0) return 1;
+    /* font-stretch percentage, e.g. 75% — only accept when no length unit */
+    char* end = NULL;
+    strtof(t, &end);
+    return end && end != t && *end == '%';
+}
+
+/* True when `tok` is a <font-size> (keyword or length/%); writes px when known. */
+static int font_token_is_size(const char* tok, float* out_px) {
+    if (font_size_keyword_px(tok, out_px)) return 1;
+    if (!tok || !*tok) return 0;
+    /* Bare 1–1000 integers are font-weight, not size. */
+    {
+        char* end = NULL;
+        long n = strtol(tok, &end, 10);
+        if (end && end != tok && *end == '\0' && n >= 1 && n <= 1000) return 0;
+    }
+    char* endp = NULL;
+    float f = strtof(tok, &endp);
+    if (!endp || endp == tok) return 0;
+    while (isspace((unsigned char)*endp)) endp++;
+    if (*endp == '\0') return 0; /* unitless number → not a size here */
+    if (*endp == '%' || strncmp(endp, "px", 2) == 0 || strncmp(endp, "em", 2) == 0 ||
+        strncmp(endp, "rem", 3) == 0 || strncmp(endp, "pt", 2) == 0 ||
+        strncmp(endp, "vh", 2) == 0 || strncmp(endp, "vw", 2) == 0) {
+        if (out_px) *out_px = parse_float_val(tok);
+        return 1;
+    }
+    (void)f;
+    return 0;
+}
+
+/* Parse <line-height>: normal | <number> | <length> | <percentage>. */
+static float font_parse_line_height(const char* tok) {
+    if (!tok || !*tok || strcasecmp(tok, "normal") == 0) return 0.0f;
+    char* endp = NULL;
+    float lh = strtof(tok, &endp);
+    while (endp && isspace((unsigned char)*endp)) endp++;
+    if (endp && *endp == '\0' && lh > 0.0f) return -lh; /* unitless multiplier */
+    return parse_float_val(tok);
+}
+
+/*
+ * CSS Fonts Level 3 `font` shorthand:
+ *   [ [ <'font-style'> || <font-variant-css21> || <'font-weight'> || <'font-stretch'> ]?
+ *     <'font-size'> [ / <'line-height'> ]? <'font-family'> ]
+ *   | caption | icon | menu | message-box | small-caption | status-bar
+ * On success, unspecified longhands reset to their initial values (required by CSS).
+ * On failure the StyleRule is left unchanged (invalid declaration is ignored).
+ */
+static void parse_font_shorthand(const char* val, StyleRule* rule) {
+    char buf[CSS_MAX_VALUE];
+    strncpy(buf, val ? val : "", sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    trim_whitespace(buf);
+    if (!buf[0]) return;
+
+    /* System font keywords — approximate with a readable default face/size. */
+    static const char* sys[] = {
+        "caption", "icon", "menu", "message-box", "small-caption", "status-bar"
+    };
+    for (size_t i = 0; i < sizeof(sys) / sizeof(sys[0]); i++) {
+        if (strcasecmp(buf, sys[i]) == 0) {
+            rule->has_font_italic = 1; rule->font_italic = 0;
+            rule->has_font_weight = 1; rule->font_bold = 0;
+            rule->has_line_height = 1; rule->line_height = 0.0f;
+            rule->has_font_size = 1;
+            rule->font_size = (strcasecmp(buf, "small-caption") == 0 ||
+                               strcasecmp(buf, "status-bar") == 0) ? 12.0f : 13.0f;
+            apply_font_family_value(rule, "sans-serif");
+            return;
+        }
+    }
+
+    /* Tokenise on whitespace; keep quoted strings and var()/calc() intact. */
+    char* toks[64];
+    int ntok = 0;
+    {
+        char* p = buf;
+        while (*p && ntok < 64) {
+            while (isspace((unsigned char)*p)) p++;
+            if (!*p) break;
+            toks[ntok++] = p;
+            int depth = 0; char quote = 0;
+            while (*p) {
+                if (quote) {
+                    if (*p == '\\' && p[1]) { p += 2; continue; }
+                    if (*p == quote) quote = 0;
+                    p++; continue;
+                }
+                if (*p == '"' || *p == '\'') { quote = *p++; continue; }
+                if (*p == '(') { depth++; p++; continue; }
+                if (*p == ')' && depth > 0) { depth--; p++; continue; }
+                if (isspace((unsigned char)*p) && depth == 0) break;
+                p++;
+            }
+            if (*p) { *p = '\0'; p++; }
+        }
+    }
+    if (ntok < 2) return; /* need at least <font-size> <font-family> */
+
+    int italic = 0, bold = 0;
+    float size_px = 0.0f, line_h = 0.0f;
+    int have_size = 0, have_lh = 0;
+    int fam_i = -1;
+
+    for (int i = 0; i < ntok; i++) {
+        char* tok = toks[i];
+        char size_tok[128], lh_tok[128];
+        size_tok[0] = lh_tok[0] = '\0';
+
+        /* SIZE/LH glued together, e.g. 8px/14px or 12px/1.5 */
+        {
+            int depth = 0; char quote = 0; char* slash = NULL;
+            for (char* q = tok; *q; q++) {
+                if (quote) {
+                    if (*q == '\\' && q[1]) { q++; continue; }
+                    if (*q == quote) quote = 0;
+                    continue;
+                }
+                if (*q == '"' || *q == '\'') { quote = *q; continue; }
+                if (*q == '(') { depth++; continue; }
+                if (*q == ')' && depth > 0) { depth--; continue; }
+                if (*q == '/' && depth == 0) { slash = q; break; }
+            }
+            if (slash && slash != tok) {
+                size_t sn = (size_t)(slash - tok);
+                if (sn >= sizeof(size_tok)) sn = sizeof(size_tok) - 1;
+                memcpy(size_tok, tok, sn); size_tok[sn] = '\0';
+                strncpy(lh_tok, slash + 1, sizeof(lh_tok) - 1);
+                lh_tok[sizeof(lh_tok) - 1] = '\0';
+            }
+        }
+
+        const char* size_candidate = size_tok[0] ? size_tok : tok;
+        float px = 0.0f;
+        if (font_token_is_size(size_candidate, &px)) {
+            /* A bare percentage can be font-stretch (rare) when a later
+             * length/keyword size is present: `font: 75% 12px Arial`. */
+            int pct_only = 0;
+            if (!size_tok[0]) {
+                char* ep = NULL;
+                strtof(tok, &ep);
+                while (ep && isspace((unsigned char)*ep)) ep++;
+                pct_only = (ep && *ep == '%' && ep[1] == '\0');
+            }
+            if (pct_only) {
+                int later = 0;
+                for (int j = i + 1; j < ntok; j++) {
+                    float dummy = 0.0f;
+                    char* slash = strchr(toks[j], '/');
+                    char tmp[128];
+                    const char* cand = toks[j];
+                    if (slash && slash != toks[j]) {
+                        size_t sn = (size_t)(slash - toks[j]);
+                        if (sn >= sizeof(tmp)) sn = sizeof(tmp) - 1;
+                        memcpy(tmp, toks[j], sn); tmp[sn] = '\0';
+                        cand = tmp;
+                    }
+                    if (font_token_is_size(cand, &dummy)) { later = 1; break; }
+                    int wb = 0;
+                    if (strcasecmp(toks[j], "italic") == 0 || strcasecmp(toks[j], "oblique") == 0 ||
+                        strcasecmp(toks[j], "small-caps") == 0 ||
+                        font_token_is_weight(toks[j], &wb) ||
+                        font_token_is_stretch(toks[j]))
+                        continue;
+                    break;
+                }
+                if (later) {
+                    /* consume as font-stretch percentage */
+                    continue;
+                }
+            }
+            size_px = px;
+            have_size = 1;
+            if (lh_tok[0]) {
+                line_h = font_parse_line_height(lh_tok);
+                have_lh = 1;
+                fam_i = i + 1;
+            } else if (i + 1 < ntok && toks[i + 1][0] == '/') {
+                /* `12px / 1.5` or `12px /1.5` */
+                const char* lh = toks[i + 1] + 1;
+                while (isspace((unsigned char)*lh)) lh++;
+                if (*lh) {
+                    line_h = font_parse_line_height(lh);
+                    have_lh = 1;
+                    fam_i = i + 2;
+                } else if (i + 2 < ntok) {
+                    line_h = font_parse_line_height(toks[i + 2]);
+                    have_lh = 1;
+                    fam_i = i + 3;
+                } else {
+                    return; /* dangling slash — invalid */
+                }
+            } else {
+                fam_i = i + 1;
+            }
+            break;
+        }
+
+        /* Optional prefixes before <font-size>. "normal" is shared — ignore. */
+        int wbold = 0;
+        if (strcasecmp(tok, "italic") == 0 || strcasecmp(tok, "oblique") == 0) {
+            italic = 1;
+        } else if (strcasecmp(tok, "small-caps") == 0) {
+            /* font-variant: accepted for CSS parity; no dedicated atlas. */
+        } else if (font_token_is_weight(tok, &wbold) && strcasecmp(tok, "normal") != 0) {
+            bold = wbold;
+        } else if (font_token_is_stretch(tok) && strcasecmp(tok, "normal") != 0) {
+            /* font-stretch: accepted / ignored for layout. */
+        } else if (strcasecmp(tok, "normal") == 0) {
+            /* style|variant|weight|stretch initial — no-op */
+        } else {
+            return; /* unexpected token before size → invalid shorthand */
+        }
+    }
+
+    if (!have_size || fam_i < 0 || fam_i >= ntok) return;
+
+    /* Reassemble font-family from the remaining tokens (commas preserved). */
+    char family[CSS_MAX_VALUE];
+    family[0] = '\0';
+    size_t fam_len = 0;
+    for (int i = fam_i; i < ntok; i++) {
+        size_t tl = strlen(toks[i]);
+        if (fam_len && fam_len + 1 < sizeof(family)) family[fam_len++] = ' ';
+        if (fam_len + tl >= sizeof(family)) break;
+        memcpy(family + fam_len, toks[i], tl);
+        fam_len += tl;
+        family[fam_len] = '\0';
+    }
+    if (!family[0]) return;
+
+    /* Commit: CSS requires resetting omitted longhands to initial values. */
+    rule->has_font_italic = 1; rule->font_italic = italic;
+    rule->has_font_weight = 1; rule->font_bold = bold;
+    rule->has_font_size = 1;   rule->font_size = size_px;
+    rule->has_line_height = 1; rule->line_height = have_lh ? line_h : 0.0f;
+    apply_font_family_value(rule, family);
 }
 
 /* CSS inset is a four-sided shorthand, not an alias for a single offset.
@@ -3927,7 +4507,11 @@ void parse_declarations(char* declarations, StyleRule* rule) {
                  * collapses flex items that clear a previous max-width. */
                 if (strcmp(val, "none") != 0) {
                     rule->has_max_width = 1;
-                    rule->max_width = parse_float_val(val);
+                    parse_length_calc(val, &rule->max_width,
+                                      &rule->max_width_pct,
+                                      &rule->raw_max_width_off);
+                    if (rule->max_width_pct)
+                        rule->raw_max_width = rule->max_width;
                 }
             }
             else if (strcmp(key, "max-height") == 0) {
@@ -4074,6 +4658,7 @@ void parse_declarations(char* declarations, StyleRule* rule) {
                 else if (strcmp(val, "right") == 0)  rule->text_align = 2;
                 else                                 rule->text_align = 0;
             }
+            else if (strcmp(key, "font") == 0)            { parse_font_shorthand(val, rule); }
             else if (strcmp(key, "font-size") == 0)   { rule->has_font_size = 1; rule->font_size = parse_float_val(val); }
             else if (strcmp(key, "font-weight") == 0) { rule->has_font_weight = 1; rule->font_bold = (strstr(val, "bold") != NULL || atoi(val) >= 600); }
             else if (strcmp(key, "line-height") == 0) {
@@ -4195,8 +4780,50 @@ void parse_declarations(char* declarations, StyleRule* rule) {
                     if (e && e > s) {
                         int n = (int)(e - s);
                         if (n > (int)sizeof(rule->content) - 1) n = (int)sizeof(rule->content) - 1;
-                        strncpy(rule->content, s, (size_t)n);
-                        rule->content[n] = '\0';
+                        /* Decode CSS escapes (\XX.. / \char) into UTF-8. */
+                        int wi = 0;
+                        for (int ri = 0; ri < n && wi < (int)sizeof(rule->content) - 1; ) {
+                            if (s[ri] == '\\' && ri + 1 < n) {
+                                ri++;
+                                if (isxdigit((unsigned char)s[ri])) {
+                                    unsigned int cp = 0;
+                                    int digits = 0;
+                                    while (ri < n && digits < 6 &&
+                                           isxdigit((unsigned char)s[ri])) {
+                                        char ch = s[ri++];
+                                        cp <<= 4;
+                                        if (ch >= '0' && ch <= '9') cp |= (unsigned)(ch - '0');
+                                        else if (ch >= 'a' && ch <= 'f') cp |= (unsigned)(ch - 'a' + 10);
+                                        else if (ch >= 'A' && ch <= 'F') cp |= (unsigned)(ch - 'A' + 10);
+                                        digits++;
+                                    }
+                                    if (ri < n && s[ri] == ' ') ri++; /* optional trailing space */
+                                    if (cp == 0) continue; /* keep C-string safe */
+                                    if (cp <= 0x7Fu && wi < (int)sizeof(rule->content) - 1) {
+                                        rule->content[wi++] = (char)cp;
+                                    } else if (cp <= 0x7FFu && wi + 1 < (int)sizeof(rule->content) - 1) {
+                                        rule->content[wi++] = (char)(0xC0u | (cp >> 6));
+                                        rule->content[wi++] = (char)(0x80u | (cp & 0x3Fu));
+                                    } else if (cp <= 0xFFFFu && wi + 2 < (int)sizeof(rule->content) - 1) {
+                                        rule->content[wi++] = (char)(0xE0u | (cp >> 12));
+                                        rule->content[wi++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+                                        rule->content[wi++] = (char)(0x80u | (cp & 0x3Fu));
+                                    } else if (cp <= 0x10FFFFu && wi + 3 < (int)sizeof(rule->content) - 1) {
+                                        rule->content[wi++] = (char)(0xF0u | (cp >> 18));
+                                        rule->content[wi++] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+                                        rule->content[wi++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+                                        rule->content[wi++] = (char)(0x80u | (cp & 0x3Fu));
+                                    }
+                                } else {
+                                    /* \newline ignored; otherwise take next char literally */
+                                    if (s[ri] == '\n' || s[ri] == '\r') { ri++; continue; }
+                                    rule->content[wi++] = s[ri++];
+                                }
+                            } else {
+                                rule->content[wi++] = s[ri++];
+                            }
+                        }
+                        rule->content[wi] = '\0';
                     }
                 } else if (strcmp(val, "none") != 0 && strcmp(val, "normal") != 0) {
                     strncpy(rule->content, val, sizeof(rule->content) - 1);
@@ -4335,10 +4962,7 @@ void parse_declarations(char* declarations, StyleRule* rule) {
             else if (strcmp(key, "font-family") == 0) {
                 /* Keep normal text on the fast pre-baked atlas.  Icon faces
                    select their matching dynamic atlas face, as browsers do. */
-                rule->has_font_face = 1;
-                if (strstr(val, "Luna Symbols")) rule->font_face = 1;
-                else if (strstr(val, "Luna Brands")) rule->font_face = 2;
-                else rule->font_face = 0;
+                apply_font_family_value(rule, val);
             }
             else if (strcmp(key, "user-select") == 0 ||
                      strcmp(key, "-webkit-font-smoothing") == 0) {
@@ -4708,8 +5332,11 @@ static int css_media_matches(const char* prelude) {
 }
 
 void parse_css(const char* css_text) {
-    rule_count = 0;
-    g_keyframe_count = 0;
+    /* Stylesheets participate in one document-wide cascade.  Keep rules and
+       keyframes loaded by earlier <link>, <style>, or luna_parse_css() calls;
+       resetting here made the last stylesheet silently replace all previous
+       ones, unlike browser CSSOM behaviour.  luna_init() starts with the
+       zero-initialized tables, so parsing successive sheets can append safely. */
     CSSStyleSheet *sheet = css_parse(css_text, 0);
     if (!sheet) return;
 
@@ -4802,6 +5429,8 @@ void update_element_style(LunaElement* e) {
     e->has_css_width = e->has_css_height = 0;
     e->has_min_width = e->has_min_height = 0;
     e->has_max_width = e->has_max_height = 0;
+    e->max_width_pct = 0;
+    e->raw_max_width = e->raw_max_width_off = 0.0f;
     e->css_min_width = e->css_min_height = 0.0f;
     e->css_max_width = e->css_max_height = 0.0f;
     e->grid_col_count = e->grid_row_count = 0;
@@ -5150,7 +5779,13 @@ void update_element_style(LunaElement* e) {
         }
         if (r->has_min_width) { e->has_min_width = 1; e->css_min_width = r->min_width; }
         if (r->has_min_height) { e->has_min_height = 1; e->css_min_height = r->min_height; }
-        if (r->has_max_width) { e->has_max_width = 1; e->css_max_width = r->max_width; }
+        if (r->has_max_width) {
+            e->has_max_width = 1;
+            e->css_max_width = r->max_width;
+            e->max_width_pct = r->max_width_pct;
+            e->raw_max_width = r->raw_max_width;
+            e->raw_max_width_off = r->raw_max_width_off;
+        }
         if (r->has_max_height) { e->has_max_height = 1; e->css_max_height = r->max_height; }
         if (r->has_box_sizing) e->box_sizing = r->box_sizing;
         if (r->has_overflow_x) e->overflow_x = r->overflow_x;
@@ -5360,9 +5995,10 @@ static void generate_pseudo_elements(void) {
                 !(r->has_display && !r->display_none))
                 continue;
 
-            /* We found a match — look for an existing pseudo node */
+            /* We found a match — look for an existing pseudo node (including
+             * ones created by earlier CSS reloads / parse passes). */
             int existing = -1;
-            for (int xi = dom_count; xi < elem_count; xi++) {
+            for (int xi = 0; xi < elem_count; xi++) {
                 if (elements[xi].parent_idx == ei &&
                     elements[xi].generated_pseudo == r->pseudo_elem)
                     { existing = xi; break; }
@@ -5401,6 +6037,7 @@ static void generate_pseudo_elements(void) {
                 strncpy(pe->text, content, sizeof(pe->text) - 1);
             }
             update_element_style(pe);
+            pe->pointer_events_none = 1; /* style reset clears this — restore */
             pe->cur_r = pe->r; pe->cur_g = pe->g; pe->cur_b = pe->b; pe->cur_a = pe->a;
             pe->cur_bd_r = pe->bd_r; pe->cur_bd_g = pe->bd_g;
             pe->cur_bd_b = pe->bd_b; pe->cur_bd_a = pe->bd_a;
@@ -5913,14 +6550,44 @@ static float css_outer_width(const LunaElement* e, float css_w) {
         : css_w;
 }
 
+static float resolved_max_width(const LunaElement* e, float containing_width) {
+    float css_w = e->max_width_pct
+        ? containing_width * e->raw_max_width + e->raw_max_width_off
+        : e->css_max_width;
+    if (css_w < 0.0f) css_w = 0.0f;
+    return css_outer_width(e, css_w);
+}
+
+/* Outer main-axis size of a flex item in a row container (used while packing
+ * wrap lines during intrinsic height).  Mirrors flex_main_size's width path
+ * without depending on it — that helper is defined later and calls us. */
+static float flow_row_item_main(const LunaElement* ch) {
+    float size;
+    if (ch->has_flex_basis && !ch->flex_basis_auto)
+        size = ch->flex_basis;
+    else if (ch->has_css_width && !ch->pct_w)
+        size = ch->css_width;
+    else if (ch->w > 0.0f)
+        size = ch->w;
+    else
+        size = 40.0f; /* last-resort; wrap measure prefers definite widths */
+    float min_w = css_outer_width(ch, ch->css_min_width);
+    if (ch->has_min_width && size < min_w) size = min_w;
+    if (ch->has_max_width && !ch->max_width_pct && size > ch->css_max_width)
+        size = ch->css_max_width;
+    return size + ch->margin_left + ch->margin_right;
+}
+
 static float flow_content_height(LunaElement* e) {
     int idx = (int)(e - elements);
 
     /* Does this element have in-flow children? If so its auto height is derived
-       from them (sum for column/block, max for row); otherwise fall back to a
-       single text line. Without this, an auto-height container collapses to one
-       line-height and then flex-shrink crushes its children (e.g. #sidebar_nav
-       squashing its 34px nav items to ~3px). */
+       from them (sum for column/block, max for nowrap row, packed lines for
+       wrap row); otherwise fall back to a single text line. Without this, an
+       auto-height container collapses to one line-height and then flex-shrink
+       crushes its children (e.g. #sidebar_nav squashing its 34px nav items). */
+    int kids[MAX_ELEMENTS];
+    float kid_h[MAX_ELEMENTS];
     int n = 0;
     float total = 0.0f, maxh = 0.0f;
     for (int c = 0; c < elem_count; c++) {
@@ -5949,11 +6616,16 @@ static float flow_content_height(LunaElement* e) {
         chh += ch->margin_top + ch->margin_bottom;
         if (chh > maxh) maxh = chh;
         total += chh;
-        n++;
+        if (n < MAX_ELEMENTS) {
+            kids[n] = c;
+            kid_h[n] = chh;
+            n++;
+        }
     }
 
     if (n > 0) {
         int row = (e->display_mode == DISPLAY_FLEX && e->flex_direction == FLEX_DIR_ROW);
+        int wrap = row && (e->flex_wrap == FLEX_WRAP_WRAP);
         /* A flex container can have both element children and direct text.
            The latter becomes an anonymous flex item in CSS, so it must
            contribute its line box to the intrinsic cross size.  Omitting it
@@ -5969,7 +6641,61 @@ static float flow_content_height(LunaElement* e) {
             }
             if (text_lh > maxh) maxh = text_lh;
         }
-        float inner = row ? maxh : (total + (n > 1 ? e->flex_gap * (float)(n - 1) : 0.0f));
+
+        float inner;
+        if (wrap) {
+            /* Pack items into lines the same way layout_flex_container does.
+             * Using only maxh (nowrap behaviour) made #skin_cards report a
+             * one-row height while wrapping painted additional rows over the
+             * wallpaper / cursor sections of the Appearance panel. */
+            float avail = 0.0f;
+            if (e->pct_w && e->parent_idx >= 0 && e->parent_idx < elem_count) {
+                /* Percentage width must be resolved against the parent's
+                 * current width — e->w may still hold a pre-stretch stale
+                 * value when a column parent is measuring this child. */
+                LunaElement* par = &elements[e->parent_idx];
+                float pw = par->w - par->pad_l - par->pad_r - par->border_width * 2.0f
+                         - e->margin_left - e->margin_right;
+                if (pw < 0.0f) pw = 0.0f;
+                avail = pw * e->raw_w + e->raw_w_off
+                      - e->pad_l - e->pad_r - e->border_width * 2.0f;
+            } else {
+                avail = e->w - e->pad_l - e->pad_r - e->border_width * 2.0f;
+            }
+            if (avail <= 0.5f && e->parent_idx >= 0 && e->parent_idx < elem_count) {
+                LunaElement* par = &elements[e->parent_idx];
+                float pw = par->w - par->pad_l - par->pad_r - par->border_width * 2.0f
+                         - e->margin_left - e->margin_right;
+                avail = pw - e->pad_l - e->pad_r - e->border_width * 2.0f;
+            }
+            if (avail > 0.5f) {
+                float gap = e->flex_gap;
+                float line_main = 0.0f, line_cross = 0.0f, total_cross = 0.0f;
+                int line_items = 0;
+                for (int i = 0; i < n; i++) {
+                    float item_main = flow_row_item_main(&elements[kids[i]]);
+                    float item_cross = kid_h[i];
+                    float need = item_main + (line_items > 0 ? gap : 0.0f);
+                    if (line_items > 0 && line_main + need > avail + 0.5f) {
+                        total_cross += line_cross + (total_cross > 0.0f ? gap : 0.0f);
+                        line_main = item_main;
+                        line_cross = item_cross;
+                        line_items = 1;
+                    } else {
+                        line_main += need;
+                        if (item_cross > line_cross) line_cross = item_cross;
+                        line_items++;
+                    }
+                }
+                if (line_items > 0)
+                    total_cross += line_cross + (total_cross > 0.0f ? gap : 0.0f);
+                inner = total_cross > 0.0f ? total_cross : maxh;
+            } else {
+                inner = maxh;
+            }
+        } else {
+            inner = row ? maxh : (total + (n > 1 ? e->flex_gap * (float)(n - 1) : 0.0f));
+        }
         return inner + e->pad_t + e->pad_b + e->border_width * 2.0f;
     }
 
@@ -6002,7 +6728,10 @@ static float intrinsic_content_width(LunaElement* e) {
         if (ch->position_mode == POS_ABSOLUTE || ch->position_fixed) continue;
         float cw = ch->pct_w ? 0.0f : intrinsic_content_width(ch);
         if (ch->has_min_width && cw < ch->css_min_width) cw = ch->css_min_width;
-        if (ch->has_max_width && cw > ch->css_max_width) cw = ch->css_max_width;
+        /* A percentage max-width is indefinite during intrinsic sizing.  It
+           is resolved later by the containing flex/block formatting context. */
+        if (ch->has_max_width && !ch->max_width_pct && cw > ch->css_max_width)
+            cw = ch->css_max_width;
         cw += ch->margin_left + ch->margin_right;
         total += cw;
         if (cw > maxw) maxw = cw;
@@ -6155,10 +6884,13 @@ static int find_containing_block(int idx) {
 
 static void containing_block_rect(int cb_idx, float* ox, float* oy, float* cw, float* ch) {
     LunaElement* cb = &elements[cb_idx];
-    *ox = cb->x + cb->border_width + cb->pad_l;
-    *oy = cb->y + cb->border_width + cb->pad_t;
-    *cw = cb->w - cb->border_width * 2.0f - cb->pad_l - cb->pad_r;
-    *ch = cb->h - cb->border_width * 2.0f - cb->pad_t - cb->pad_b;
+    /* CSS abspos containing block is the padding box (inside the border),
+     * not the content box.  Using content edges made `top`/`right` on dialog
+     * chrome collide with padded in-flow children (About close vs hero). */
+    *ox = cb->x + cb->border_width;
+    *oy = cb->y + cb->border_width;
+    *cw = cb->w - cb->border_width * 2.0f;
+    *ch = cb->h - cb->border_width * 2.0f;
     if (*cw < 0.0f) *cw = 0.0f;
     if (*ch < 0.0f) *ch = 0.0f;
 }
@@ -6218,7 +6950,7 @@ void update_layout() {
         }
         float min_w = css_outer_width(e, e->css_min_width);
         float min_h = css_outer_height(e, e->css_min_height);
-        float max_w = css_outer_width(e, e->css_max_width);
+        float max_w = resolved_max_width(e, parent_w);
         float max_h = css_outer_height(e, e->css_max_height);
         if (e->has_min_width && e->w < min_w) e->w = min_w;
         if (e->has_min_height && e->h < min_h) e->h = min_h;
@@ -6292,14 +7024,19 @@ static void place_flex_cross(LunaElement* ch, LunaElement* cont, int row_mode,
                              float pad, float inner_cross, float cross_len, int align) {
     (void)cont;
     if (row_mode) {
-        if (align == 3 && !(ch->css_positioned & 2)) { ch->h = inner_cross; ch->rel_y = pad; return; }
+        /* CSS align-items:stretch only applies when the cross size is auto. */
+        if (align == 3 && !(ch->css_positioned & 2) && !ch->has_css_height && !ch->pct_h) {
+            ch->h = inner_cross; ch->rel_y = pad; return;
+        }
         if (!(ch->css_positioned & 2)) {
             if (align == 1) ch->rel_y = pad + (inner_cross - cross_len) * 0.5f;
             else if (align == 2) ch->rel_y = pad + inner_cross - cross_len;
             else ch->rel_y = pad;
         }
     } else {
-        if (align == 3 && !(ch->css_positioned & 1)) { ch->w = inner_cross; ch->rel_x = pad; return; }
+        if (align == 3 && !(ch->css_positioned & 1) && !ch->has_css_width && !ch->pct_w) {
+            ch->w = inner_cross; ch->rel_x = pad; return;
+        }
         if (!(ch->css_positioned & 1)) {
             if (align == 1) ch->rel_x = pad + (inner_cross - cross_len) * 0.5f;
             else if (align == 2) ch->rel_x = pad + inner_cross - cross_len;
@@ -6308,7 +7045,7 @@ static void place_flex_cross(LunaElement* ch, LunaElement* cont, int row_mode,
     }
 }
 
-static float flex_main_size(LunaElement* ch, int row_mode) {
+static float flex_main_size(LunaElement* ch, int row_mode, float available_main) {
     float size;
     if (ch->has_flex_basis && !ch->flex_basis_auto)
         size = ch->flex_basis;
@@ -6321,7 +7058,7 @@ static float flex_main_size(LunaElement* ch, int row_mode) {
     }
     if (row_mode) {
         float min_w = css_outer_width(ch, ch->css_min_width);
-        float max_w = css_outer_width(ch, ch->css_max_width);
+        float max_w = resolved_max_width(ch, available_main);
         if (ch->has_min_width && size < min_w) size = min_w;
         if (ch->has_max_width && size > max_w) size = max_w;
     } else {
@@ -6347,7 +7084,21 @@ static float flex_min_main(LunaElement* ch, int row_mode) {
         return ch->box_sizing == BOX_CONTENT
             ? ch->css_height + ch->pad_t + ch->pad_b + ch->border_width * 2.0f
             : ch->css_height;
-    return 0.0f;
+    /* CSS flexbox min-width/min-height:auto → content-based minimum when
+     * overflow is visible.  Clipped/scrollable items may shrink to zero so a
+     * constrained flex parent can still fit them.  Without the content
+     * minimum, a wrapping row such as #skin_cards was flex-shrunk below its
+     * packed height and then re-expanded during its own layout pass, leaving
+     * wallpaper/cursor rows overlapped in the Appearance panel. */
+    if (row_mode) {
+        if (overflow_clips(ch->overflow_x)) return 0.0f;
+        float content = flex_content_width(ch);
+        if (ch->has_max_width && !ch->max_width_pct && content > ch->css_max_width)
+            content = ch->css_max_width;
+        return content;
+    }
+    if (overflow_clips(ch->overflow_y)) return 0.0f;
+    return flow_content_height(ch);
 }
 
 /* CSS: a flex item's cross size defaults to its content size unless it is
@@ -6371,7 +7122,7 @@ static float resolve_flex_cross_len(LunaElement* ch, int row_mode, int align,
         float ww = flex_content_width(ch);
         if (available_cross >= 0.0f && ww > available_cross) ww = available_cross;
         float min_w = css_outer_width(ch, ch->css_min_width);
-        float max_w = css_outer_width(ch, ch->css_max_width);
+        float max_w = resolved_max_width(ch, available_cross);
         if (ch->has_min_width && ww < min_w) ww = min_w;
         if (ch->has_max_width && ww > max_w) ww = max_w;
         ch->w = ww;
@@ -6387,9 +7138,26 @@ static void layout_flex_line(LunaElement* cont, int* kids, int n, int row_mode,
     int grow_n = 0;
     float grow_sum = 0.0f;
 
+    /* Column flex: resolve the cross size (width) before measuring main size
+     * (height).  Wrapping row children such as #skin_cards need a definite
+     * width to pack lines; stretching after the height measure left them at a
+     * one-row intrinsic height and overlapped later Appearance sections. */
+    if (!row_mode) {
+        for (int k = 0; k < n; k++) {
+            LunaElement* ch = &elements[kids[k]];
+            if (ch->css_positioned & 1) continue;
+            int align = child_cross_align(ch, cont, 0);
+            if (ch->pct_w) {
+                ch->w = inner_cross * ch->raw_w + ch->raw_w_off;
+            } else if (align == 3 && !ch->has_css_width) {
+                ch->w = inner_cross;
+            }
+        }
+    }
+
     for (int k = 0; k < n; k++) {
         LunaElement* ch = &elements[kids[k]];
-        float ml = flex_main_size(ch, row_mode);
+        float ml = flex_main_size(ch, row_mode, inner_main);
         float margin_before = row_mode ? ch->margin_left : ch->margin_top;
         float margin_after = row_mode ? ch->margin_right : ch->margin_bottom;
         main_sz[k] = ml;
@@ -6615,7 +7383,8 @@ static void layout_flex_container(int container_idx) {
         int flush = 0;
         if (k < n) {
             LunaElement* ch = &elements[kids[k]];
-            float item_main = flex_main_size(ch, 1) + (line_main > 0.0f ? gap : 0.0f);
+            float item_main = flex_main_size(ch, 1, inner_main) +
+                              (line_main > 0.0f ? gap : 0.0f);
             if (line_main > 0.0f && line_main + item_main > inner_main + 0.5f)
                 flush = 1;
             else
@@ -6629,7 +7398,21 @@ static void layout_flex_container(int container_idx) {
         if (line_n > 0 && num_lines < 64) {
             float line_cross = 0.0f;
             for (int li = 0; li < line_n; li++) {
-                float ch_cross = elements[kids[line_start + li]].h;
+                LunaElement* ch = &elements[kids[line_start + li]];
+                /* Hypothetical cross size before stretch — prefer definite
+                 * height so wrap lines don't inherit a previous stretch. */
+                float ch_cross;
+                if (ch->has_css_height && !ch->pct_h)
+                    ch_cross = css_outer_height(ch, ch->css_height);
+                else if (ch->has_min_height)
+                    ch_cross = css_outer_height(ch, ch->css_min_height);
+                else
+                    ch_cross = flow_content_height(ch);
+                if (ch->has_min_height) {
+                    float mh = css_outer_height(ch, ch->css_min_height);
+                    if (ch_cross < mh) ch_cross = mh;
+                }
+                ch_cross += ch->margin_top + ch->margin_bottom;
                 if (ch_cross > line_cross) line_cross = ch_cross;
             }
             lines[num_lines].start = line_start;
@@ -6638,7 +7421,7 @@ static void layout_flex_container(int container_idx) {
             num_lines++;
         }
         line_start = k;
-        line_main = (k < n) ? flex_main_size(&elements[kids[k]], 1) : 0.0f;
+        line_main = (k < n) ? flex_main_size(&elements[kids[k]], 1, inner_main) : 0.0f;
     }
 
     float total_cross = 0.0f;
@@ -6679,11 +7462,15 @@ static void layout_flex_container(int container_idx) {
         int line_kids[MAX_ELEMENTS];
         for (int li = 0; li < lines[i].count; li++)
             line_kids[li] = kids[lines[i].start + li];
-        layout_flex_line(cont, line_kids, lines[i].count, 1, pad_main, pad_cross, inner_main, inner_cross, gap);
+        /* Stretch / align against THIS line's cross size, not the container. */
+        float line_cross = lines[i].cross_sz;
+        layout_flex_line(cont, line_kids, lines[i].count, 1, pad_main, pad_cross,
+                         inner_main, line_cross, gap);
         if (cont->align_content == FLEX_ALIGN_STRETCH) {
             for (int li = 0; li < lines[i].count; li++) {
                 LunaElement* ch = &elements[line_kids[li]];
-                if (!(ch->css_positioned & 2)) ch->h = lines[i].cross_sz;
+                if (!(ch->css_positioned & 2) && !ch->has_css_height && !ch->pct_h)
+                    ch->h = line_cross;
             }
         }
         for (int li = 0; li < lines[i].count; li++) {
@@ -6699,7 +7486,9 @@ static void layout_flex_container(int container_idx) {
         float needed_h = cross_cursor + pad_cross_end;
         if (cont->has_min_height && needed_h < cont->css_min_height)
             needed_h = cont->css_min_height;
-        if (needed_h > cont->h) cont->h = needed_h;
+        if (cont->has_max_height && needed_h > cont->css_max_height)
+            needed_h = cont->css_max_height;
+        cont->h = needed_h;
     }
     layout_inline_text_after_flex(cont, kids, n);
 }
@@ -7139,9 +7928,14 @@ void update_layout_pass(void) {
     memset(g_intrinsic_width_valid, 0, sizeof(g_intrinsic_width_valid));
     update_layout();
     layout_flex_containers();
+    /* Wrapping flex rows finalize their height after a definite width is known.
+     * A second pass lets column parents (Appearance panel) re-pack siblings
+     * against that height instead of leaving wallpaper/cursor sections overlapped. */
+    layout_flex_containers();
     if (size_auto_positioned_containers()) {
         memset(g_intrinsic_width_valid, 0, sizeof(g_intrinsic_width_valid));
         update_layout();
+        layout_flex_containers();
         layout_flex_containers();
     }
     apply_relative_offsets();
@@ -7813,43 +8607,6 @@ static void apply_sticky_clip_bands(int idx, float* cx, float* cy, float* cw, fl
     }
 }
 
-static int get_overflow_clip_rect(int idx, float* cx, float* cy, float* cw, float* ch) {
-    int has = 0;
-    int p = elements[idx].parent_idx;
-    while (p != -1) {
-        LunaElement* par = &elements[p];
-        if (overflow_clips(par->overflow_x) || overflow_clips(par->overflow_y)) {
-            float ptx, pty;
-            accum_ancestor_transform(p, &ptx, &pty);
-            ptx += par->cur_tx; pty += par->cur_ty;
-            float px = par->x + par->border_width + par->pad_l + ptx;
-            float py = par->y + par->border_width + par->pad_t + pty;
-            float pw = par->w - par->border_width * 2.0f - par->pad_l - par->pad_r;
-            float ph = par->h - par->border_width * 2.0f - par->pad_t - par->pad_b;
-            if (pw <= 0.0f || ph <= 0.0f) return 0;
-            float clip_x = overflow_clips(par->overflow_x) ? px : -1e7f;
-            float clip_y = overflow_clips(par->overflow_y) ? py : -1e7f;
-            float clip_w = overflow_clips(par->overflow_x) ? pw : 2e7f;
-            float clip_h = overflow_clips(par->overflow_y) ? ph : 2e7f;
-            if (!has) {
-                *cx = clip_x; *cy = clip_y; *cw = clip_w; *ch = clip_h;
-                has = 1;
-            } else {
-                float nx = (*cx > clip_x) ? *cx : clip_x;
-                float ny = (*cy > clip_y) ? *cy : clip_y;
-                float nr = (*cx + *cw < clip_x + clip_w) ? *cx + *cw : clip_x + clip_w;
-                float nb = (*cy + *ch < clip_y + clip_h) ? *cy + *ch : clip_y + clip_h;
-                *cx = nx; *cy = ny;
-                *cw = nr - nx; *ch = nb - ny;
-            }
-            if (*cw <= 0.0f || *ch <= 0.0f) return 0;
-        }
-        p = par->parent_idx;
-    }
-    if (has) apply_sticky_clip_bands(idx, cx, cy, cw, ch);
-    return has;
-}
-
 /* Returns nearest ancestor index with border_radius > 0 AND overflow clips, or -1. */
 static int find_rounded_clip_ancestor(int idx) {
     int p = elements[idx].parent_idx;
@@ -7869,20 +8626,371 @@ static int elem_is_self_or_descendant(int idx, int root) {
     return 0;
 }
 
-static void set_element_scissor(int idx, int fbw, int fbh) {
+/* ── Per-frame ancestor cache ───────────────────────────────────────────────
+ *
+ * Nearly every draw-time question about an element used to be answered by
+ * walking its parent chain: effective opacity, the accumulated transform of
+ * its ancestors, the nearest rounded clip ancestor, whether an ancestor's
+ * overflow clips it away, and the scissor rect.  The scissor rect was the
+ * worst of them — it walked the chain and, for every clipping ancestor it
+ * found, walked the chain again to accumulate that ancestor's transform, so it
+ * cost O(depth²) and the render loop asked for it two or three times per
+ * element.
+ *
+ * All of those values are pure functions of the element tree, and a parent's
+ * answer is exactly what its children need, so one linear pass computes them
+ * all.  The pass is rebuilt at the top of every render instead of being
+ * invalidated by hand: it is a few hundred O(1) steps, far cheaper than the
+ * walks it replaces, and it can never go stale.  This matters most for the
+ * Wayland shell, which renders a dozen layer surfaces per frame and therefore
+ * paid the whole cost a dozen times over.
+ *
+ * Clip rects use ±LUNA_RC_INF on an axis the ancestor does not clip, which
+ * reproduces the per-axis tests the walking versions performed. */
+#define LUNA_RC_INF 1e7f
+
+typedef struct {
+    float eff_op;              /* opacity of self × every ancestor */
+    float anc_tx, anc_ty;      /* summed cur_tx/cur_ty of ancestors only */
+    int   clip_anc;            /* nearest rounded + clipping ancestor, or -1 */
+    unsigned char vis;         /* no display:none anywhere up the chain */
+    unsigned char clipped;     /* some ancestor clips overflow */
+    unsigned char in_root;     /* self-or-descendant of g_render_root */
+    /* Ancestor clip box in draw space (transforms applied) — the scissor. */
     float cx, cy, cw, ch;
-    if (!get_overflow_clip_rect(idx, &cx, &cy, &cw, &ch)) return;
+    /* Ancestor clip box in layout space — the cheap "is it culled" test. */
+    float lx, ly, lw, lh;
+} LunaRenderCache;
+
+static LunaRenderCache g_rc[LUNA_UI_MAX_ELEMENTS];
+
+static void rc_rect_init(float* x, float* y, float* w, float* h) {
+    *x = -LUNA_RC_INF; *y = -LUNA_RC_INF;
+    *w = 2.0f * LUNA_RC_INF; *h = 2.0f * LUNA_RC_INF;
+}
+
+static void rc_rect_isect(float* x, float* y, float* w, float* h,
+                          float ox, float oy, float ow, float oh) {
+    float nx = *x > ox ? *x : ox;
+    float ny = *y > oy ? *y : oy;
+    float nr = (*x + *w < ox + ow) ? *x + *w : ox + ow;
+    float nb = (*y + *h < oy + oh) ? *y + *h : oy + oh;
+    *x = nx; *y = ny;
+    *w = nr - nx > 0.0f ? nr - nx : 0.0f;
+    *h = nb - ny > 0.0f ? nb - ny : 0.0f;
+}
+
+/* Fill one entry from scratch.  Only needed for the (never observed in the
+ * shell's layouts) case of a parent that sits *after* its child in the element
+ * array; the incremental path below cannot use a parent it has not built yet. */
+static void rc_fill_slow(int i) {
+    LunaRenderCache* c = &g_rc[i];
+    c->eff_op = element_effective_opacity(i);
+    accum_ancestor_transform(i, &c->anc_tx, &c->anc_ty);
+    c->clip_anc = find_rounded_clip_ancestor(i);
+    c->vis = (unsigned char)is_visible(i);
+    c->in_root = (unsigned char)(g_render_root < 0 || elem_is_self_or_descendant(i, g_render_root));
+    c->clipped = 0;
+    rc_rect_init(&c->cx, &c->cy, &c->cw, &c->ch);
+    rc_rect_init(&c->lx, &c->ly, &c->lw, &c->lh);
+    for (int p = elements[i].parent_idx; p != -1; p = elements[p].parent_idx) {
+        LunaElement* par = &elements[p];
+        if (!overflow_clips(par->overflow_x) && !overflow_clips(par->overflow_y)) continue;
+        float ptx, pty;
+        accum_ancestor_transform(p, &ptx, &pty);
+        ptx += par->cur_tx; pty += par->cur_ty;
+        float pw = par->w - par->border_width * 2.0f - par->pad_l - par->pad_r;
+        float ph = par->h - par->border_width * 2.0f - par->pad_t - par->pad_b;
+        float px = par->x + par->border_width + par->pad_l;
+        float py = par->y + par->border_width + par->pad_t;
+        int cx_on = overflow_clips(par->overflow_x);
+        int cy_on = overflow_clips(par->overflow_y);
+        c->clipped = 1;
+        rc_rect_isect(&c->cx, &c->cy, &c->cw, &c->ch,
+                      cx_on ? px + ptx : -LUNA_RC_INF, cy_on ? py + pty : -LUNA_RC_INF,
+                      cx_on ? pw : 2.0f * LUNA_RC_INF, cy_on ? ph : 2.0f * LUNA_RC_INF);
+        rc_rect_isect(&c->lx, &c->ly, &c->lw, &c->lh,
+                      cx_on ? px : -LUNA_RC_INF, cy_on ? py : -LUNA_RC_INF,
+                      cx_on ? pw : 2.0f * LUNA_RC_INF, cy_on ? ph : 2.0f * LUNA_RC_INF);
+    }
+}
+
+static void rc_build(void) {
+    for (int i = 0; i < elem_count; i++) {
+        LunaElement* e = &elements[i];
+        LunaRenderCache* c = &g_rc[i];
+        int p = e->parent_idx;
+        if (p >= i || p < -1) {          /* out-of-order parent: rare/never */
+            rc_fill_slow(i);
+            continue;
+        }
+        if (p < 0) {
+            c->eff_op  = e->opacity;
+            c->anc_tx  = 0.0f;
+            c->anc_ty  = 0.0f;
+            c->clip_anc = -1;
+            c->vis     = (unsigned char)!e->display_none;
+            c->clipped = 0;
+            c->in_root = (unsigned char)(g_render_root < 0 || i == g_render_root);
+            rc_rect_init(&c->cx, &c->cy, &c->cw, &c->ch);
+            rc_rect_init(&c->lx, &c->ly, &c->lw, &c->lh);
+            continue;
+        }
+        const LunaRenderCache* pc = &g_rc[p];
+        LunaElement* par = &elements[p];
+        c->eff_op  = pc->eff_op * e->opacity;
+        c->anc_tx  = pc->anc_tx + par->cur_tx;
+        c->anc_ty  = pc->anc_ty + par->cur_ty;
+        c->vis     = (unsigned char)(pc->vis && !e->display_none);
+        c->in_root = (unsigned char)(g_render_root < 0 || i == g_render_root || pc->in_root);
+        int cx_on = overflow_clips(par->overflow_x);
+        int cy_on = overflow_clips(par->overflow_y);
+        c->clip_anc = (par->border_radius > 0.0f && (cx_on || cy_on)) ? p : pc->clip_anc;
+        c->clipped  = pc->clipped;
+        c->cx = pc->cx; c->cy = pc->cy; c->cw = pc->cw; c->ch = pc->ch;
+        c->lx = pc->lx; c->ly = pc->ly; c->lw = pc->lw; c->lh = pc->lh;
+        if (cx_on || cy_on) {
+            /* c->anc_tx already includes par->cur_tx, which is exactly the
+             * transform that moves the parent's own padding box. */
+            float pw = par->w - par->border_width * 2.0f - par->pad_l - par->pad_r;
+            float ph = par->h - par->border_width * 2.0f - par->pad_t - par->pad_b;
+            float px = par->x + par->border_width + par->pad_l;
+            float py = par->y + par->border_width + par->pad_t;
+            c->clipped = 1;
+            rc_rect_isect(&c->cx, &c->cy, &c->cw, &c->ch,
+                          cx_on ? px + c->anc_tx : -LUNA_RC_INF,
+                          cy_on ? py + c->anc_ty : -LUNA_RC_INF,
+                          cx_on ? pw : 2.0f * LUNA_RC_INF,
+                          cy_on ? ph : 2.0f * LUNA_RC_INF);
+            rc_rect_isect(&c->lx, &c->ly, &c->lw, &c->lh,
+                          cx_on ? px : -LUNA_RC_INF, cy_on ? py : -LUNA_RC_INF,
+                          cx_on ? pw : 2.0f * LUNA_RC_INF,
+                          cy_on ? ph : 2.0f * LUNA_RC_INF);
+        }
+    }
+}
+
+/* Cached counterpart of is_rendered() for the draw loop. */
+static int rc_is_rendered(int idx) {
+    const LunaRenderCache* c = &g_rc[idx];
+    if (!c->vis || elements[idx].visibility_hidden) return 0;
+    if (!c->clipped) return 1;
+    if (c->lw <= 0.0f || c->lh <= 0.0f) return 0;
+    LunaElement* e = &elements[idx];
+    return rects_intersect(e->x, e->y, e->w, e->h, c->lx, c->ly, c->lw, c->lh);
+}
+
+/* ── Render damage ──────────────────────────────────────────────────────────
+ *
+ * A host that repaints a surface because one label changed still hands the
+ * compositor a whole new buffer, and a compositor with no damage information
+ * has to assume every pixel of it is new.  On a full-screen wallpaper layer
+ * that turns a clock tick into a whole-desktop recomposite, once a second,
+ * forever — exactly the sort of regular hitch that is visible from across the
+ * room.
+ *
+ * So the renderer remembers, per element, the rectangle it covered and a hash
+ * of everything that decided its pixels, and reports the union of the rects
+ * that no longer match.  The hash is taken over the element's whole struct, so
+ * it cannot miss a field: it can only ever report *more* damage than strictly
+ * necessary, which is always safe. */
+typedef struct {
+    float x, y, w, h;   /* surface-space bounds at the last render */
+    uint64_t hash;
+    unsigned char drawn;
+} LunaDrawRec;
+
+static LunaDrawRec g_draw_rec[LUNA_UI_MAX_ELEMENTS];
+static float g_dmg_x0, g_dmg_y0, g_dmg_x1, g_dmg_y1;
+static int   g_dmg_any;
+static int   g_dmg_enabled = 0;
+
+void luna_set_damage_tracking(int enabled) {
+    if (!enabled == !g_dmg_enabled) return;
+    g_dmg_enabled = enabled ? 1 : 0;
+    /* Turning it on mid-session must not report "unchanged" against records
+     * left over from before. */
+    for (int i = 0; i < LUNA_UI_MAX_ELEMENTS; i++) g_draw_rec[i].drawn = 0;
+}
+
+static void damage_reset(void) {
+    g_dmg_any = 0;
+    g_dmg_x0 = g_dmg_y0 = 0.0f;
+    g_dmg_x1 = g_dmg_y1 = 0.0f;
+}
+
+static void damage_add(float x, float y, float w, float h) {
+    if (w <= 0.0f || h <= 0.0f) return;
+    if (!g_dmg_any) {
+        g_dmg_x0 = x; g_dmg_y0 = y;
+        g_dmg_x1 = x + w; g_dmg_y1 = y + h;
+        g_dmg_any = 1;
+        return;
+    }
+    if (x < g_dmg_x0) g_dmg_x0 = x;
+    if (y < g_dmg_y0) g_dmg_y0 = y;
+    if (x + w > g_dmg_x1) g_dmg_x1 = x + w;
+    if (y + h > g_dmg_y1) g_dmg_y1 = y + h;
+}
+
+static uint64_t damage_hash_element(int idx) {
+    /* Hash only paint-relevant fields.  LunaElement carries multi-kilobyte
+     * layout tables (grid areas, aria strings, unused trackers); FNV-ing the
+     * whole struct on every draw of every element was measurable on the
+     * console session whenever the wallpaper layer refreshed.  Omitting a
+     * paint field can only over-report damage (safe); under-reporting is
+     * avoided by covering every input the draw loop actually samples. */
+    uint64_t h = 0xcbf29ce484222325ULL;
+#define MIX_U64(v) do { h ^= (uint64_t)(v); h *= 0x100000001b3ULL; } while (0)
+#define MIX_F32(f) do { \
+        uint32_t bits_; \
+        memcpy(&bits_, &(f), sizeof(bits_)); \
+        MIX_U64(bits_); \
+    } while (0)
+    const LunaElement* e = &elements[idx];
+    const LunaRenderCache* c = &g_rc[idx];
+    MIX_F32(e->x); MIX_F32(e->y); MIX_F32(e->w); MIX_F32(e->h);
+    MIX_F32(e->cur_tx); MIX_F32(e->cur_ty); MIX_F32(e->cur_scale);
+    MIX_F32(e->cur_r); MIX_F32(e->cur_g); MIX_F32(e->cur_b); MIX_F32(e->cur_a);
+    MIX_F32(e->cur_bd_r); MIX_F32(e->cur_bd_g); MIX_F32(e->cur_bd_b); MIX_F32(e->cur_bd_a);
+    MIX_F32(e->r); MIX_F32(e->g); MIX_F32(e->b); MIX_F32(e->a);
+    MIX_F32(e->t_r); MIX_F32(e->t_g); MIX_F32(e->t_b); MIX_F32(e->t_a);
+    MIX_F32(e->bd_r); MIX_F32(e->bd_g); MIX_F32(e->bd_b); MIX_F32(e->bd_a);
+    MIX_F32(e->opacity); MIX_F32(e->border_radius); MIX_F32(e->border_width);
+    MIX_F32(e->font_size); MIX_F32(e->scroll_top); MIX_F32(e->scroll_left);
+    MIX_U64(e->display_none); MIX_U64(e->font_bold); MIX_U64(e->font_face);
+    MIX_U64(e->text_align); MIX_U64(e->has_shadow); MIX_U64(e->shadow_count);
+    MIX_U64(e->has_gradient); MIX_U64(e->grad_type); MIX_U64(e->grad_stop_count);
+    MIX_U64(e->has_backdrop_blur); MIX_U64(e->has_bg_image); MIX_U64(e->bg_image_tex);
+    MIX_U64(e->has_outline); MIX_U64(e->overflow_x); MIX_U64(e->overflow_y);
+    MIX_U64(e->is_hovered); MIX_U64(e->is_active); MIX_U64(e->text_decoration);
+    MIX_F32(e->backdrop_blur_radius); MIX_F32(e->backdrop_saturate); MIX_F32(e->backdrop_brightness);
+    MIX_F32(e->rad_c[0]); MIX_F32(e->rad_c[1]); MIX_F32(e->rad_c[2]); MIX_F32(e->rad_c[3]);
+    for (int si = 0; si < e->shadow_count && si < LUNA_MAX_SHADOWS; si++) {
+        MIX_F32(e->shadows[si].dx); MIX_F32(e->shadows[si].dy);
+        MIX_F32(e->shadows[si].blur); MIX_F32(e->shadows[si].spread);
+        MIX_F32(e->shadows[si].r); MIX_F32(e->shadows[si].g);
+        MIX_F32(e->shadows[si].b); MIX_F32(e->shadows[si].a);
+        MIX_U64(e->shadows[si].inset);
+    }
+    for (int gi = 0; gi < e->grad_stop_count && gi < MAX_GRAD_STOPS; gi++) {
+        MIX_F32(e->grad_stop_pos[gi]);
+        MIX_F32(e->grad_stop_r[gi]); MIX_F32(e->grad_stop_g[gi]);
+        MIX_F32(e->grad_stop_b[gi]); MIX_F32(e->grad_stop_a[gi]);
+    }
+    /* Text: only the used prefix, not the whole 512-byte slot. */
+    for (const unsigned char* p = (const unsigned char*)e->text; *p; p++)
+        MIX_U64(*p);
+    MIX_F32(c->eff_op); MIX_F32(c->anc_tx); MIX_F32(c->anc_ty);
+    MIX_F32(c->cx); MIX_F32(c->cy); MIX_F32(c->cw); MIX_F32(c->ch);
+    MIX_U64(c->clip_anc + 1);
+    if (idx == g_focused_element_idx) {
+        MIX_U64(0x9e3779b97f4a7c15ULL ^ (uint64_t)(g_focus_via_keyboard != 0));
+        if (elements[idx].is_input)
+            MIX_U64((uint64_t)(int64_t)(luna_now() * 2.0));
+    }
+#undef MIX_U64
+#undef MIX_F32
+    return h;
+}
+
+/* This element is being drawn at these surface-space bounds. */
+static void damage_note(int idx, float x, float y, float w, float h) {
+    if (!g_dmg_enabled) return;
+    uint64_t hash = damage_hash_element(idx);
+    LunaDrawRec* r = &g_draw_rec[idx];
+    if (!r->drawn || r->hash != hash ||
+        r->x != x || r->y != y || r->w != w || r->h != h) {
+        if (r->drawn) damage_add(r->x, r->y, r->w, r->h);
+        damage_add(x, y, w, h);
+    }
+    r->x = x; r->y = y; r->w = w; r->h = h;
+    r->hash = hash;
+    r->drawn = 1;
+}
+
+/* This element is no longer drawn; whatever it used to cover is now stale. */
+static void damage_drop(int idx) {
+    if (!g_dmg_enabled) return;
+    LunaDrawRec* r = &g_draw_rec[idx];
+    if (!r->drawn) return;
+    damage_add(r->x, r->y, r->w, r->h);
+    r->drawn = 0;
+}
+
+int luna_render_damage(float* x, float* y, float* w, float* h) {
+    if (!g_dmg_enabled || !g_dmg_any) return 0;
+    if (x) *x = g_dmg_x0;
+    if (y) *y = g_dmg_y0;
+    if (w) *w = g_dmg_x1 - g_dmg_x0;
+    if (h) *h = g_dmg_y1 - g_dmg_y0;
+    return 1;
+}
+
+/* Would drawing this element at these bounds change a pixel vs the last
+ * committed frame?  Leaves g_draw_rec untouched so a subsequent real paint
+ * still records the change. */
+static int damage_would_change(int idx, float x, float y, float w, float h) {
+    if (!g_dmg_enabled) return 1;
+    uint64_t hash = damage_hash_element(idx);
+    LunaDrawRec* r = &g_draw_rec[idx];
+    if (!r->drawn) return 1;
+    if (r->hash != hash) return 1;
+    if (r->x != x || r->y != y || r->w != w || r->h != h) return 1;
+    return 0;
+}
+
+static int damage_would_drop(int idx) {
+    if (!g_dmg_enabled) return 0;
+    return g_draw_rec[idx].drawn != 0;
+}
+
+static void rc_element_draw_bounds(int idx, float* out_x, float* out_y,
+                                   float* out_w, float* out_h) {
+    LunaElement* e = &elements[idx];
+    const LunaRenderCache* c = &g_rc[idx];
+    float scale = e->cur_scale;
+    float dw = e->w * scale, dh = e->h * scale;
+    *out_x = e->x + (e->w - dw) * 0.5f + e->cur_tx + c->anc_tx;
+    *out_y = e->y + (e->h - dh) * 0.5f + e->cur_ty + c->anc_ty;
+    *out_w = dw;
+    *out_h = dh;
+}
+
+/* Same scissor, read out of the per-frame cache instead of re-walking the
+ * parent chain once per clipping ancestor.  Only valid between rc_build() and
+ * the end of the render pass that built it.  It also remembers the rect it
+ * last programmed: the draw loop asks for the same scissor two or three times
+ * per element (shadow pass, element pass, post-backdrop restore), and a
+ * redundant glScissor still costs a driver state change. */
+static int g_rc_scissor_on = -1;
+static int g_rc_scissor[4] = {0, 0, 0, 0};
+
+static void rc_scissor_reset(void) { g_rc_scissor_on = -1; }
+
+static void rc_set_element_scissor(int idx, int fbw, int fbh) {
+    const LunaRenderCache* c = &g_rc[idx];
+    if (!c->clipped || c->cw <= 0.0f || c->ch <= 0.0f) return;
+    float cx = c->cx, cy = c->cy, cw = c->cw, ch = c->ch;
+    apply_sticky_clip_bands(idx, &cx, &cy, &cw, &ch);
+    if (cw <= 0.0f || ch <= 0.0f) return;
     float res_x = LUNA_RRES_X, res_y = LUNA_RRES_Y;
     float sx = (float)fbw / res_x;
     float sy = (float)fbh / res_y;
-    int sc_x = (int)((cx - g_render_off_x) * sx + 0.5f);
-    int sc_y = (int)((res_y - (cy - g_render_off_y) - ch) * sy + 0.5f);
-    int sc_w = (int)(cw * sx + 0.5f);
-    int sc_h = (int)(ch * sy + 0.5f);
-    if (sc_w < 0) sc_w = 0;
-    if (sc_h < 0) sc_h = 0;
+    int sc[4];
+    sc[0] = (int)((cx - g_render_off_x) * sx + 0.5f);
+    sc[1] = (int)((res_y - (cy - g_render_off_y) - ch) * sy + 0.5f);
+    sc[2] = (int)(cw * sx + 0.5f);
+    sc[3] = (int)(ch * sy + 0.5f);
+    if (sc[2] < 0) sc[2] = 0;
+    if (sc[3] < 0) sc[3] = 0;
+    if (g_rc_scissor_on == 1 && sc[0] == g_rc_scissor[0] && sc[1] == g_rc_scissor[1] &&
+        sc[2] == g_rc_scissor[2] && sc[3] == g_rc_scissor[3])
+        return;
+    g_rc_scissor_on = 1;
+    for (int i = 0; i < 4; i++) g_rc_scissor[i] = sc[i];
     glEnable(GL_SCISSOR_TEST);
-    glScissor(sc_x, sc_y, sc_w, sc_h);
+    glScissor(sc[0], sc[1], sc[2], sc[3]);
 }
 
 static int anim_near(float a, float b) {
@@ -7960,6 +9068,81 @@ int luna_visuals_settling_under(int root_idx) {
 
 int luna_visuals_settling(void) {
     return luna_visuals_settling_under(-1);
+}
+
+/* Answer "is this subtree still easing?" for several roots at once.
+ *
+ * The Wayland shell has to ask separately for every layer surface so a dock
+ * magnification does not repaint the menubar, and it also wants the global
+ * answer to pick its poll timeout.  Asking one root at a time meant one full
+ * scan of the element array per surface, each element walking its parent chain
+ * — every idle frame, whether or not anything was animating.  One pass with an
+ * inherited root bitmask gives the same answers.
+ *
+ * Bit k of *out_mask is set when roots[k]'s subtree is settling; a root of -1
+ * means "whole document" and its bit tracks everything.  Returns 1 when any
+ * element at all is still easing. */
+int luna_visuals_settling_mask(const int* roots, int nroots, unsigned* out_mask) {
+    static unsigned own[LUNA_UI_MAX_ELEMENTS];
+    unsigned mask = 0, any_bits = 0;
+    int any = 0;
+    if (nroots > 32) nroots = 32;
+    for (int k = 0; k < nroots; k++)
+        if (roots[k] < 0) any_bits |= 1u << k;
+
+    for (int i = 0; i < elem_count; i++) {
+        LunaElement* e = &elements[i];
+        int p = e->parent_idx;
+        unsigned o = any_bits;
+        if (p >= 0 && p < i) {
+            o |= own[p];
+        } else if (p >= 0) {
+            /* Parent stored after its child — walk for this one node. */
+            for (int k = 0; k < nroots; k++)
+                if (roots[k] >= 0 && elem_is_self_or_descendant(i, roots[k]))
+                    o |= 1u << k;
+        }
+        for (int k = 0; k < nroots; k++)
+            if (roots[k] == i) o |= 1u << k;
+        own[i] = o;
+
+        if (e->display_none) continue;
+        if (e->has_css_animation && e->anim_name[0]) continue;
+        float press_scale = (e->cursor_pointer && e->is_active && e->drag_mode != 1) ? 0.96f : 1.0f;
+        float target_scale = e->transform_scale * press_scale;
+        float target_a = e->a <= 0.001f ? 0.0f : (e->a >= 0.999f ? 1.0f : e->a);
+        if (!anim_near(e->cur_r, e->r) || !anim_near(e->cur_g, e->g) ||
+            !anim_near(e->cur_b, e->b) || !anim_near(e->cur_a, target_a) ||
+            !anim_near(e->cur_scale, target_scale) ||
+            !anim_near(e->cur_tx, e->transform_tx) ||
+            !anim_near(e->cur_ty, e->transform_ty)) {
+            any = 1;
+            mask |= o;
+        }
+    }
+    if (out_mask) *out_mask = mask;
+    return any;
+}
+
+static const CssKeyframe* find_keyframe_anim(const char* name);
+
+/* Is any CSS @keyframes animation actually running under `root_idx`?
+ *
+ * The shell repaints its wallpaper layer on a timer so aurora/star keyframes
+ * keep moving.  With a still wallpaper — a plain colour or a photo — there is
+ * nothing to advance, and that timer was pure waste: a full-screen GL frame
+ * plus a full-screen compositor recomposite, several times a second, forever.
+ * `root_idx < 0` asks about the whole document. */
+int luna_css_anim_running_under(int root_idx) {
+    for (int i = 0; i < elem_count; i++) {
+        LunaElement* e = &elements[i];
+        if (!e->has_css_animation || !e->anim_name[0] || e->display_none) continue;
+        if (!is_visible(i)) continue;
+        if (root_idx >= 0 && !elem_is_self_or_descendant(i, root_idx)) continue;
+        if (!find_keyframe_anim(e->anim_name)) continue;
+        return 1;
+    }
+    return 0;
 }
 
 static float css_anim_ease(int easing, float t) {
@@ -8245,13 +9428,52 @@ static void build_render_order() {
 int bake_font_set(const unsigned char* ttf_buffer, FontAtlas* atlases) {
     int offset = stbtt_GetFontOffsetForIndex(ttf_buffer, 0);
     if (offset < 0) offset = 0;
+    stbtt_fontinfo info;
+    if (!stbtt_InitFont(&info, ttf_buffer, offset)) return 0;
     for (int i = 0; i < NUM_FONT_SIZES; i++) {
-        static unsigned char temp_bitmap[512 * 512];
-        stbtt_BakeFontBitmap(ttf_buffer, offset, font_sizes[i],
-                             temp_bitmap, 512, 512, 32, 96, atlases[i].cdata);
+        static unsigned char temp_bitmap[LUNA_ASCII_ATLAS_SIZE * LUNA_ASCII_ATLAS_SIZE];
+        memset(temp_bitmap, 0, sizeof(temp_bitmap));
+        memset(atlases[i].cdata, 0, sizeof(atlases[i].cdata));
+
+        float raster_scale = stbtt_ScaleForMappingEmToPixels(&info, font_sizes[i]);
+        int pack_x = 1, pack_y = 1, row_h = 0;
+        for (int cp = 32; cp < 128; cp++) {
+            int x0, y0, x1, y1, advance, lsb;
+            stbtt_GetCodepointBitmapBox(&info, cp, raster_scale, raster_scale,
+                                        &x0, &y0, &x1, &y1);
+            stbtt_GetCodepointHMetrics(&info, cp, &advance, &lsb);
+            int gw = x1 - x0, gh = y1 - y0;
+            if (gw < 1) gw = 1;
+            if (gh < 1) gh = 1;
+            if (pack_x + gw + 2 >= LUNA_ASCII_ATLAS_SIZE) {
+                pack_x = 1;
+                pack_y += row_h + 2;
+                row_h = 0;
+            }
+            if (pack_y + gh + 2 >= LUNA_ASCII_ATLAS_SIZE) return 0;
+
+            int ax = pack_x + 1, ay = pack_y + 1;
+            stbtt_MakeCodepointBitmap(&info,
+                &temp_bitmap[ay * LUNA_ASCII_ATLAS_SIZE + ax], gw, gh,
+                LUNA_ASCII_ATLAS_SIZE,
+                raster_scale, raster_scale, cp);
+            stbtt_bakedchar* bc = &atlases[i].cdata[cp - 32];
+            bc->x0 = (unsigned short)ax;
+            bc->y0 = (unsigned short)ay;
+            bc->x1 = (unsigned short)(ax + gw);
+            bc->y1 = (unsigned short)(ay + gh);
+            bc->xoff = (float)x0;
+            bc->yoff = (float)y0;
+            bc->xadvance = (float)advance * raster_scale;
+            pack_x += gw + 3;
+            if (gh > row_h) row_h = gh;
+            (void)lsb;
+        }
         glGenTextures(1, &atlases[i].tex);
         glBindTexture(GL_TEXTURE_2D, atlases[i].tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, 512, 512, 0, GL_RED, GL_UNSIGNED_BYTE, temp_bitmap);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RED,
+                     LUNA_ASCII_ATLAS_SIZE, LUNA_ASCII_ATLAS_SIZE, 0,
+                     GL_RED, GL_UNSIGNED_BYTE, temp_bitmap);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         atlases[i].loaded = 1;
@@ -8355,7 +9577,7 @@ void init_font() {
 
     scan_fonts_dir("/usr/share/fonts", &reg, &bold_list);
     scan_fonts_dir("ui/fonts", &reg, &bold_list);
-    scan_fonts_dir("fonts", &reg, &bold_list);
+    scan_fonts_dir("skins/fonts", &reg, &bold_list);
 
     const char* env_ui = getenv("LUNA_FONT_REGULAR");
     unsigned char* reg_buf = NULL;
@@ -8367,9 +9589,9 @@ void init_font() {
      * before probing arbitrary system sans-serif fonts, which vary by host. */
     if (!reg_buf) {
         const char* inter_cands[] = {
-            "fonts/web/Inter-Regular.ttf",
-            "apps/luna-ui/fonts/web/Inter-Regular.ttf",
-            "../fonts/web/Inter-Regular.ttf",
+            "skins/fonts/web/Inter-Regular.ttf",
+            "apps/luna-ui/skins/fonts/web/Inter-Regular.ttf",
+            "../skins/fonts/web/Inter-Regular.ttf",
         };
         for (size_t i = 0; i < sizeof(inter_cands) / sizeof(inter_cands[0]); i++) {
             reg_buf = read_file_bytes(inter_cands[i], &g_font_ttf_sz);
@@ -8415,9 +9637,9 @@ void init_font() {
              * system installation.  Distros can ship an older subset of the
              * same named font (notably without f1eb/Wi-Fi), which otherwise
              * makes browser and native output diverge. */
-            "fonts/LunaSymbols-Solid.otf",
-            "../fonts/LunaSymbols-Solid.otf",
-            "apps/luna-ui/fonts/LunaSymbols-Solid.otf",
+            "skins/fonts/LunaSymbols-Solid.otf",
+            "../skins/fonts/LunaSymbols-Solid.otf",
+            "apps/luna-ui/skins/fonts/LunaSymbols-Solid.otf",
             "/usr/share/fonts/luna/LunaSymbols-Solid.otf",
             "/usr/share/fonts/LunaSymbols-Solid.otf",
             "/usr/local/share/fonts/luna/LunaSymbols-Solid.otf",
@@ -8454,15 +9676,15 @@ void init_font() {
             g_icon_font_info_ok = stbtt_InitFont(&g_icon_font_info, g_icon_font_ttf, off) ? 1 : 0;
         } else {
             fprintf(stderr, "[vespera] Warning: LunaSymbols-Solid.otf not found (icon glyphs unavailable)\n");
-            fprintf(stderr, "[vespera]   install: fonts/LunaSymbols-*.otf → /usr/share/fonts/luna/\n");
+            fprintf(stderr, "[vespera]   install: skins/fonts/LunaSymbols-*.otf → /usr/share/fonts/luna/\n");
         }
 
         const char* env_brand = getenv("LUNA_FONT_BRANDS");
         const char* brand_cands[] = {
             env_brand && env_brand[0] ? env_brand : NULL,
-            "fonts/LunaSymbols-Brands.otf",
-            "../fonts/LunaSymbols-Brands.otf",
-            "apps/luna-ui/fonts/LunaSymbols-Brands.otf",
+            "skins/fonts/LunaSymbols-Brands.otf",
+            "../skins/fonts/LunaSymbols-Brands.otf",
+            "apps/luna-ui/skins/fonts/LunaSymbols-Brands.otf",
             "/usr/share/fonts/luna/LunaSymbols-Brands.otf",
             "/usr/share/fonts/LunaSymbols-Brands.otf",
             "/usr/local/share/fonts/luna/LunaSymbols-Brands.otf",
@@ -8512,7 +9734,8 @@ void init_font() {
     fpl_free(&bold_list);
 
     glCreateVertexArrays(1, &text_vao); glGenBuffers(1, &text_vbo);
-    glBindVertexArray(text_vao); glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
+    glBindVertexArray(text_vao); g_current_vao = text_vao;
+    glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 6 * LUNA_TEXT_BATCH_GLYPHS, NULL, GL_DYNAMIC_DRAW);
     glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), 0);
     glEnableVertexAttribArray(0);
@@ -8609,7 +9832,9 @@ void init_rect_geometry() {
     float vertices[] = { 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f };
     glCreateVertexArrays(1, &g_rect_vao);
     glGenBuffers(1, &g_rect_vbo);
+    /* Setup path: bind unconditionally, then tell the tracker what is current. */
     glBindVertexArray(g_rect_vao);
+    g_current_vao = g_rect_vao;
     glBindBuffer(GL_ARRAY_BUFFER, g_rect_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
@@ -8664,7 +9889,7 @@ static void draw_image(float x, float y, float w, float h, float radius, GLuint 
     if (glActiveTexture_) glActiveTexture_(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i_(img_loc.uImage, 0);
-    glBindVertexArray(g_rect_vao);
+    luna_bind_vao(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
@@ -8690,19 +9915,19 @@ static void draw_bg_layer(float x, float y, float w, float h,
     if (la <= 0.0f && grad_mode == GRAD_NONE) return;
 
     luna_use_program(bg_program);
-    glUniform2f(bg_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
-    glUniform2f(bg_loc.uPos,  x - g_render_off_x, y - g_render_off_y);
-    glUniform2f(bg_loc.uSize, w, h);
-    glUniform4f(bg_loc.uColor, lr, lg, lb, la);
-    glUniform4f(bg_loc.uBorderColor, 0,0,0,0);
-    glUniform1f(bg_loc.uBorderWidth, 0.0f);
-    glUniform4f(bg_loc.uRadius4, c4[0], c4[1], c4[2], c4[3]);
-    glUniform1i_(bg_loc.uGradient, grad_mode);
+    uni2f(bg_loc.uResolution, &bg_uni.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    uni2f(bg_loc.uPos,  &bg_uni.uPos, x - g_render_off_x, y - g_render_off_y);
+    uni2f(bg_loc.uSize, &bg_uni.uSize, w, h);
+    uni4f(bg_loc.uColor, &bg_uni.uColor, lr, lg, lb, la);
+    uni4f(bg_loc.uBorderColor, &bg_uni.uBorderColor, 0,0,0,0);
+    uni1f(bg_loc.uBorderWidth, &bg_uni.uBorderWidth, 0.0f);
+    uni4f(bg_loc.uRadius4, &bg_uni.uRadius4, c4[0], c4[1], c4[2], c4[3]);
+    uni1i(bg_loc.uGradient, &bg_uni.uGradient, grad_mode);
     if (layer->has_gradient) {
         int sc = layer->grad_stop_count;
         if (sc < 2) sc = 2;
         if (sc > MAX_GRAD_STOPS) sc = MAX_GRAD_STOPS;
-        glUniform1i_(bg_loc.uGradStopCount, sc);
+        uni1i(bg_loc.uGradStopCount, &bg_uni.uGradStopCount, sc);
         for (int i = 0; i < MAX_GRAD_STOPS; i++) {
             float pr=0, pg=0, pb=0, pa=0, pp=(float)i/(float)(MAX_GRAD_STOPS-1);
             if (i < layer->grad_stop_count) {
@@ -8711,34 +9936,34 @@ static void draw_bg_layer(float x, float y, float w, float h,
                 pp=layer->grad_stop_pos[i];
                 pa *= eff_op;
             }
-            glUniform4f(bg_loc.uGradColors[i], pr, pg, pb, pa);
-            glUniform1f(bg_loc.uGradStops[i],  pp);
+            uni4f(bg_loc.uGradColors[i], &bg_uni.uGradColors[i], pr, pg, pb, pa);
+            uni1f(bg_loc.uGradStops[i],  &bg_uni.uGradStops[i],  pp);
         }
-        glUniform1f(bg_loc.uGradAngle,  layer->grad_angle);
-        glUniform2f(bg_loc.uGradCenter, layer->grad_rad_cx, layer->grad_rad_cy);
-        glUniform1f(bg_loc.uGradRadius, layer->grad_rad_r);
+        uni1f(bg_loc.uGradAngle,  &bg_uni.uGradAngle,  layer->grad_angle);
+        uni2f(bg_loc.uGradCenter, &bg_uni.uGradCenter, layer->grad_rad_cx, layer->grad_rad_cy);
+        uni1f(bg_loc.uGradRadius, &bg_uni.uGradRadius, layer->grad_rad_r);
         /* Resolve percentage ellipse radii to pixels at draw time */
         float erx = layer->grad_rad_rx_pct ? layer->grad_rad_rx * w : layer->grad_rad_rx;
         float ery = layer->grad_rad_ry_pct ? layer->grad_rad_ry * h : layer->grad_rad_ry;
-        glUniform1f(bg_loc.uGradRadRx, erx);
-        glUniform1f(bg_loc.uGradRadRy, ery);
+        uni1f(bg_loc.uGradRadRx, &bg_uni.uGradRadRx, erx);
+        uni1f(bg_loc.uGradRadRy, &bg_uni.uGradRadRy, ery);
     } else {
-        glUniform1f(bg_loc.uGradRadRx, 0.0f);
-        glUniform1f(bg_loc.uGradRadRy, 0.0f);
+        uni1f(bg_loc.uGradRadRx, &bg_uni.uGradRadRx, 0.0f);
+        uni1f(bg_loc.uGradRadRy, &bg_uni.uGradRadRy, 0.0f);
     }
-    glUniform1i_(bg_loc.uFilterMode, 0);
-    glUniform1f(bg_loc.uFilterBrightness, 1.0f);
-    glUniform1f(bg_loc.uFilterContrast,   1.0f);
-    glUniform1f(bg_loc.uFilterSaturate,   1.0f);
-    glUniform1f(bg_loc.uFilterHue,        0.0f);
-    glUniform1i_(bg_loc.uClipEnabled, g_bg_clip_enabled);
+    uni1i(bg_loc.uFilterMode, &bg_uni.uFilterMode, 0);
+    uni1f(bg_loc.uFilterBrightness, &bg_uni.uFilterBrightness, 1.0f);
+    uni1f(bg_loc.uFilterContrast,   &bg_uni.uFilterContrast,   1.0f);
+    uni1f(bg_loc.uFilterSaturate,   &bg_uni.uFilterSaturate,   1.0f);
+    uni1f(bg_loc.uFilterHue,        &bg_uni.uFilterHue,        0.0f);
+    uni1i(bg_loc.uClipEnabled, &bg_uni.uClipEnabled, g_bg_clip_enabled);
     if (g_bg_clip_enabled) {
-        glUniform2f(bg_loc.uClipPos,  g_bg_clip_pos[0],  g_bg_clip_pos[1]);
-        glUniform2f(bg_loc.uClipSize, g_bg_clip_size[0], g_bg_clip_size[1]);
-        glUniform4f(bg_loc.uClipRadius4, g_bg_clip_rad4[0], g_bg_clip_rad4[1],
+        uni2f(bg_loc.uClipPos,  &bg_uni.uClipPos,  g_bg_clip_pos[0],  g_bg_clip_pos[1]);
+        uni2f(bg_loc.uClipSize, &bg_uni.uClipSize, g_bg_clip_size[0], g_bg_clip_size[1]);
+        uni4f(bg_loc.uClipRadius4, &bg_uni.uClipRadius4, g_bg_clip_rad4[0], g_bg_clip_rad4[1],
                     g_bg_clip_rad4[2], g_bg_clip_rad4[3]);
     }
-    glBindVertexArray(g_rect_vao);
+    luna_bind_vao(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 }
 
@@ -8765,19 +9990,19 @@ void draw_rect_full(float x, float y, float w, float h,
     }
 
     luna_use_program(bg_program);
-    glUniform2f(bg_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
-    glUniform2f(bg_loc.uPos,  x - g_render_off_x, y - g_render_off_y);
-    glUniform2f(bg_loc.uSize, w, h);
-    glUniform4f(bg_loc.uColor,       r,    g,    b,    a);
-    glUniform4f(bg_loc.uBorderColor, bd_r, bd_g, bd_b, bd_a);
-    glUniform1f(bg_loc.uBorderWidth, b_w);
-    glUniform4f(bg_loc.uRadius4, c4[0], c4[1], c4[2], c4[3]);
-    glUniform1i_(bg_loc.uGradient, grad_mode);
+    uni2f(bg_loc.uResolution, &bg_uni.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    uni2f(bg_loc.uPos,  &bg_uni.uPos, x - g_render_off_x, y - g_render_off_y);
+    uni2f(bg_loc.uSize, &bg_uni.uSize, w, h);
+    uni4f(bg_loc.uColor,       &bg_uni.uColor,       r,    g,    b,    a);
+    uni4f(bg_loc.uBorderColor, &bg_uni.uBorderColor, bd_r, bd_g, bd_b, bd_a);
+    uni1f(bg_loc.uBorderWidth, &bg_uni.uBorderWidth, b_w);
+    uni4f(bg_loc.uRadius4, &bg_uni.uRadius4, c4[0], c4[1], c4[2], c4[3]);
+    uni1i(bg_loc.uGradient, &bg_uni.uGradient, grad_mode);
     if (ge && ge->has_gradient) {
         int sc = ge->grad_stop_count;
         if (sc < 2) sc = 2;
         if (sc > MAX_GRAD_STOPS) sc = MAX_GRAD_STOPS;
-        glUniform1i_(bg_loc.uGradStopCount, sc);
+        uni1i(bg_loc.uGradStopCount, &bg_uni.uGradStopCount, sc);
         for (int i = 0; i < MAX_GRAD_STOPS; i++) {
             float pr = 0, pg = 0, pb = 0, pa = 0, pp = (float)i / (float)(MAX_GRAD_STOPS - 1);
             if (i < ge->grad_stop_count) {
@@ -8785,42 +10010,42 @@ void draw_rect_full(float x, float y, float w, float h,
                 pb = ge->grad_stop_b[i]; pa = ge->grad_stop_a[i];
                 pp = ge->grad_stop_pos[i];
             }
-            glUniform4f(bg_loc.uGradColors[i], pr, pg, pb, pa);
-            glUniform1f(bg_loc.uGradStops[i],  pp);
+            uni4f(bg_loc.uGradColors[i], &bg_uni.uGradColors[i], pr, pg, pb, pa);
+            uni1f(bg_loc.uGradStops[i],  &bg_uni.uGradStops[i],  pp);
         }
-        glUniform1f(bg_loc.uGradAngle,  ge->grad_angle);
-        glUniform2f(bg_loc.uGradCenter, ge->grad_rad_cx, ge->grad_rad_cy);
-        glUniform1f(bg_loc.uGradRadius, ge->grad_rad_r);
+        uni1f(bg_loc.uGradAngle,  &bg_uni.uGradAngle,  ge->grad_angle);
+        uni2f(bg_loc.uGradCenter, &bg_uni.uGradCenter, ge->grad_rad_cx, ge->grad_rad_cy);
+        uni1f(bg_loc.uGradRadius, &bg_uni.uGradRadius, ge->grad_rad_r);
         float erx = ge->grad_rad_rx_pct ? ge->grad_rad_rx * w : ge->grad_rad_rx;
         float ery = ge->grad_rad_ry_pct ? ge->grad_rad_ry * h : ge->grad_rad_ry;
-        glUniform1f(bg_loc.uGradRadRx, erx);
-        glUniform1f(bg_loc.uGradRadRy, ery);
+        uni1f(bg_loc.uGradRadRx, &bg_uni.uGradRadRx, erx);
+        uni1f(bg_loc.uGradRadRy, &bg_uni.uGradRadRy, ery);
     } else {
-        glUniform1f(bg_loc.uGradRadRx, 0.0f);
-        glUniform1f(bg_loc.uGradRadRy, 0.0f);
+        uni1f(bg_loc.uGradRadRx, &bg_uni.uGradRadRx, 0.0f);
+        uni1f(bg_loc.uGradRadRy, &bg_uni.uGradRadRy, 0.0f);
     }
     if (ge && ge->has_filter) {
-        glUniform1i_(bg_loc.uFilterMode,       1);
-        glUniform1f(bg_loc.uFilterBrightness,  ge->filter_brightness);
-        glUniform1f(bg_loc.uFilterContrast,    ge->filter_contrast);
-        glUniform1f(bg_loc.uFilterSaturate,    ge->filter_saturate);
-        glUniform1f(bg_loc.uFilterHue,         ge->filter_hue);
+        uni1i(bg_loc.uFilterMode,       &bg_uni.uFilterMode,       1);
+        uni1f(bg_loc.uFilterBrightness, &bg_uni.uFilterBrightness, ge->filter_brightness);
+        uni1f(bg_loc.uFilterContrast,   &bg_uni.uFilterContrast,   ge->filter_contrast);
+        uni1f(bg_loc.uFilterSaturate,   &bg_uni.uFilterSaturate,   ge->filter_saturate);
+        uni1f(bg_loc.uFilterHue,        &bg_uni.uFilterHue,        ge->filter_hue);
     } else {
-        glUniform1i_(bg_loc.uFilterMode, 0);
-        glUniform1f(bg_loc.uFilterBrightness, 1.0f);
-        glUniform1f(bg_loc.uFilterContrast,   1.0f);
-        glUniform1f(bg_loc.uFilterSaturate,   1.0f);
-        glUniform1f(bg_loc.uFilterHue,        0.0f);
+        uni1i(bg_loc.uFilterMode,       &bg_uni.uFilterMode,       0);
+        uni1f(bg_loc.uFilterBrightness, &bg_uni.uFilterBrightness, 1.0f);
+        uni1f(bg_loc.uFilterContrast,   &bg_uni.uFilterContrast,   1.0f);
+        uni1f(bg_loc.uFilterSaturate,   &bg_uni.uFilterSaturate,   1.0f);
+        uni1f(bg_loc.uFilterHue,        &bg_uni.uFilterHue,        0.0f);
     }
-    glUniform1i_(bg_loc.uClipEnabled, g_bg_clip_enabled);
+    uni1i(bg_loc.uClipEnabled, &bg_uni.uClipEnabled, g_bg_clip_enabled);
     if (g_bg_clip_enabled) {
-        glUniform2f(bg_loc.uClipPos,  g_bg_clip_pos[0],  g_bg_clip_pos[1]);
-        glUniform2f(bg_loc.uClipSize, g_bg_clip_size[0], g_bg_clip_size[1]);
-        glUniform4f(bg_loc.uClipRadius4, g_bg_clip_rad4[0], g_bg_clip_rad4[1],
+        uni2f(bg_loc.uClipPos,  &bg_uni.uClipPos,  g_bg_clip_pos[0],  g_bg_clip_pos[1]);
+        uni2f(bg_loc.uClipSize, &bg_uni.uClipSize, g_bg_clip_size[0], g_bg_clip_size[1]);
+        uni4f(bg_loc.uClipRadius4, &bg_uni.uClipRadius4, g_bg_clip_rad4[0], g_bg_clip_rad4[1],
                     g_bg_clip_rad4[2], g_bg_clip_rad4[3]);
     }
 
-    glBindVertexArray(g_rect_vao);
+    luna_bind_vao(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 }
 
@@ -8874,11 +10099,11 @@ static void draw_shadow(float ex, float ey, float ew, float eh,
     float off_y = 0.0f;
 
     luna_use_program(shadow_program);
-    glUniform2f(sh_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
-    glUniform2f(sh_loc.uPos,  sx - g_render_off_x, sy - g_render_off_y);
-    glUniform2f(sh_loc.uSize, sw, sh_h);
-    glUniform4f(sh_loc.uShadowColor, sh_r, sh_g, sh_b, sh_a * eff_op);
-    glUniform2f(sh_loc.uElemSize, ew, eh);
+    uni2f(sh_loc.uResolution, &sh_uni.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    uni2f(sh_loc.uPos,  &sh_uni.uPos, sx - g_render_off_x, sy - g_render_off_y);
+    uni2f(sh_loc.uSize, &sh_uni.uSize, sw, sh_h);
+    uni4f(sh_loc.uShadowColor, &sh_uni.uShadowColor, sh_r, sh_g, sh_b, sh_a * eff_op);
+    uni2f(sh_loc.uElemSize, &sh_uni.uElemSize, ew, eh);
     float half_min_s = (ew < eh ? ew : eh) * 0.5f;
     float c4[4] = { 0, 0, 0, 0 };
     if (rad4) {
@@ -8888,14 +10113,14 @@ static void draw_shadow(float ex, float ey, float ew, float eh,
             if (c4[i] < 0.0f) c4[i] = 0.0f;
         }
     }
-    glUniform4f(sh_loc.uRadius4, c4[0], c4[1], c4[2], c4[3]);
-    glUniform1f(sh_loc.uBlur,   blur);
-    glUniform1f(sh_loc.uSpread, sh_spread);
-    glUniform1i_(sh_loc.uInsetMode, sh_inset ? 1 : 0);
-    glUniform2f(sh_loc.uShadowInset, inset_x, inset_y);
-    glUniform2f(sh_loc.uOffset,      off_x, off_y);
+    uni4f(sh_loc.uRadius4, &sh_uni.uRadius4, c4[0], c4[1], c4[2], c4[3]);
+    uni1f(sh_loc.uBlur,   &sh_uni.uBlur,   blur);
+    uni1f(sh_loc.uSpread, &sh_uni.uSpread, sh_spread);
+    uni1i(sh_loc.uInsetMode, &sh_uni.uInsetMode, sh_inset ? 1 : 0);
+    uni2f(sh_loc.uShadowInset, &sh_uni.uShadowInset, inset_x, inset_y);
+    uni2f(sh_loc.uOffset,      &sh_uni.uOffset,      off_x, off_y);
 
-    glBindVertexArray(g_rect_vao);
+    luna_bind_vao(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 }
 
@@ -8931,11 +10156,11 @@ void render_text_pass(FontAtlas* atlas, const char* text,
     }
     dyn_flush_atlas();
     luna_use_program(text_program);
-    glUniform2f(tx_loc.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
-    glUniform4f(tx_loc.textColor,   r, g, b, a);
-    glUniform1i_(tx_loc.uGradMode, 0);
+    uni2f(tx_loc.uResolution, &tx_uni.uResolution, LUNA_RRES_X, LUNA_RRES_Y);
+    uni4f(tx_loc.textColor,   &tx_uni.textColor,   r, g, b, a);
+    uni1i(tx_loc.uGradMode,   &tx_uni.uGradMode,   0);
     if (glActiveTexture_) glActiveTexture_(GL_TEXTURE0);
-    glBindVertexArray(text_vao);
+    luna_bind_vao(text_vao);
 
     /* Batch buffer: 6 verts × 4 floats × LUNA_TEXT_BATCH_GLYPHS glyphs */
     static float batch_buf[LUNA_TEXT_BATCH_GLYPHS * 6 * 4];
@@ -8954,12 +10179,16 @@ void render_text_pass(FontAtlas* atlas, const char* text,
 
         if (cp < 128) {
             glyph_tex = atlas->tex;
-            stbtt_aligned_quad q;
-            float tmp_x = draw_x, tmp_y = draw_y;
-            stbtt_GetBakedQuad(atlas->cdata, 512, 512, cp - 32, &tmp_x, &tmp_y, &q, 1);
-            x0 = q.x0; y0 = q.y0; x1 = q.x1; y1 = q.y1;
-            s0 = q.s0; t0 = q.t0; s1 = q.s1; t1 = q.t1;
-            draw_x = tmp_x + g_text_letter_spacing; draw_y = tmp_y;
+            const stbtt_bakedchar* bc = &atlas->cdata[cp - 32];
+            x0 = draw_x + bc->xoff;
+            y0 = draw_y + bc->yoff;
+            x1 = x0 + (float)(bc->x1 - bc->x0);
+            y1 = y0 + (float)(bc->y1 - bc->y0);
+            s0 = (float)bc->x0 / (float)LUNA_ASCII_ATLAS_SIZE;
+            t0 = (float)bc->y0 / (float)LUNA_ASCII_ATLAS_SIZE;
+            s1 = (float)bc->x1 / (float)LUNA_ASCII_ATLAS_SIZE;
+            t1 = (float)bc->y1 / (float)LUNA_ASCII_ATLAS_SIZE;
+            draw_x += bc->xadvance + g_text_letter_spacing;
         } else {
             LunaDynGlyph* gd = dyn_bake_glyph(cp, px);
             if (!gd) continue;
@@ -9231,11 +10460,11 @@ void render_text_fx(const char* text, float x, float y, float box_w, float box_h
             /* background-clip: text: set gradient uniforms so the text shader
                samples the element's gradient at each fragment's screen position. */
             luna_use_program(text_program);
-            glUniform1i_(tx_loc.uGradMode, 1);
+            uni1i(tx_loc.uGradMode, &tx_uni.uGradMode, 1);
             int sc = fx->grad_stop_count;
             if (sc < 2) sc = 2;
             if (sc > MAX_GRAD_STOPS) sc = MAX_GRAD_STOPS;
-            glUniform1i_(tx_loc.uGradStopCount, sc);
+            uni1i(tx_loc.uGradStopCount, &tx_uni.uGradStopCount, sc);
             for (int gi = 0; gi < MAX_GRAD_STOPS; gi++) {
                 float pr=0, pg=0, pb=0, pa=1, pp=(float)gi/(float)(MAX_GRAD_STOPS-1);
                 if (gi < fx->grad_stop_count) {
@@ -9243,18 +10472,18 @@ void render_text_fx(const char* text, float x, float y, float box_w, float box_h
                     pb=fx->grad_stop_b[gi]; pa=fx->grad_stop_a[gi];
                     pp=fx->grad_stop_pos[gi];
                 }
-                glUniform4f(tx_loc.uGradColors[gi], pr, pg, pb, pa);
-                glUniform1f(tx_loc.uGradStops[gi],  pp);
+                uni4f(tx_loc.uGradColors[gi], &tx_uni.uGradColors[gi], pr, pg, pb, pa);
+                uni1f(tx_loc.uGradStops[gi],  &tx_uni.uGradStops[gi],  pp);
             }
-            glUniform1f(tx_loc.uGradAngle, fx->grad_angle);
+            uni1f(tx_loc.uGradAngle, &tx_uni.uGradAngle, fx->grad_angle);
             /* elem bounds in shader coordinates (g_render_off_x already subtracted) */
             float ex = x - g_render_off_x;
             float ey = y - g_render_off_y;
-            glUniform4f(tx_loc.uElemBounds, ex, ey, box_w, box_h);
+            uni4f(tx_loc.uElemBounds, &tx_uni.uElemBounds, ex, ey, box_w, box_h);
             render_text_pass(atlas, line, start_x, baseline, 1.0f, 1.0f, 1.0f, 1.0f);
             if (is_fake_bold) render_text_pass(atlas, line, start_x + 1.0f, baseline, 1.0f, 1.0f, 1.0f, 1.0f);
             luna_use_program(text_program);
-            glUniform1i_(tx_loc.uGradMode, 0);
+            uni1i(tx_loc.uGradMode, &tx_uni.uGradMode, 0);
         } else {
             render_text_pass(atlas, line, start_x, baseline, r, g, b, a);
             if (is_fake_bold) render_text_pass(atlas, line, start_x + 1.0f, baseline, r, g, b, a);
@@ -10159,6 +11388,7 @@ static void load_gl_functions() {
 int luna_element_count(void) { return elem_count; }
 LunaElement* luna_element_at(int i) { return (i >= 0 && i < elem_count) ? &elements[i] : NULL; }
 int luna_get_element_by_id(const char* id) { return get_element_by_id(id); }
+int luna_element_visible(int idx) { return (idx >= 0 && idx < elem_count) ? is_visible(idx) : 0; }
 void luna_set_text(int i, const char* t) { set_text(i, t); }
 void luna_add_class(int i, const char* c) { if (i >= 0) add_class(&elements[i], c); }
 void luna_remove_class(int i, const char* c) { if (i >= 0) remove_class(&elements[i], c); }
@@ -10178,6 +11408,13 @@ int luna_load_css_file(const char* p) {
         g_layout_dirty = 1; g_render_order_dirty = 1;
     }
     return 1;
+}
+void luna_reset_css(void) {
+    rule_count = 0;
+    g_keyframe_count = 0;
+    g_css_from_document = 0;
+    memset(css_rules, 0, sizeof(css_rules));
+    memset(g_keyframes, 0, sizeof(g_keyframes));
 }
 void luna_parse_html(const char* h) { parse_html(h); }
 void luna_parse_css(const char* c) {
@@ -10281,10 +11518,25 @@ void luna_update(double now, double dt) {
     update_animations(dt);
 }
 
-/* Ensure backdrop-blur FBOs/textures match the current framebuffer size. */
+/* Ensure backdrop-blur FBOs/textures can hold the current framebuffer.
+ *
+ * Sizing these to match the framebuffer *exactly* was a per-frame disaster on
+ * the Wayland shell: every layer surface has its own size, so rendering the
+ * menubar after the wallpaper tore down two full-screen RGBA textures and two
+ * FBOs and allocated them again — and then the wallpaper's next repaint did it
+ * all over again, in the opposite direction.  At 1920x1080 that is 16 MB of
+ * driver allocation twice per frame, produced on a fixed timer by the clock and
+ * the wallpaper tick: exactly the regular hitch it looked like.
+ *
+ * Grow-only sizing removes it.  A texture larger than the framebuffer costs
+ * nothing to sample from — the capture is anchored at texture y=0 and the
+ * shaders normalise by the real texture size — so the allocation happens once,
+ * for the largest surface, and is reused by every smaller one. */
 static void ensure_blur_fbos(int w, int h) {
     if (!glGenFramebuffers_ || !glBindFramebuffer_ || !glFramebufferTexture2D_) return;
-    if (g_blur_tex_w == w && g_blur_tex_h == h && g_blur_fbo[0]) return;
+    if (g_blur_fbo[0] && g_blur_tex_w >= w && g_blur_tex_h >= h) return;
+    if (w < g_blur_tex_w) w = g_blur_tex_w;
+    if (h < g_blur_tex_h) h = g_blur_tex_h;
     /* Clean up old resources */
     if (g_blur_fbo[0] && glDeleteFramebuffers_) {
         glDeleteFramebuffers_(2, g_blur_fbo);
@@ -10317,37 +11569,78 @@ static void ensure_blur_fbos(int w, int h) {
 static void apply_backdrop_blur(float ex, float ey, float ew, float eh,
                                  float blur_radius, float saturate, float brightness,
                                  const float* rad4, int fbw, int fbh) {
-    if (!blur_program || !backdrop_program || !g_blur_fbo[0]) return;
+    if (!blur_program || !backdrop_program) return;
     if (!glActiveTexture_) return;
+    /* Allocated here rather than at the top of every render: a surface with no
+     * backdrop-filter element never needs the capture textures at all. */
+    ensure_blur_fbos(fbw, fbh);
+    if (!g_blur_fbo[0]) return;
 
-    float tw = (float)fbw, th = (float)fbh;
-    /* Step 1: Copy current default framebuffer into g_blur_tex[0]. */
+    /* fw/fh drive the viewport and the screen→GL y flip; tw/th normalise UVs
+     * into the (possibly larger) capture texture. */
+    float fw = (float)fbw, fh = (float)fbh;
+    float tw = (float)g_blur_tex_w, th = (float)g_blur_tex_h;
+    float sx = ex - g_render_off_x, sy = ey - g_render_off_y;
+
+    /* Every stage below works on the element rect grown by the blur reach
+     * instead of the whole screen.  A menubar with backdrop-filter used to
+     * cost a full-framebuffer texture copy plus two full-framebuffer blur
+     * passes *per blurred element, per frame*; the visible result is identical
+     * because nothing outside this region can influence the element's pixels. */
+    float r   = blur_radius > 0.5f ? blur_radius : 0.5f;
+    float pad = r + 2.0f;
+
+    /* Capture region in document coordinates (y grows downward), clipped. */
+    int cx0 = (int)floorf(sx - pad);            if (cx0 < 0) cx0 = 0;
+    int cx1 = (int)ceilf(sx + ew + pad);        if (cx1 > fbw) cx1 = fbw;
+    int cy0 = (int)floorf(sy - pad);            if (cy0 < 0) cy0 = 0;
+    int cy1 = (int)ceilf(sy + eh + pad);        if (cy1 > fbh) cy1 = fbh;
+    if (cx1 <= cx0 || cy1 <= cy0) return;
+
+    /* Step 1: Copy just that region of the default framebuffer into
+     * g_blur_tex[0].  Both the copy and the sample anchor the framebuffer at
+     * texture y=0, so the sub-rect lands at the texel coordinates the shaders
+     * read — GL window space counts y upward, hence the flip. */
     glBindTexture(GL_TEXTURE_2D, g_blur_tex[0]);
-    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, fbw, fbh);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, cx0, fbh - cy1, cx0, fbh - cy1,
+                        cx1 - cx0, cy1 - cy0);
     glBindTexture(GL_TEXTURE_2D, 0);
 
     glDisable(GL_SCISSOR_TEST);
+    rc_scissor_reset();
     glDisable(GL_BLEND);
-    /* Step 2: Horizontal blur: read g_blur_tex[0] → write g_blur_fbo[1]/g_blur_tex[1] */
+    /* Step 2: Horizontal blur: read g_blur_tex[0] → write g_blur_fbo[1]/g_blur_tex[1].
+     * The vertical pass samples r pixels above and below the element, so the
+     * horizontal pass must produce that taller strip.  It used to write only
+     * the element rect, leaving the vertical pass to read whatever an earlier
+     * element or frame had left in g_blur_tex[1] — visible as a wrong band
+     * along the top and bottom edge of every backdrop-filter surface. */
+    float hy0 = sy - pad;           if (hy0 < 0.0f)        hy0 = 0.0f;
+    float hy1 = sy + eh + pad;      if (hy1 > (float)fbh)  hy1 = (float)fbh;
     glBindFramebuffer_(GL_FRAMEBUFFER, g_blur_fbo[1]);
     glViewport(0, 0, fbw, fbh);
     luna_use_program(blur_program);
-    glUniform2f(blur_loc.uResolution, tw, th);
-    glUniform2f(blur_loc.uPos,  ex - g_render_off_x, ey - g_render_off_y);
-    glUniform2f(blur_loc.uSize, ew, eh);
+    glUniform2f(blur_loc.uResolution, fw, fh);
+    glUniform2f(blur_loc.uPos,  sx, hy0);
+    glUniform2f(blur_loc.uSize, ew, hy1 - hy0);
     if (glActiveTexture_) glActiveTexture_(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_blur_tex[0]);
     glUniform1i_(blur_loc.uSrc, 0);
     glUniform2f(blur_loc.uBlurDir, 1.0f / tw, 0.0f);
     glUniform1f(blur_loc.uBlurRadius, blur_radius);
     glUniform2f(blur_loc.uBlurTexSize, tw, th);
-    glUniform2f(blur_loc.uBlurOrigin, ex - g_render_off_x, ey - g_render_off_y);
-    glBindVertexArray(g_rect_vao);
+    glUniform2f(blur_loc.uFbSize, fw, fh);
+    glUniform2f(blur_loc.uBlurOrigin, sx, hy0);
+    luna_bind_vao(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
-    /* Step 3: Vertical blur: read g_blur_tex[1] → write g_blur_fbo[0]/g_blur_tex[0] */
+    /* Step 3: Vertical blur over the element rect only: read g_blur_tex[1] →
+     * write g_blur_fbo[0]/g_blur_tex[0] */
     glBindFramebuffer_(GL_FRAMEBUFFER, g_blur_fbo[0]);
     glBindTexture(GL_TEXTURE_2D, g_blur_tex[1]);
+    glUniform2f(blur_loc.uPos,  sx, sy);
+    glUniform2f(blur_loc.uSize, ew, eh);
+    glUniform2f(blur_loc.uBlurOrigin, sx, sy);
     glUniform2f(blur_loc.uBlurDir, 0.0f, 1.0f / th);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -10382,10 +11675,11 @@ static void apply_backdrop_blur(float ex, float ey, float ew, float eh,
     glBindTexture(GL_TEXTURE_2D, g_blur_tex[0]);
     glUniform1i_(backdrop_loc.uSrc, 0);
     glUniform2f(backdrop_loc.uBlurTexSize, tw, th);
+    glUniform2f(backdrop_loc.uFbSize, fw, fh);
     glUniform2f(backdrop_loc.uBlurOrigin, ex - g_render_off_x, ey - g_render_off_y);
     glUniform1f(backdrop_loc.uSaturate, saturate);
     glUniform1f(backdrop_loc.uBrightness, brightness);
-    glBindVertexArray(g_rect_vao);
+    luna_bind_vao(g_rect_vao);
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     glBindTexture(GL_TEXTURE_2D, 0);
 }
@@ -10393,24 +11687,116 @@ static void apply_backdrop_blur(float ex, float ey, float ew, float eh,
 static int sticky_is_stuck_in_scroll(int idx);
 static void repaint_stuck_sticky_layers(int fbw, int fbh);
 
+int luna_probe_damage(int root_idx, int fbw, int fbh,
+                      float origin_x, float origin_y,
+                      float region_w, float region_h) {
+    if (!g_dmg_enabled) return 1;
+    if (fbw <= 0 || fbh <= 0) return 0;
+    int saved_root = g_render_root;
+    float saved_ox = g_render_off_x, saved_oy = g_render_off_y;
+    float saved_rx = g_render_res_x, saved_ry = g_render_res_y;
+    int saved_fbw = g_luna_fbw, saved_fbh = g_luna_fbh;
+    g_render_root = root_idx;
+    g_render_off_x = origin_x;
+    g_render_off_y = origin_y;
+    g_render_res_x = region_w > 0.0f ? region_w : (float)fbw;
+    g_render_res_y = region_h > 0.0f ? region_h : (float)fbh;
+    g_luna_fbw = fbw;
+    g_luna_fbh = fbh;
+    build_render_order();
+    rc_build();
+    int changed = 0;
+    /* Elements that were drawn last time but are gone now still count. */
+    for (int i = 0; i < elem_count; i++) {
+        if (!g_draw_rec[i].drawn) continue;
+        if (!g_rc[i].in_root || !rc_is_rendered(i) || g_rc[i].eff_op <= 0.004f) {
+            changed = 1;
+            break;
+        }
+    }
+    if (!changed) {
+        for (int ri = 0; ri < elem_count; ri++) {
+            int i = render_order[ri];
+            if (!g_rc[i].in_root) continue;
+            if (!rc_is_rendered(i)) {
+                if (damage_would_drop(i)) { changed = 1; break; }
+                continue;
+            }
+            float eff_op = g_rc[i].eff_op;
+            if (eff_op <= 0.004f) {
+                if (damage_would_drop(i)) { changed = 1; break; }
+                continue;
+            }
+            float dx, dy, dw, dh;
+            rc_element_draw_bounds(i, &dx, &dy, &dw, &dh);
+            if (dw <= 0.0f || dh <= 0.0f) {
+                if (damage_would_drop(i)) { changed = 1; break; }
+                continue;
+            }
+            LunaElement* e = &elements[i];
+            float pad = 4.0f;
+            if (e->has_shadow) {
+                for (int s = 0; s < e->shadow_count; s++) {
+                    float ext = e->shadows[s].blur * 1.75f +
+                                fabsf(e->shadows[s].dx) + fabsf(e->shadows[s].dy) +
+                                e->shadows[s].spread + 2.0f;
+                    if (ext > pad) pad = ext;
+                }
+            }
+            float sdx = dx - g_render_off_x, sdy = dy - g_render_off_y;
+            if (sdx - pad > LUNA_RRES_X || sdy - pad > LUNA_RRES_Y ||
+                sdx + dw + pad < 0.0f || sdy + dh + pad < 0.0f) {
+                if (damage_would_drop(i)) { changed = 1; break; }
+                continue;
+            }
+            float dmg_pad = pad;
+            if (e->has_outline) {
+                float ring = e->outline_width + e->outline_offset + 2.0f;
+                if (ring > dmg_pad) dmg_pad = ring;
+            }
+            if (damage_would_change(i, sdx - dmg_pad, sdy - dmg_pad,
+                                    dw + dmg_pad * 2.0f, dh + dmg_pad * 2.0f)) {
+                changed = 1;
+                break;
+            }
+        }
+    }
+    g_render_root = saved_root;
+    g_render_off_x = saved_ox;
+    g_render_off_y = saved_oy;
+    g_render_res_x = saved_rx;
+    g_render_res_y = saved_ry;
+    g_luna_fbw = saved_fbw;
+    g_luna_fbh = saved_fbh;
+    return changed;
+}
+
 void luna_render(int fbw, int fbh) {
     g_luna_fbw = fbw;
     g_luna_fbh = fbh;
-    /* Ensure backdrop-blur FBOs are sized for the current framebuffer */
-    ensure_blur_fbos(fbw, fbh);
+    /* The backdrop-blur capture textures are allocated by the first element
+     * that actually uses backdrop-filter — see apply_backdrop_blur().  Sizing
+     * them here forced a full reallocation every time a differently sized layer
+     * surface was rendered, which on the Wayland shell is every frame. */
     build_render_order();
+    /* One linear pass resolves every ancestor-derived value this loop needs.
+     * Doing it up front is what keeps a layer-surface repaint proportional to
+     * the elements it draws rather than to the whole document's tree depth. */
+    rc_build();
+    damage_reset();
     glDisable(GL_SCISSOR_TEST);
+    rc_scissor_reset();
     g_bg_clip_enabled = 0;
     for (int ri = 0; ri < elem_count; ri++) {
         int i = render_order[ri];
         LunaElement* e = &elements[i];
-        if (!is_rendered(i)) continue;
-        if (g_render_root >= 0 && !elem_is_self_or_descendant(i, g_render_root)) continue;
-        float eff_op = element_effective_opacity(i);
-        if (eff_op <= 0.004f) continue;
+        if (!g_rc[i].in_root) continue;
+        if (!rc_is_rendered(i)) { damage_drop(i); continue; }
+        float eff_op = g_rc[i].eff_op;
+        if (eff_op <= 0.004f) { damage_drop(i); continue; }
         float dx, dy, dw, dh;
-        get_element_draw_bounds(e, &dx, &dy, &dw, &dh);
-        if (dw <= 0.0f || dh <= 0.0f) continue;
+        rc_element_draw_bounds(i, &dx, &dy, &dw, &dh);
+        if (dw <= 0.0f || dh <= 0.0f) { damage_drop(i); continue; }
         float scale = e->cur_scale;
         /* Viewport culling: skip elements fully off the surface region. */
         {
@@ -10425,16 +11811,30 @@ void luna_render(int fbw, int fbh) {
             }
             float sdx = dx - g_render_off_x, sdy = dy - g_render_off_y;
             if (sdx - pad > LUNA_RRES_X || sdy - pad > LUNA_RRES_Y ||
-                sdx + dw + pad < 0.0f || sdy + dh + pad < 0.0f)
+                sdx + dw + pad < 0.0f || sdy + dh + pad < 0.0f) {
+                damage_drop(i);
                 continue;
+            }
+            /* Record what this element covers, so the host can tell the
+             * compositor which slice of the new buffer is actually new.  The
+             * margin has to cover everything drawn outside the border box:
+             * shadow reach (already in `pad`) and the keyboard focus ring,
+             * which sits `outline-offset + outline-width` beyond it. */
+            float dmg_pad = pad;
+            if (e->has_outline) {
+                float ring = e->outline_width + e->outline_offset + 2.0f;
+                if (ring > dmg_pad) dmg_pad = ring;
+            }
+            damage_note(i, sdx - dmg_pad, sdy - dmg_pad,
+                        dw + dmg_pad * 2.0f, dh + dmg_pad * 2.0f);
         }
         /* Set smooth rounded-clip via bg_fs shader for nearest overflow-hidden ancestor. */
         {
-            int clip_anc = find_rounded_clip_ancestor(i);
+            int clip_anc = g_rc[i].clip_anc;
             if (clip_anc != -1) {
                 LunaElement* anc = &elements[clip_anc];
                 float adx, ady, adw, adh;
-                get_element_draw_bounds(anc, &adx, &ady, &adw, &adh);
+                rc_element_draw_bounds(clip_anc, &adx, &ady, &adw, &adh);
                 float asc = anc->cur_scale;
                 g_bg_clip_enabled = 1;
                 g_bg_clip_pos[0]  = adx; g_bg_clip_pos[1]  = ady;
@@ -10448,7 +11848,7 @@ void luna_render(int fbw, int fbh) {
         float rad4[4] = { e->rad_c[0] * scale, e->rad_c[1] * scale,
                           e->rad_c[2] * scale, e->rad_c[3] * scale };
         if (e->has_shadow) {
-            set_element_scissor(i, fbw, fbh);
+            rc_set_element_scissor(i, fbw, fbh);
             for (int s = 0; s < e->shadow_count; s++) {
                 const LunaShadow* sh = &e->shadows[s];
                 if (sh->inset || sh->a <= 0.0f) continue;
@@ -10456,7 +11856,7 @@ void luna_render(int fbw, int fbh) {
                             sh->r, sh->g, sh->b, sh->a, rad4, eff_op);
             }
         }
-        set_element_scissor(i, fbw, fbh);
+        rc_set_element_scissor(i, fbw, fbh);
         /* mix-blend-mode: switch GL blend equation before drawing element */
         if (e->mix_blend_mode == 1) {
             /* screen: result = src + dst - src*dst */
@@ -10478,10 +11878,11 @@ void luna_render(int fbw, int fbh) {
         if (e->has_backdrop_blur && e->backdrop_blur_radius > 0.0f &&
             !e->position_sticky && g_render_root < 0) {
             glDisable(GL_SCISSOR_TEST);
+            rc_scissor_reset();
             apply_backdrop_blur(dx, dy, dw, dh, e->backdrop_blur_radius,
                                 e->backdrop_saturate, e->backdrop_brightness,
                                 rad4, fbw, fbh);
-            set_element_scissor(i, fbw, fbh);
+            rc_set_element_scissor(i, fbw, fbh);
         }
         /* Multiple background layers (bottom to top = last to first in CSS order) */
         if (e->bg_layer_count > 1) {
@@ -10618,6 +12019,7 @@ void luna_render(int fbw, int fbh) {
             glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
                                 GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glDisable(GL_SCISSOR_TEST);
+        rc_scissor_reset();
     }
     g_bg_clip_enabled = 0;
     repaint_stuck_sticky_layers(fbw, fbh);
@@ -10647,19 +12049,21 @@ static int sticky_is_stuck_in_scroll(int idx) {
     return 0;
 }
 
+/* Runs at the tail of luna_render(), so the per-frame ancestor cache built
+ * there is still current and every ancestor query below is an array read. */
 static void repaint_stuck_sticky_layers(int fbw, int fbh) {
     for (int i = 0; i < elem_count; i++) {
-        if (!sticky_is_stuck_in_scroll(i) || !is_visible(i)) continue;
+        if (!sticky_is_stuck_in_scroll(i) || !g_rc[i].vis) continue;
         LunaElement* e = &elements[i];
-        float eff_op = element_effective_opacity(i);
+        float eff_op = g_rc[i].eff_op;
         if (eff_op <= 0.004f) continue;
         float dx, dy, dw, dh;
-        get_element_draw_bounds(e, &dx, &dy, &dw, &dh);
+        rc_element_draw_bounds(i, &dx, &dy, &dw, &dh);
         if (dw <= 0.0f || dh <= 0.0f) continue;
         float scale = e->cur_scale;
         float rad4[4] = { e->rad_c[0]*scale, e->rad_c[1]*scale,
                           e->rad_c[2]*scale, e->rad_c[3]*scale };
-        set_element_scissor(i, fbw, fbh);
+        rc_set_element_scissor(i, fbw, fbh);
         float sr = e->cur_r, sg = e->cur_g, sb = e->cur_b;
         if (e->has_gradient && e->grad_stop_count > 0) {
             sr = e->grad_stop_r[0]; sg = e->grad_stop_g[0]; sb = e->grad_stop_b[0];
@@ -10692,6 +12096,7 @@ static void repaint_stuck_sticky_layers(int fbw, int fbh) {
                            e->line_height, e->white_space, e->text_overflow, e->overflow_wrap, e);
         }
         glDisable(GL_SCISSOR_TEST);
+        rc_scissor_reset();
     }
 }
 
@@ -10784,6 +12189,7 @@ static void cache_uniform_locations(void) {
         blur_loc.uBlurDir     = glGetUniformLocation(blur_program, "uBlurDir");
         blur_loc.uBlurRadius  = glGetUniformLocation(blur_program, "uBlurRadius");
         blur_loc.uBlurTexSize = glGetUniformLocation(blur_program, "uBlurTexSize");
+        blur_loc.uFbSize      = glGetUniformLocation(blur_program, "uFbSize");
         blur_loc.uBlurOrigin  = glGetUniformLocation(blur_program, "uBlurOrigin");
     }
     if (backdrop_program) {
@@ -10793,14 +12199,27 @@ static void cache_uniform_locations(void) {
         backdrop_loc.uRadius4     = glGetUniformLocation(backdrop_program, "uRadius4");
         backdrop_loc.uSrc         = glGetUniformLocation(backdrop_program, "uSrc");
         backdrop_loc.uBlurTexSize = glGetUniformLocation(backdrop_program, "uBlurTexSize");
+        backdrop_loc.uFbSize      = glGetUniformLocation(backdrop_program, "uFbSize");
         backdrop_loc.uBlurOrigin  = glGetUniformLocation(backdrop_program, "uBlurOrigin");
         backdrop_loc.uSaturate    = glGetUniformLocation(backdrop_program, "uSaturate");
         backdrop_loc.uBrightness  = glGetUniformLocation(backdrop_program, "uBrightness");
     }
+    /* Freshly linked programs hold none of the values the shadow remembers. */
+    luna_uni_invalidate((LunaUniShadow*)&bg_uni,
+                        (int)(sizeof(bg_uni) / sizeof(LunaUniShadow)));
+    luna_uni_invalidate((LunaUniShadow*)&sh_uni,
+                        (int)(sizeof(sh_uni) / sizeof(LunaUniShadow)));
+    luna_uni_invalidate((LunaUniShadow*)&tx_uni,
+                        (int)(sizeof(tx_uni) / sizeof(LunaUniShadow)));
 }
 
 int luna_init(const LunaInitConfig* cfg) {
     if (!cfg || !cfg->get_proc) return 0;
+#ifdef LUNA_UI_GLFW
+    if (g_luna_glfw_window && cfg->frameless)
+        glfwSetWindowAttrib((GLFWwindow*)g_luna_glfw_window,
+                            GLFW_DECORATED, GLFW_FALSE);
+#endif
     if (!g_luna_platform.get_proc) g_luna_platform.get_proc = cfg->get_proc;
     luna_window_width = cfg->width;
     luna_window_height = cfg->height;
@@ -10863,6 +12282,88 @@ void luna_render_region(int root_idx, int fbw, int fbh,
     g_render_off_y = 0.0f;
     g_render_res_x = 0.0f;
     g_render_res_y = 0.0f;
+}
+
+LunaContext* luna_context_create(void) {
+    LunaContext* ctx = (LunaContext*)calloc(1, sizeof(*ctx));
+    if (!ctx) return NULL;
+    ctx->root_idx = -1;
+    /* g_rect_vbo belongs to the GL share group.  VAOs are context-local, so
+     * reproduce only the attribute binding in each native GL context. */
+    glCreateVertexArrays(1, &ctx->rect_vao);
+    if (!ctx->rect_vao) {
+        free(ctx);
+        return NULL;
+    }
+    glBindVertexArray(ctx->rect_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_rect_vbo);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glCreateVertexArrays(1, &ctx->text_vao);
+    if (!ctx->text_vao) {
+        glDeleteVertexArrays(1, &ctx->rect_vao);
+        free(ctx);
+        return NULL;
+    }
+    glBindVertexArray(ctx->text_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
+                        GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    g_current_vao = ctx->rect_vao;
+    g_current_program = 0;
+    return ctx;
+}
+
+void luna_context_destroy(LunaContext* ctx) {
+    if (!ctx) return;
+    if (ctx->rect_vao) glDeleteVertexArrays(1, &ctx->rect_vao);
+    if (ctx->text_vao) glDeleteVertexArrays(1, &ctx->text_vao);
+    free(ctx);
+}
+
+void luna_context_set_region(LunaContext* ctx, int root_idx,
+                             float origin_x, float origin_y,
+                             float region_w, float region_h) {
+    if (!ctx) return;
+    ctx->root_idx = root_idx;
+    ctx->origin_x = origin_x;
+    ctx->origin_y = origin_y;
+    ctx->region_w = region_w;
+    ctx->region_h = region_h;
+}
+
+void luna_context_render(LunaContext* ctx, int fbw, int fbh) {
+    if (!ctx) return;
+    /* Binding is unconditional because another native context may have been
+     * current during the previous Luna render. */
+    glBindVertexArray(ctx->rect_vao);
+    g_rect_vao = ctx->rect_vao;
+    text_vao = ctx->text_vao;
+    g_current_vao = ctx->rect_vao;
+    g_current_program = 0;
+    luna_render_region(ctx->root_idx, fbw, fbh,
+                       ctx->origin_x, ctx->origin_y,
+                       ctx->region_w, ctx->region_h);
+}
+
+void luna_context_mouse_move(LunaContext* ctx, double x, double y) {
+    if (!ctx) return;
+    luna_mouse_move(x + ctx->origin_x, y + ctx->origin_y);
+}
+
+void luna_context_mouse_button(LunaContext* ctx, int button, int action,
+                               int mods, double x, double y) {
+    if (!ctx) return;
+    luna_mouse_button(button, action, mods,
+                      x + ctx->origin_x, y + ctx->origin_y);
+}
+
+void luna_context_scroll(LunaContext* ctx, double xoffset, double yoffset) {
+    if (!ctx) return;
+    luna_scroll(xoffset, yoffset);
 }
 
 #endif /* LUNA_UI_IMPLEMENTATION */

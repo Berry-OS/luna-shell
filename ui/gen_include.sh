@@ -8,15 +8,13 @@ to_c_string_h() {
     input="$1"
     output="${input}.h"
 
-    printf '' > "$output"
-
-    while IFS= read -r line || [ -n "$line" ]; do
-        # バックスラッシュ → \\ に (必ず最初に行う)
-        line=$(printf '%s' "$line" | sed 's/\\/\\\\/g')
-        # ダブルクォート → \" に
-        line=$(printf '%s' "$line" | sed 's/"/\\"/g')
-        printf '    "%s\\n"\n' "$line" >> "$output"
-    done < "$input"
+    # 以前は各行につき sed を2プロセス起動していたため、大きなスキン対応
+    # 文書ではプロセス制限に達した。変換順を保ったまま1回で生成する。
+    awk '{
+        gsub(/\\/, "\\\\")
+        gsub(/"/, "\\\"")
+        print "    \"" $0 "\\n\""
+    }' "$input" > "$output"
 
     printf 'Generated: %s\n' "$output"
 }

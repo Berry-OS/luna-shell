@@ -156,7 +156,12 @@ impl Conn {
                 self.send_fds.clear();
             }
         }
-        self.send_buf.drain(..sent_total);
+        if sent_total == self.send_buf.len() {
+            self.send_buf.clear();
+        } else if sent_total != 0 {
+            self.send_buf.copy_within(sent_total.., 0);
+            self.send_buf.truncate(self.send_buf.len() - sent_total);
+        }
     }
 
     fn send_chunk(&self, data: &[u8], fds: &[RawFd]) -> isize {

@@ -12,6 +12,7 @@
 #define LUNA_UI_IMPLEMENTATION
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
@@ -24,6 +25,7 @@
 #include <dirent.h>
 #include <math.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <fcntl.h>
@@ -86,6 +88,7 @@
 #define LUNA_KEY_RIGHT_SUPER 347
 #define LUNA_KEY_COMMA       44
 #define LUNA_KEY_F4          293
+#define LUNA_KEY_PRINT_SCREEN 283
 #define LUNA_MOD_CONTROL     0x0002
 #define LUNA_MOD_ALT         0x0004
 #define LUNA_MOD_SUPER       0x0008
@@ -103,6 +106,7 @@ static int g_fullscreen = 0;
 
 static const char* g_layout_path = NULL;
 static const char* g_css_path = NULL;
+static const char* g_skin_override = NULL;
 static const char* default_css =
 #include "luna-shell.css.h"
 ;
@@ -127,7 +131,7 @@ static LunaApp g_apps[] = {
     { .key = "terminal", .name = "Terminal",  .env = "LUNA_APP_TERMINAL", .default_cmd = "sakura"               },
     { .key = "browser",  .name = "Browser",   .env = "LUNA_APP_BROWSER",  .default_cmd = "firefox"              },
     { .key = "editor",   .name = "Editor",    .env = "LUNA_APP_EDITOR",   .default_cmd = "gedit"                },
-    { .key = "music",    .name = "Music",     .env = "LUNA_APP_MUSIC",    .default_cmd = "gnome-music"          },
+    { .key = "music",    .name = "Music",     .env = "LUNA_APP_MUSIC",    .default_cmd = "aplay+ui"             },
     { .key = "settings", .name = "Settings",  .env = "LUNA_APP_SETTINGS", .default_cmd = "gnome-control-center" },
     { .key = "demo",     .name = "GTK Demo",  .env = "LUNA_APP_DEMO",     .default_cmd = "gtk4-demo"            },
     { .key = "hello",    .name = "Hello GTK", .env = "LUNA_APP_HELLO",    .default_cmd = "hello-gtk"            },
@@ -138,15 +142,19 @@ static LunaApp g_apps[] = {
 
 typedef struct {
     char wallpaper[32]; /* "night" | "ocean" | "forest" | "sunset" */
+    char skin[64];      /* "luna" | discovered skin directory name */
     char hostname[64];
     char cursor_theme[64]; /* "aero" | "miku" | custom theme dir name */
     char kb_layout[64];    /* XKB layout, e.g. "jp,us" | "us" | "de,us" */
     int  window_gap;       /* tiled window inset in pixels: 0 | 8 | 16 */
     int  edge_snap;
+    int  top_edge_maximize;
     int  titlebar_double_click;
+    int  classic_titlebar;
     int  super_shortcuts;
     int  dock_magnification;
     int  session_restore;
+    char weather_city[64]; /* Open-Meteo city name, default Tokyo */
 } LunaSettings;
 
 static LunaSettings g_settings;
@@ -174,14 +182,18 @@ static void init_app_cmds(void) {
 
 static void settings_defaults(void) {
     snprintf(g_settings.wallpaper, sizeof(g_settings.wallpaper), "night");
+    snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
     snprintf(g_settings.hostname, sizeof(g_settings.hostname), "Luna Desktop");
     snprintf(g_settings.cursor_theme, sizeof(g_settings.cursor_theme), "aero");
     g_settings.window_gap = 8;
     g_settings.edge_snap = 1;
+    g_settings.top_edge_maximize = 0;
     g_settings.titlebar_double_click = 1;
+    g_settings.classic_titlebar = 0;
     g_settings.super_shortcuts = 1;
     g_settings.dock_magnification = 1;
     g_settings.session_restore = 1;
+    snprintf(g_settings.weather_city, sizeof(g_settings.weather_city), "Tokyo");
     /* Prefer env / locale-aware default already applied by apply_xkb_session_env. */
     {
         const char* lay = getenv("XKB_DEFAULT_LAYOUT");
@@ -219,6 +231,8 @@ static void settings_load(void) {
         } else if (!strcmp(section, "shell")) {
             if (!strcmp(key, "wallpaper"))
                 snprintf(g_settings.wallpaper, sizeof(g_settings.wallpaper), "%s", val);
+            else if (!strcmp(key, "skin"))
+                snprintf(g_settings.skin, sizeof(g_settings.skin), "%s", val);
             else if (!strcmp(key, "hostname"))
                 snprintf(g_settings.hostname, sizeof(g_settings.hostname), "%s", val);
             else if (!strcmp(key, "cursor_theme"))
@@ -229,14 +243,20 @@ static void settings_load(void) {
                 g_settings.window_gap = atoi(val);
             else if (!strcmp(key, "edge_snap"))
                 g_settings.edge_snap = atoi(val) != 0;
+            else if (!strcmp(key, "top_edge_maximize"))
+                g_settings.top_edge_maximize = atoi(val) != 0;
             else if (!strcmp(key, "titlebar_double_click"))
                 g_settings.titlebar_double_click = atoi(val) != 0;
+            else if (!strcmp(key, "classic_titlebar"))
+                g_settings.classic_titlebar = atoi(val) != 0;
             else if (!strcmp(key, "super_shortcuts"))
                 g_settings.super_shortcuts = atoi(val) != 0;
             else if (!strcmp(key, "dock_magnification"))
                 g_settings.dock_magnification = atoi(val) != 0;
             else if (!strcmp(key, "session_restore"))
                 g_settings.session_restore = atoi(val) != 0;
+            else if (!strcmp(key, "weather_city"))
+                snprintf(g_settings.weather_city, sizeof(g_settings.weather_city), "%s", val);
         }
     }
     fclose(f);
@@ -267,16 +287,326 @@ static void settings_save(void) {
         fprintf(f, "%s=%s\n", g_apps[i].key, g_apps[i].cmd);
     fprintf(f, "\n[shell]\n");
     fprintf(f, "wallpaper=%s\n", g_settings.wallpaper);
+    fprintf(f, "skin=%s\n", g_settings.skin);
     fprintf(f, "hostname=%s\n", g_settings.hostname);
     fprintf(f, "cursor_theme=%s\n", g_settings.cursor_theme);
     fprintf(f, "kb_layout=%s\n", g_settings.kb_layout);
     fprintf(f, "window_gap=%d\n", g_settings.window_gap);
     fprintf(f, "edge_snap=%d\n", g_settings.edge_snap);
+    fprintf(f, "top_edge_maximize=%d\n", g_settings.top_edge_maximize);
     fprintf(f, "titlebar_double_click=%d\n", g_settings.titlebar_double_click);
+    fprintf(f, "classic_titlebar=%d\n", g_settings.classic_titlebar);
     fprintf(f, "super_shortcuts=%d\n", g_settings.super_shortcuts);
     fprintf(f, "dock_magnification=%d\n", g_settings.dock_magnification);
     fprintf(f, "session_restore=%d\n", g_settings.session_restore);
+    fprintf(f, "weather_city=%s\n", g_settings.weather_city);
     fclose(f);
+}
+
+/* ── Desktop skins ────────────────────────────────────────────────────────
+ * A skin is a directory containing skin.conf + style.css and, optionally,
+ * layout.html.  layout.html is the authoring surface: open it in a browser
+ * (with <link> to ../_base/luna-shell.css and style.css) to preview the look,
+ * then run the same file as the shell layout — no export step.
+ *
+ * CSS is replaceable without rebuilding the shared DOM; a custom layout is
+ * selected at startup (and when switching skins, if the HTML file is present)
+ * and must retain the shell's documented element IDs so the native handlers
+ * can bind to it.  Directories whose names start with '_' (e.g. _base) are
+ * shared assets, not skins.
+ *
+ * Chrome placement (menubar edge, dock visibility) is also declared in
+ * skin.conf and applied live to the Wayland layer-shell surfaces — CSS alone
+ * cannot move the menubar, because the layer is anchored independently of
+ * the document box. */
+#define MAX_SKINS 12
+#define SKIN_EDGE_TOP    0
+#define SKIN_EDGE_BOTTOM 1
+#define SKIN_DOCK_FLOAT  0
+#define SKIN_DOCK_HIDDEN 1
+typedef struct {
+    char id[64];
+    char name[80];
+    char description[112];
+    char dir[PATH_MAX];
+    char css[PATH_MAX];
+    char layout[PATH_MAX];
+    int  menubar_edge;    /* SKIN_EDGE_TOP | SKIN_EDGE_BOTTOM */
+    int  menubar_height;  /* exclusive-zone / layer height in px */
+    int  dock_mode;       /* SKIN_DOCK_FLOAT | SKIN_DOCK_HIDDEN */
+    /* Toolkit themes shipped under gtk/<name>/ and qt/ inside the skin dir. */
+    char gtk_theme[80];   /* empty = leave session GTK theme alone */
+    char qt_style[64];    /* e.g. Fusion; empty = unset override */
+    char qt_qss[PATH_MAX];/* absolute path to style.qss, or empty */
+    /* Compositor SSD chrome. titlebar_style < 0 → use Settings toggle. */
+    int  titlebar_style;  /* -1 unset | 0 modern | 1 classic dots | 2 flat retro */
+    unsigned int titlebar_active;   /* 0 = compositor default palette */
+    unsigned int titlebar_inactive;
+    unsigned int titlebar_frame;
+    int  prefer_ssd;      /* recommend server decorations when client unset */
+} LunaSkin;
+
+static LunaSkin g_skins[MAX_SKINS];
+static int g_skin_count = 0;
+/* Live chrome geometry used by popup positioning (menus open upward when
+ * the menubar is a bottom taskbar). */
+static int g_chrome_menubar_edge = SKIN_EDGE_TOP;
+static int g_chrome_menubar_height = 32;
+static int g_chrome_dock_hidden = 0;
+static void skin_apply_chrome(int skin_idx);
+static void skin_apply_toolkit(int skin_idx);
+static void skin_apply_wm_decoration(int skin_idx);
+static void skin_chrome_defaults(LunaSkin* skin);
+static unsigned int skin_parse_color(const char* val);
+
+static int path_is_regular(const char* path) {
+    struct stat st;
+    return path && *path && stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static int skin_join(char* out, size_t n, const char* dir, const char* leaf) {
+    if (!out || n == 0) return 0;
+    if (!leaf || !*leaf) { out[0] = 0; return 1; }
+    size_t dl = leaf[0] == '/' ? 0 : strlen(dir);
+    size_t ll = strlen(leaf);
+    if (dl + (dl ? 1 : 0) + ll + 1 > n) { out[0] = 0; return 0; }
+    if (dl) {
+        memcpy(out, dir, dl);
+        out[dl++] = '/';
+    }
+    memcpy(out + dl, leaf, ll + 1);
+    return 1;
+}
+
+static int skin_find(const char* id) {
+    if (!id || !*id) return 0;
+    for (int i = 0; i < g_skin_count; i++)
+        if (!strcmp(g_skins[i].id, id)) return i;
+    return 0;
+}
+
+static void skin_chrome_defaults(LunaSkin* skin) {
+    if (!skin) return;
+    skin->menubar_edge = SKIN_EDGE_TOP;
+    skin->menubar_height = 32;
+    skin->dock_mode = SKIN_DOCK_FLOAT;
+    skin->gtk_theme[0] = 0;
+    skin->qt_style[0] = 0;
+    skin->qt_qss[0] = 0;
+    skin->titlebar_style = -1;
+    skin->titlebar_active = 0;
+    skin->titlebar_inactive = 0;
+    skin->titlebar_frame = 0;
+    skin->prefer_ssd = 0;
+}
+
+/* Accept #RRGGBB, #AARRGGBB, 0xRRGGBB, or 0xAARRGGBB. Missing alpha → opaque. */
+static unsigned int skin_parse_color(const char* val) {
+    if (!val || !*val) return 0;
+    while (*val == ' ' || *val == '\t') val++;
+    if (*val == '#') val++;
+    if (val[0] == '0' && (val[1] == 'x' || val[1] == 'X')) val += 2;
+    char* end = NULL;
+    unsigned long v = strtoul(val, &end, 16);
+    if (!end || end == val) return 0;
+    size_t digits = (size_t)(end - val);
+    if (digits <= 6) return 0xff000000u | (unsigned int)(v & 0xfffffful);
+    return (unsigned int)(v & 0xfffffffful);
+}
+
+static void skin_apply_chrome_preset(LunaSkin* skin, const char* preset) {
+    if (!skin || !preset) return;
+    if (!strcmp(preset, "taskbar")) {
+        /* Windows 9x/XP-style bottom bar; apps live in the menubar window list. */
+        skin->menubar_edge = SKIN_EDGE_BOTTOM;
+        skin->menubar_height = 34;
+        skin->dock_mode = SKIN_DOCK_HIDDEN;
+    } else if (!strcmp(preset, "deskbar")) {
+        /* BeOS Deskbar: compact top strip, no floating dock. */
+        skin->menubar_edge = SKIN_EDGE_TOP;
+        skin->menubar_height = 28;
+        skin->dock_mode = SKIN_DOCK_HIDDEN;
+    } else if (!strcmp(preset, "menubar")) {
+        /* Classic Mac OS: top menubar only. */
+        skin->menubar_edge = SKIN_EDGE_TOP;
+        skin->menubar_height = 22;
+        skin->dock_mode = SKIN_DOCK_HIDDEN;
+    } else if (!strcmp(preset, "luna") || !strcmp(preset, "default")) {
+        skin_chrome_defaults(skin);
+    }
+}
+
+static void skin_add_dir(const char* root, const char* id) {
+    if (!root || !*root || !id || !*id || g_skin_count >= MAX_SKINS) return;
+    for (int i = 0; i < g_skin_count; i++)
+        if (!strcmp(g_skins[i].id, id)) return;
+
+    char dir[PATH_MAX], conf[PATH_MAX];
+    if (!skin_join(dir, sizeof(dir), root, id) ||
+        !skin_join(conf, sizeof(conf), dir, "skin.conf")) return;
+    if (!path_is_regular(conf)) return;
+
+    LunaSkin skin;
+    memset(&skin, 0, sizeof(skin));
+    skin_chrome_defaults(&skin);
+    snprintf(skin.id, sizeof(skin.id), "%s", id);
+    snprintf(skin.name, sizeof(skin.name), "%s", id);
+    snprintf(skin.description, sizeof(skin.description), "External desktop skin");
+    snprintf(skin.dir, sizeof(skin.dir), "%s", dir);
+    char css_leaf[128] = "style.css";
+    /* Prefer layout.html when present so browser-previewable HTML is the
+     * same file the shell loads — skin.conf may override the leaf name. */
+    char layout_leaf[128] = "layout.html";
+    char qt_qss_leaf[128] = "";
+
+    FILE* f = fopen(conf, "r");
+    if (!f) return;
+    char line[384];
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!line[0] || line[0] == '#') continue;
+        char* eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        const char* key = line;
+        const char* val = eq + 1;
+        if (!strcmp(key, "name")) snprintf(skin.name, sizeof(skin.name), "%s", val);
+        else if (!strcmp(key, "description")) snprintf(skin.description, sizeof(skin.description), "%s", val);
+        else if (!strcmp(key, "css")) snprintf(css_leaf, sizeof(css_leaf), "%s", val);
+        else if (!strcmp(key, "layout")) snprintf(layout_leaf, sizeof(layout_leaf), "%s", val);
+        else if (!strcmp(key, "chrome")) skin_apply_chrome_preset(&skin, val);
+        else if (!strcmp(key, "menubar_edge")) {
+            skin.menubar_edge = !strcmp(val, "bottom") ? SKIN_EDGE_BOTTOM : SKIN_EDGE_TOP;
+        } else if (!strcmp(key, "menubar_height")) {
+            int h = atoi(val);
+            if (h >= 18 && h <= 96) skin.menubar_height = h;
+        } else if (!strcmp(key, "dock_mode")) {
+            if (!strcmp(val, "hidden")) skin.dock_mode = SKIN_DOCK_HIDDEN;
+            else skin.dock_mode = SKIN_DOCK_FLOAT;
+        } else if (!strcmp(key, "gtk_theme")) {
+            snprintf(skin.gtk_theme, sizeof(skin.gtk_theme), "%s", val);
+        } else if (!strcmp(key, "qt_style")) {
+            snprintf(skin.qt_style, sizeof(skin.qt_style), "%s", val);
+        } else if (!strcmp(key, "qt_qss")) {
+            snprintf(qt_qss_leaf, sizeof(qt_qss_leaf), "%s", val);
+        } else if (!strcmp(key, "titlebar_style")) {
+            int s = atoi(val);
+            if (s >= 0 && s <= 2) skin.titlebar_style = s;
+        } else if (!strcmp(key, "titlebar_active")) {
+            skin.titlebar_active = skin_parse_color(val);
+        } else if (!strcmp(key, "titlebar_inactive")) {
+            skin.titlebar_inactive = skin_parse_color(val);
+        } else if (!strcmp(key, "titlebar_frame")) {
+            skin.titlebar_frame = skin_parse_color(val);
+        } else if (!strcmp(key, "prefer_ssd")) {
+            skin.prefer_ssd = atoi(val) != 0;
+        }
+    }
+    fclose(f);
+
+    if (!skin_join(skin.css, sizeof(skin.css), dir, css_leaf) ||
+        !skin_join(skin.layout, sizeof(skin.layout), dir, layout_leaf)) return;
+    if (!path_is_regular(skin.css)) return;
+    if (skin.layout[0] && !path_is_regular(skin.layout)) skin.layout[0] = 0;
+    if (qt_qss_leaf[0]) {
+        if (!skin_join(skin.qt_qss, sizeof(skin.qt_qss), dir, qt_qss_leaf) ||
+            !path_is_regular(skin.qt_qss))
+            skin.qt_qss[0] = 0;
+    } else {
+        char def_qss[PATH_MAX];
+        if (skin_join(def_qss, sizeof(def_qss), dir, "qt/style.qss") &&
+            path_is_regular(def_qss))
+            snprintf(skin.qt_qss, sizeof(skin.qt_qss), "%s", def_qss);
+    }
+    /* Auto-detect gtk_theme from gtk/<Name>/index.theme when conf omits it. */
+    if (!skin.gtk_theme[0]) {
+        char gtk_root[PATH_MAX];
+        if (skin_join(gtk_root, sizeof(gtk_root), dir, "gtk")) {
+            DIR* gd = opendir(gtk_root);
+            if (gd) {
+                struct dirent* ge;
+                while ((ge = readdir(gd)) != NULL) {
+                    if (ge->d_name[0] == '.') continue;
+                    char idx[PATH_MAX];
+                    if (skin_join(idx, sizeof(idx), gtk_root, ge->d_name)) {
+                        size_t n = strlen(idx);
+                        if (n + 12 < sizeof(idx)) {
+                            snprintf(idx + n, sizeof(idx) - n, "/index.theme");
+                            if (path_is_regular(idx)) {
+                                snprintf(skin.gtk_theme, sizeof(skin.gtk_theme),
+                                         "%s", ge->d_name);
+                                break;
+                            }
+                        }
+                    }
+                }
+                closedir(gd);
+            }
+        }
+    }
+    g_skins[g_skin_count++] = skin;
+}
+
+static void skin_scan_root(const char* root) {
+    if (!root || !*root || g_skin_count >= MAX_SKINS) return;
+    DIR* d = opendir(root);
+    if (!d) return;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != NULL && g_skin_count < MAX_SKINS) {
+        if (ent->d_name[0] == '.' || ent->d_name[0] == '_') continue;
+        skin_add_dir(root, ent->d_name);
+    }
+    closedir(d);
+}
+
+static void skin_discover(void) {
+    memset(g_skins, 0, sizeof(g_skins));
+    g_skin_count = 1;
+    skin_chrome_defaults(&g_skins[0]);
+    snprintf(g_skins[0].id, sizeof(g_skins[0].id), "luna");
+    snprintf(g_skins[0].name, sizeof(g_skins[0].name), "Luna Moonlight");
+    snprintf(g_skins[0].description, sizeof(g_skins[0].description), "The built-in Luna desktop");
+
+    const char* extra = getenv("LUNA_SKIN_PATH");
+    if (extra && *extra) skin_scan_root(extra);
+    const char* home = getenv("HOME");
+    if (home && *home) {
+        char user_root[PATH_MAX];
+        snprintf(user_root, sizeof(user_root), "%s/.local/share/luna-desktop/skins", home);
+        skin_scan_root(user_root);
+    }
+    skin_scan_root("skins");
+    skin_scan_root("apps/luna-ui/skins");
+    {
+        char exe[PATH_MAX], exe_root[PATH_MAX];
+        ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (len > 0) {
+            exe[len] = 0;
+            char* slash = strrchr(exe, '/');
+            if (slash) {
+                *slash = 0;
+                if (skin_join(exe_root, sizeof(exe_root), exe,
+                              "../share/luna-desktop/skins"))
+                    skin_scan_root(exe_root);
+            }
+        }
+    }
+    skin_scan_root("/usr/local/share/luna-desktop/skins");
+    skin_scan_root("/usr/share/luna-desktop/skins");
+}
+
+static int skin_apply_styles(const char* id) {
+    int selected = skin_find(id);
+    luna_reset_css();
+    int base_ok = g_css_path && luna_load_css_file(g_css_path);
+    if (!base_ok) luna_parse_css(default_css);
+    if (selected > 0 && !luna_load_css_file(g_skins[selected].css)) {
+        luna_reset_css();
+        luna_parse_css(default_css);
+        return 0;
+    }
+    luna_mark_layout_dirty();
+    return 1;
 }
 
 /* Session restore state — impl after app_launch / window list helpers. */
@@ -323,13 +653,15 @@ static int g_stab_wm_idx           = -1;
 static int g_win_menu_idx  = -1;
 static int g_clip_menu_idx = -1;
 static int g_mb_clip_idx   = -1;
-static uint32_t g_win_menu_target = 0;
+static uint64_t g_win_menu_target = 0;
 /* Cached menubar hit-test indices (avoid repeated ID lookups in mouse hook) */
 static int g_mb_logo_idx  = -1;
 static int g_mb_cc_idx    = -1;
 static int g_mb_wifi_idx  = -1;
 static int g_wifi_menu_idx = -1;
 static int g_wifi_selected = -1;
+static int g_mb_weather_idx = -1;
+static int g_weather_menu_idx = -1;
 
 /* ── Per-frame child element cache (populated once in bind_indices) ──
  * Eliminates O(n) element scans from update_window_list_ui,
@@ -357,6 +689,33 @@ static WifiNetwork g_wifi_networks[MAX_WIFI_NETWORKS];
 static int g_wifi_count = 0;
 static int g_wifi_powered = 0;
 
+/* ── Weather (Open-Meteo; mirrors qberry-weather.js) ── */
+#define WEATHER_FORECAST_DAYS 5
+#define WEATHER_REFRESH_SEC   1800.0
+typedef struct {
+    char city[64];
+    char country[64];
+    int  code;
+    float temp;
+    float feels;
+    float humidity;
+    float wind;
+    struct {
+        char date[16];
+        int  code;
+        float tmax;
+        float tmin;
+    } days[WEATHER_FORECAST_DAYS];
+    int  ok;
+    char err[96];
+} WeatherData;
+static WeatherData g_weather;
+static pid_t g_weather_pid = -1;
+static int g_weather_busy = 0;
+static double g_last_weather = -1e9;
+static char g_weather_req_city[64];
+static char g_weather_result_path[512];
+
 static double g_last_shell_poll = -10.0;
 static struct timespec g_shell_state_mtime = { .tv_sec = -1, .tv_nsec = 0 };
 static off_t g_shell_state_size = -1;
@@ -369,7 +728,7 @@ static char g_cached_net[16] = "Offline";
 /* ── Compositor window list + system tray (via luna-shell/state.json) ── */
 
 typedef struct {
-    uint32_t id;
+    uint64_t id;
     char     title[96];
     char     app_id[64];
     int      x;
@@ -385,7 +744,7 @@ typedef struct {
     char label[48];
     char icon[24];
     char tooltip[96];
-    uint32_t surface_id; /* parsed from id when applicable */
+    uint64_t surface_id; /* collision-free shell window handle */
 } LunaTrayEntry;
 
 /* Keep the complete compositor snapshot, not only the handful of chips that
@@ -400,7 +759,7 @@ static char          g_shell_state_path[512];
 static char          g_shell_sock_path[512];
 static int           g_win_slot_idx[MAX_WIN_SLOTS];  /* element index for win_0.. */
 static int           g_tray_slot_idx[MAX_TRAY_SLOTS];  /* element index for tray_0.. */
-static uint32_t      g_win_slot_id[MAX_WIN_SLOTS];    /* compositor surface id shown in slot */
+static uint64_t      g_win_slot_id[MAX_WIN_SLOTS];    /* compositor window handle shown in slot */
 static char          g_tray_slot_key[MAX_TRAY_SLOTS][64];
 
 /* ── Dock magnification (macOS-style fisheye) ──
@@ -524,7 +883,7 @@ static const char* tray_glyph(const char* icon) {
 static void parse_tray_surface_id(LunaTrayEntry* t) {
     t->surface_id = 0;
     if (!strncmp(t->id, "win:", 4)) {
-        t->surface_id = (uint32_t)strtoul(t->id + 4, NULL, 10);
+        t->surface_id = (uint64_t)strtoull(t->id + 4, NULL, 10);
     } else if (!strncmp(t->id, "app:", 4)) {
         for (int i = 0; i < g_win_count; i++) {
             if (!strcmp(g_wins[i].app_id, t->id + 4)) {
@@ -535,11 +894,11 @@ static void parse_tray_surface_id(LunaTrayEntry* t) {
     }
 }
 
-static int g_switcher_ids[MAX_SWITCHER_SLOTS];
+static uint64_t g_switcher_ids[MAX_SWITCHER_SLOTS];
 static int g_switcher_count = 0;
 static int g_switcher_index = 0;
 static int g_switcher_visible = 0;
-static int g_pending_menu_id = 0;
+static uint64_t g_pending_menu_id = 0;
 static int g_pending_menu_x = 0;
 static int g_pending_menu_y = 0;
 static uint64_t g_shell_state_hash = 0;
@@ -550,6 +909,12 @@ static int g_shell_state_changed = 0;
  * and delaying Firefox's WaitFlushedEvent / frame callbacks. */
 static uint32_t g_surf_dirty = 0xffffffffu;
 static double   g_last_bg_paint = 0.0;
+/* Whether the wallpaper has a live CSS @keyframes animation.  When it does not
+ * — a plain colour or a photo — the timed background repaint is dropped
+ * entirely instead of pushing an identical full-screen frame several times a
+ * second.  Re-checked once a second because the answer scans the elements. */
+static int      g_bg_animated = 1;
+static double   g_last_bg_anim_check = 0.0;
 static int      g_wl_poll_timeout_ms = 0;
 /* Single-surface backends used to repaint the whole desktop unconditionally.
  * Keep a separate bit for them: g_surf_dirty describes Wayland layers, while
@@ -563,7 +928,7 @@ static void shell_request_repaint(int surf_idx); /* -1 = all; else LUNA_SURF_* *
 
 static uint64_t hash_shell_snapshot(const LunaWinEntry* wins, int wc,
                                     const LunaTrayEntry* tray, int tc,
-                                    int sw_count, int sw_idx, const uint32_t* sw_ids) {
+                                    int sw_count, int sw_idx, const uint64_t* sw_ids) {
     uint64_t h = 0xcbf29ce484222325ULL;
     for (int i = 0; i < wc; i++) {
         h = h * 0x100000001b3ULL ^ wins[i].id;
@@ -609,16 +974,16 @@ static void load_shell_state(void) {
     LunaTrayEntry tray[MAX_TRAY_SLOTS];
     int wc = 0, tc = 0;
     int sw_count = 0, sw_idx = 0;
-    uint32_t sw_ids[MAX_SWITCHER_SLOTS];
+    uint64_t sw_ids[MAX_SWITCHER_SLOTS];
     int have_menu = 0;
-    unsigned menu_id = 0;
+    uint64_t menu_id = 0;
     int menu_x = 0, menu_y = 0;
     char line[512];
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = 0;
         if (line[0] == 'W' && line[1] == '\t') {
             if (wc >= MAX_WINDOWS) continue;
-            unsigned id = 0;
+            uint64_t id = 0;
             int focused = 0, minimized = 0, maximized = 0, fullscreen = 0;
             int wx = 0, wy = 0;
             char title[96]; title[0] = 0;
@@ -627,7 +992,7 @@ static void load_shell_state(void) {
             char* p = line + 2;
             char* tab1 = strchr(p, '\t'); if (!tab1) continue;
             *tab1 = 0;
-            id = (unsigned)strtoul(p, NULL, 10);
+            id = (uint64_t)strtoull(p, NULL, 10);
             p = tab1 + 1;
 
             char* tab2 = strchr(p, '\t'); if (!tab2) continue;
@@ -650,7 +1015,7 @@ static void load_shell_state(void) {
                 if (parsed < 6) wy = 0;
             }
 
-            wins[wc].id = (uint32_t)id;
+            wins[wc].id = id;
             snprintf(wins[wc].title, sizeof(wins[wc].title), "%s", title);
             snprintf(wins[wc].app_id, sizeof(wins[wc].app_id), "%s", app_id);
             wins[wc].x = wx;
@@ -674,7 +1039,7 @@ static void load_shell_state(void) {
                 tc++;
             }
         } else if (line[0] == 'M' && line[1] == '\t') {
-            if (sscanf(line + 2, "%u\t%d\t%d", &menu_id, &menu_x, &menu_y) == 3) {
+            if (sscanf(line + 2, "%" SCNu64 "\t%d\t%d", &menu_id, &menu_x, &menu_y) == 3) {
                 have_menu = 1;
             }
         } else if (line[0] == 'S' && line[1] == '\t') {
@@ -686,7 +1051,7 @@ static void load_shell_state(void) {
             p = tab + 1;
             sw_count = 0;
             while (*p && sw_count < MAX_SWITCHER_SLOTS) {
-                sw_ids[sw_count++] = (uint32_t)strtoul(p, &p, 10);
+                sw_ids[sw_count++] = (uint64_t)strtoull(p, &p, 10);
                 if (*p == ',') p++;
             }
         }
@@ -708,7 +1073,7 @@ static void load_shell_state(void) {
             g_switcher_count = sw_count;
             g_switcher_index = sw_idx;
             for (int i = 0; i < sw_count; i++)
-                g_switcher_ids[i] = (int)sw_ids[i];
+                g_switcher_ids[i] = sw_ids[i];
             g_switcher_visible = 1;
         } else {
             g_switcher_visible = 0;
@@ -717,7 +1082,7 @@ static void load_shell_state(void) {
     }
 
     if (have_menu) {
-        g_pending_menu_id = (int)menu_id;
+        g_pending_menu_id = menu_id;
         g_pending_menu_x = menu_x;
         g_pending_menu_y = menu_y;
     }
@@ -963,7 +1328,7 @@ static void update_switcher_ui(void) {
             continue;
         }
         set_hidden(idx, 0);
-        uint32_t sid = (uint32_t)g_switcher_ids[s];
+        uint64_t sid = g_switcher_ids[s];
         const char* title = "Window";
         const char* app = "";
         for (int i = 0; i < g_win_count; i++) {
@@ -988,10 +1353,16 @@ static void position_menu_at(int menu_idx, float x, float y) {
     LunaElement* m = luna_element_at(menu_idx);
     float mw = m->w > 1.0f ? m->w : (m->css_width > 1.0f ? m->css_width : 200.0f);
     float mh = m->h > 1.0f ? m->h : (m->css_height > 1.0f ? m->css_height : 160.0f);
+    float top_min = (g_chrome_menubar_edge == SKIN_EDGE_BOTTOM)
+        ? 6.0f
+        : (float)(g_chrome_menubar_height + 2);
+    float bot_max = (g_chrome_menubar_edge == SKIN_EDGE_BOTTOM)
+        ? (luna_window_height - (float)g_chrome_menubar_height - 4.0f)
+        : (luna_window_height - 8.0f);
     if (x + mw > luna_window_width - 8.0f) x = luna_window_width - mw - 8.0f;
-    if (y + mh > luna_window_height - 8.0f) y = luna_window_height - mh - 8.0f;
+    if (y + mh > bot_max) y = bot_max - mh;
     if (x < 6.0f) x = 6.0f;
-    if (y < 28.0f) y = 28.0f;
+    if (y < top_min) y = top_min;
     m->rel_x = floorf(x);
     m->rel_y = floorf(y);
     m->pos_overridden_x = 1;
@@ -1153,9 +1524,28 @@ static void wifi_exec(const char* const argv[]) {
     _exit(127);
 }
 
+static int wifi_write_all(int fd, const char* text) {
+    size_t left = strlen(text);
+    while (left) {
+        ssize_t n = write(fd, text, left);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return 0;
+        }
+        text += n;
+        left -= (size_t)n;
+    }
+    return 1;
+}
+
 /* ConnMan obtains Wi-Fi credentials through an Agent, not through `config`.
  * Run connmanctl interactively and feed the agent response over stdin.  Keeping
- * the passphrase out of argv also prevents it being exposed by process tools. */
+ * the passphrase out of argv also prevents it being exposed by process tools.
+ *
+ * Agent registration and Service.Connect are asynchronous.  In particular,
+ * sending "quit" (or closing stdin) immediately after the passphrase removes
+ * the temporary Agent before ConnMan has finished the connection.  A detached
+ * supervisor therefore keeps connmanctl alive for the duration of the attempt. */
 static int wifi_connman_connect(const char* service, const char* passphrase) {
     if (!service || !*service || !passphrase ||
         strchr(service, '\n') || strchr(service, '\r') ||
@@ -1163,28 +1553,54 @@ static int wifi_connman_connect(const char* service, const char* passphrase) {
 
     int input[2];
     if (pipe(input) != 0) return 0;
-    pid_t pid = fork();
-    if (pid < 0) {
+    pid_t supervisor = fork();
+    if (supervisor < 0) {
         close(input[0]);
         close(input[1]);
         return 0;
     }
-    if (pid == 0) {
-        dup2(input[0], STDIN_FILENO);
+    if (supervisor == 0) {
+        pid_t client = fork();
+        if (client < 0) _exit(127);
+        if (client == 0) {
+            dup2(input[0], STDIN_FILENO);
+            close(input[0]);
+            close(input[1]);
+            execlp("connmanctl", "connmanctl", (char*)NULL);
+            _exit(127);
+        }
+
         close(input[0]);
+        if (!wifi_write_all(input[1], "agent on\n")) _exit(127);
+        /* RegisterAgent is an asynchronous D-Bus call.  Do not race the
+         * following Connect call against it on slower systems. */
+        (void)poll(NULL, 0, 500);
+        if (!wifi_write_all(input[1], "connect ") ||
+            !wifi_write_all(input[1], service) ||
+            !wifi_write_all(input[1], "\n") ||
+            (*passphrase && (!wifi_write_all(input[1], passphrase) ||
+                             !wifi_write_all(input[1], "\n")))) {
+            close(input[1]);
+            _exit(127);
+        }
+
+        /* Keep the Agent registered while association, authentication and
+         * address configuration finish.  For an open or already-saved network
+         * no credential prompt is issued, so do not send a blank response. */
+        (void)poll(NULL, 0, 30000);
+        (void)wifi_write_all(input[1], "quit\n");
         close(input[1]);
-        execlp("connmanctl", "connmanctl", (char*)NULL);
-        _exit(127);
+        for (int i = 0; i < 20; i++) {
+            if (waitpid(client, NULL, WNOHANG) == client) _exit(0);
+            (void)poll(NULL, 0, 100);
+        }
+        kill(client, SIGTERM);
+        (void)waitpid(client, NULL, 0);
+        _exit(0);
     }
 
     close(input[0]);
-    FILE* f = fdopen(input[1], "w");
-    if (!f) {
-        close(input[1]);
-        return 0;
-    }
-    fprintf(f, "agent on\nconnect %s\n%s\nquit\n", service, passphrase);
-    fclose(f);
+    close(input[1]);
     return 1;
 }
 
@@ -1354,18 +1770,45 @@ static void position_menu_near(int menu_idx, int anchor_idx, float fallback_x) {
     if (menu_idx < 0) return;
     LunaElement* m = luna_element_at(menu_idx);
     float x = fallback_x;
-    float y = 32.0f;
     float mw = m->css_width > 1.0f ? m->css_width :
                (m->w > 1.0f ? m->w : 240.0f);
+    float mh = m->css_height > 1.0f ? m->css_height :
+               (m->h > 1.0f ? m->h : 220.0f);
+    int open_up = (g_chrome_menubar_edge == SKIN_EDGE_BOTTOM);
+    float y;
+    if (open_up)
+        y = luna_window_height - (float)g_chrome_menubar_height - mh - 4.0f;
+    else
+        y = (float)(g_chrome_menubar_height + 4);
+
     if (anchor_idx >= 0) {
         LunaElement* a = luna_element_at(anchor_idx);
-        x = a->x;
-        y = a->y + a->h + 4.0f;
-        if (y < 32.0f) y = 32.0f;
+        if (a) {
+            x = a->x;
+            if (open_up)
+                y = a->y - mh - 4.0f;
+            else
+                y = a->y + a->h + 4.0f;
+        }
     }
     if (x + mw > luna_window_width - 8.0f)
         x = luna_window_width - mw - 8.0f;
     if (x < 6.0f) x = 6.0f;
+    /* Keep the menu near the chrome edge instead of slamming tall menus to
+     * the opposite side of the output (the old y<6 clamp looked like every
+     * tray menu dropped from the top of a bottom taskbar). */
+    if (open_up) {
+        float min_y = 6.0f;
+        float max_bottom = luna_window_height - (float)g_chrome_menubar_height - 4.0f;
+        if (y + mh > max_bottom) y = max_bottom - mh;
+        if (y < min_y) y = min_y;
+    } else {
+        if (y + mh > luna_window_height - 8.0f)
+            y = luna_window_height - mh - 8.0f;
+        if (y < (float)(g_chrome_menubar_height + 2))
+            y = (float)(g_chrome_menubar_height + 2);
+        if (y < 6.0f) y = 6.0f;
+    }
     m->rel_x = floorf(x);
     m->rel_y = floorf(y);
     m->pos_overridden_x = 1;
@@ -1381,6 +1824,17 @@ static void position_menu_near(int menu_idx, int anchor_idx, float fallback_x) {
     luna_mark_layout_dirty();
 }
 
+/* Prefer the clicked element as the menu anchor when it resolves to a real
+ * widget; otherwise fall back to the menubar status control. */
+static int menu_anchor_from(LunaElement* e, int fallback_idx) {
+    int idx = elem_idx_of(e);
+    if (idx >= 0) {
+        LunaElement* a = luna_element_at(idx);
+        if (a && a->w > 1.0f && a->h > 1.0f) return idx;
+    }
+    return fallback_idx;
+}
+
 /* The control center has a fixed visual width.  Position it from the right
  * edge explicitly instead of relying on the CSS right inset: this also keeps
  * Wi-Fi and Control Center clicks opening the same, correctly aligned panel. */
@@ -1388,9 +1842,14 @@ static void position_control_center(void) {
     if (g_cc_idx < 0) return;
     LunaElement* m = luna_element_at(g_cc_idx);
     float w = m->css_width > 1.0f ? m->css_width : (m->w > 1.0f ? m->w : 324.0f);
+    float h = m->css_height > 1.0f ? m->css_height : (m->h > 1.0f ? m->h : 360.0f);
     m->rel_x = floorf(luna_window_width - w - 8.0f);
-    m->rel_y = 36.0f;
+    if (g_chrome_menubar_edge == SKIN_EDGE_BOTTOM)
+        m->rel_y = floorf(luna_window_height - (float)g_chrome_menubar_height - h - 8.0f);
+    else
+        m->rel_y = (float)(g_chrome_menubar_height + 4);
     if (m->rel_x < 6.0f) m->rel_x = 6.0f;
+    if (m->rel_y < 6.0f) m->rel_y = 6.0f;
     m->pos_overridden_x = 1;
     m->pos_overridden_y = 1;
     m->has_left = 1;
@@ -1474,6 +1933,221 @@ static void apply_keyboard_layout(const char* layout) {
     shell_send_cmd(cmd);
 }
 
+static int gtk_ini_has_key(const char* path, const char* key) {
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    char line[512];
+    size_t key_len = strlen(key);
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (!strncmp(p, key, key_len)) {
+            p += key_len;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '=') { found = 1; break; }
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+static void ensure_gtk_ini_defaults(const char* path, const char* layout,
+                                    const char* font_name) {
+    int have_layout = gtk_ini_has_key(path, "gtk-decoration-layout");
+    int have_font = gtk_ini_has_key(path, "gtk-font-name");
+    int have_dpi = gtk_ini_has_key(path, "gtk-xft-dpi");
+    if (have_layout && have_font && have_dpi) return;
+
+    FILE* f = fopen(path, access(path, F_OK) == 0 ? "a" : "w");
+    if (!f) return;
+    /* Xorg/LXDE normally supplies these through XSettings.  A bare Wayland
+     * session has no XSettings manager, so GTK otherwise falls back to an
+     * 11-point font even when the Xorg desktop used 9 points.  Keep existing
+     * user choices; only fill values which are absent. */
+    fprintf(f, "\n[Settings]\n");
+    if (!have_layout) fprintf(f, "gtk-decoration-layout=%s\n", layout);
+    if (!have_font) fprintf(f, "gtk-font-name=%s\n", font_name);
+    if (!have_dpi) fprintf(f, "gtk-xft-dpi=98304\n"); /* 96 * 1024 */
+    fclose(f);
+}
+
+/* Rewrite (or create) gtk settings.ini so gtk-theme-name matches the skin.
+ * Other Settings keys are preserved when present. */
+static void gtk_ini_set_theme(const char* path, const char* theme_name,
+                              const char* layout, const char* font_name) {
+    if (!path || !theme_name || !*theme_name) return;
+    char tmp[640];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE* in = fopen(path, "r");
+    FILE* out = fopen(tmp, "w");
+    if (!out) {
+        if (in) fclose(in);
+        return;
+    }
+    int saw_settings = 0;
+    int wrote_theme = 0;
+    int wrote_layout = 0;
+    int wrote_font = 0;
+    int wrote_dpi = 0;
+    char line[512];
+    if (in) {
+        while (fgets(line, sizeof(line), in)) {
+            char* p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '[') {
+                if (!strncmp(p, "[Settings]", 10)) saw_settings = 1;
+                else if (saw_settings && !wrote_theme) {
+                    fprintf(out, "gtk-theme-name=%s\n", theme_name);
+                    wrote_theme = 1;
+                    if (layout && *layout && !wrote_layout) {
+                        fprintf(out, "gtk-decoration-layout=%s\n", layout);
+                        wrote_layout = 1;
+                    }
+                    if (font_name && *font_name && !wrote_font) {
+                        fprintf(out, "gtk-font-name=%s\n", font_name);
+                        wrote_font = 1;
+                    }
+                    if (!wrote_dpi) {
+                        fprintf(out, "gtk-xft-dpi=98304\n");
+                        wrote_dpi = 1;
+                    }
+                    saw_settings = 0;
+                }
+                fputs(line, out);
+                continue;
+            }
+            if (!strncmp(p, "gtk-theme-name", 14)) {
+                char* eq = strchr(p, '=');
+                if (eq) {
+                    fprintf(out, "gtk-theme-name=%s\n", theme_name);
+                    wrote_theme = 1;
+                    continue;
+                }
+            }
+            if (!strncmp(p, "gtk-decoration-layout", 21)) wrote_layout = 1;
+            if (!strncmp(p, "gtk-font-name", 13)) wrote_font = 1;
+            if (!strncmp(p, "gtk-xft-dpi", 11)) wrote_dpi = 1;
+            fputs(line, out);
+        }
+        fclose(in);
+    }
+    if (!wrote_theme) {
+        fprintf(out, "[Settings]\n");
+        fprintf(out, "gtk-theme-name=%s\n", theme_name);
+        if (layout && *layout) fprintf(out, "gtk-decoration-layout=%s\n", layout);
+        if (font_name && *font_name) fprintf(out, "gtk-font-name=%s\n", font_name);
+        fprintf(out, "gtk-xft-dpi=98304\n");
+    }
+    fclose(out);
+    rename(tmp, path);
+}
+
+static void skin_apply_toolkit(int skin_idx) {
+    if (skin_idx < 0 || skin_idx >= g_skin_count) skin_idx = 0;
+    const LunaSkin* skin = &g_skins[skin_idx];
+    const char* home = getenv("HOME");
+    if (!home || !*home) home = "/root";
+    const char* layout = getenv("LUNA_GTK_BUTTON_LAYOUT");
+    if (!layout || !*layout) layout = "icon:minimize,maximize,close";
+    const char* font_name = getenv("LUNA_GTK_FONT_NAME");
+    if (!font_name || !*font_name) font_name = "Sans 9";
+
+    if (skin->gtk_theme[0] && skin->dir[0]) {
+        /* GTK resolves $XDG_DATA_DIRS/themes/<Name>.  Symlink the skin's
+         * gtk/<Name> into ~/.local/share/themes so new clients pick it up. */
+        char theme_src[PATH_MAX], idx[PATH_MAX], theme_dst[PATH_MAX];
+        char local[PATH_MAX], share[PATH_MAX], themes[PATH_MAX];
+        int ok = skin_join(theme_src, sizeof(theme_src), skin->dir, "gtk") &&
+                 skin_join(theme_src, sizeof(theme_src), theme_src, skin->gtk_theme) &&
+                 skin_join(idx, sizeof(idx), theme_src, "index.theme") &&
+                 path_is_regular(idx);
+        if (ok) {
+            snprintf(local, sizeof(local), "%s/.local", home);
+            snprintf(share, sizeof(share), "%s/.local/share", home);
+            snprintf(themes, sizeof(themes), "%s/.local/share/themes", home);
+            mkdir(local, 0755);
+            mkdir(share, 0755);
+            mkdir(themes, 0755);
+            snprintf(theme_dst, sizeof(theme_dst), "%s/%s", themes, skin->gtk_theme);
+            unlink(theme_dst);
+            symlink(theme_src, theme_dst);
+            setenv("GTK_THEME", skin->gtk_theme, 1);
+            static const char* vers[] = { "gtk-3.0", "gtk-4.0", NULL };
+            for (int i = 0; vers[i]; i++) {
+                char dir[512], ini[576];
+                snprintf(dir, sizeof(dir), "%s/.config/%s", home, vers[i]);
+                snprintf(ini, sizeof(ini), "%s/settings.ini", dir);
+                mkdir(dir, 0755);
+                gtk_ini_set_theme(ini, skin->gtk_theme, layout, font_name);
+            }
+        }
+    } else {
+        unsetenv("GTK_THEME");
+    }
+
+    if (skin->qt_style[0])
+        setenv("QT_STYLE_OVERRIDE", skin->qt_style, 1);
+    else
+        unsetenv("QT_STYLE_OVERRIDE");
+
+    if (skin->qt_qss[0])
+        setenv("LUNA_QT_QSS", skin->qt_qss, 1);
+    else
+        unsetenv("LUNA_QT_QSS");
+
+    /* Prefer qt5ct/qt6ct when installed so Fusion + our QSS apply to new
+     * Qt clients without each app loading LUNA_QT_QSS itself. */
+    if (skin->qt_qss[0] || skin->qt_style[0]) {
+        static const char* qtct[] = { "qt5ct", "qt6ct", NULL };
+        for (int i = 0; qtct[i]; i++) {
+            char dir[512], conf[576];
+            snprintf(dir, sizeof(dir), "%s/.config/%s", home, qtct[i]);
+            mkdir(dir, 0755);
+            snprintf(conf, sizeof(conf), "%s/%s.conf", dir, qtct[i]);
+            FILE* qf = fopen(conf, "w");
+            if (!qf) continue;
+            fprintf(qf, "[Appearance]\n");
+            fprintf(qf, "style=%s\n",
+                    skin->qt_style[0] ? skin->qt_style : "Fusion");
+            if (skin->qt_qss[0])
+                fprintf(qf, "stylesheet=%s\n", skin->qt_qss);
+            fprintf(qf, "standard_dialogs=default\n");
+            fclose(qf);
+        }
+        if (!getenv("QT_QPA_PLATFORMTHEME") ||
+            !strcmp(getenv("QT_QPA_PLATFORMTHEME"), "gtk2") ||
+            !strcmp(getenv("QT_QPA_PLATFORMTHEME"), "gtk3")) {
+            /* Only force qt5ct when the theme plugin is likely available;
+             * otherwise leave the platform theme alone. */
+            if (access("/usr/lib/x86_64-linux-gnu/qt5/plugins/platformthemes/libqt5ct.so", R_OK) == 0 ||
+                access("/usr/lib/aarch64-linux-gnu/qt5/plugins/platformthemes/libqt5ct.so", R_OK) == 0 ||
+                access("/usr/lib/qt/plugins/platformthemes/libqt5ct.so", R_OK) == 0)
+                setenv("QT_QPA_PLATFORMTHEME", "qt5ct", 1);
+            else if (access("/usr/lib/x86_64-linux-gnu/qt6/plugins/platformthemes/libqt6ct.so", R_OK) == 0 ||
+                     access("/usr/lib/aarch64-linux-gnu/qt6/plugins/platformthemes/libqt6ct.so", R_OK) == 0)
+                setenv("QT_QPA_PLATFORMTHEME", "qt6ct", 1);
+        }
+    }
+}
+
+static void skin_apply_wm_decoration(int skin_idx) {
+    if (skin_idx < 0 || skin_idx >= g_skin_count) skin_idx = 0;
+    const LunaSkin* skin = &g_skins[skin_idx];
+    char cmd[160];
+    int style = skin->titlebar_style >= 0 ? skin->titlebar_style
+                                          : g_settings.classic_titlebar;
+    if (style < 0) style = 0;
+    if (style > 2) style = 2;
+    snprintf(cmd, sizeof(cmd), "wm_config titlebar_style %d", style);
+    shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config titlebar_colors %u %u %u",
+             skin->titlebar_active, skin->titlebar_inactive, skin->titlebar_frame);
+    shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config prefer_ssd %d", skin->prefer_ssd ? 1 : 0);
+    shell_send_cmd(cmd);
+}
+
 static void settings_mark_kb(const char* layout) {
     static const char* ids[] = {
         "kb_jp_us", "kb_us", "kb_jp", "kb_de_us", "kb_fr_us", "kb_kr_us", NULL
@@ -1537,12 +2211,13 @@ static void apply_toolkit_session_env(void) {
         setenv("MOZ_LAYERS_ALLOW_SOFTWARE_GL", "1", 0);
     if (!getenv("QT_QPA_PLATFORM"))
         setenv("QT_QPA_PLATFORM", "wayland", 0);
-    if (!getenv("GDK_SCALE"))
-        setenv("GDK_SCALE", "1", 0);
-    if (!getenv("GDK_DPI_SCALE"))
-        setenv("GDK_DPI_SCALE", "1", 0);
-    if (!getenv("QT_SCALE_FACTOR"))
-        setenv("QT_SCALE_FACTOR", "1", 0);
+    /* Do not inherit scale hints from the Xorg login which started Luna.
+     * GDK_SCALE=2 is especially harmful here: GTK submits a 2x buffer and our
+     * scale-1 output then displays it at twice the intended logical size.
+     * Luna-specific variables remain available as explicit overrides. */
+    setenv("GDK_SCALE", getenv("LUNA_GDK_SCALE") ?: "1", 1);
+    setenv("GDK_DPI_SCALE", getenv("LUNA_GDK_DPI_SCALE") ?: "1", 1);
+    setenv("QT_SCALE_FACTOR", getenv("LUNA_QT_SCALE_FACTOR") ?: "1", 1);
     /* Berry often exports GSK_RENDERER=vulkan.  Luna has no Vulkan WSI /
      * dmabuf path for clients — GTK4 then stalls and Firefox's crash /
      * Troubleshoot dialogs never paint.  Prefer Cairo (CPU) unless the
@@ -1557,6 +2232,8 @@ static void apply_toolkit_session_env(void) {
         const char* layout = getenv("LUNA_GTK_BUTTON_LAYOUT");
         if (!layout || !*layout)
             layout = "icon:minimize,maximize,close";
+        const char* font_name = getenv("LUNA_GTK_FONT_NAME");
+        if (!font_name || !*font_name) font_name = "Sans 9";
         static const char* vers[] = { "gtk-3.0", "gtk-4.0", NULL };
         const char* home = getenv("HOME");
         if (!home || !*home) home = "/root";
@@ -1565,13 +2242,7 @@ static void apply_toolkit_session_env(void) {
             snprintf(dir, sizeof(dir), "%s/.config/%s", home, vers[i]);
             snprintf(ini, sizeof(ini), "%s/settings.ini", dir);
             mkdir(dir, 0755);
-            if (access(ini, F_OK) != 0) {
-                FILE* f = fopen(ini, "w");
-                if (f) {
-                    fprintf(f, "[Settings]\ngtk-decoration-layout=%s\n", layout);
-                    fclose(f);
-                }
-            }
+            ensure_gtk_ini_defaults(ini, layout, font_name);
         }
     }
 
@@ -1804,10 +2475,524 @@ static void app_launch(LunaApp* app) {
     }
 }
 
+/* ── Weather (Open-Meteo; mirrors qberry-weather.js) ── */
+
+static void dismiss_luna_menu(int trap_idx);
+static void dismiss_cc(int trap_idx);
+static void dismiss_win_menu(void);
+static void dismiss_clip_menu(void);
+static void dismiss_wifi_menu(void);
+static void weather_finish(int status);
+
+static void weather_cache_path(char* buf, size_t n) {
+    const char* home = getenv("HOME");
+    if (!home || !*home) home = "/root";
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/.cache", home);
+    mkdir(dir, 0755);
+    snprintf(dir, sizeof(dir), "%s/.cache/luna-shell", home);
+    mkdir(dir, 0755);
+    snprintf(buf, n, "%s/.cache/luna-shell/weather.dat", home);
+}
+
+static void url_encode(const char* s, char* out, size_t n) {
+    static const char* hex = "0123456789ABCDEF";
+    size_t o = 0;
+    for (; s && *s && o + 4 < n; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out[o++] = (char)c;
+        } else if (c == ' ') {
+            out[o++] = '+';
+        } else {
+            out[o++] = '%';
+            out[o++] = hex[c >> 4];
+            out[o++] = hex[c & 15];
+        }
+    }
+    out[o] = 0;
+}
+
+static char* curl_slurp(const char* url) {
+    char cmd[1400];
+    snprintf(cmd, sizeof(cmd),
+             "curl -sS --max-time 12 -A 'luna-shell/%s' '%s' 2>/dev/null",
+             LUNA_SHELL_VERSION, url);
+    FILE* f = popen(cmd, "r");
+    if (!f) return NULL;
+    size_t cap = 8192, n = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { pclose(f); return NULL; }
+    while (!feof(f)) {
+        if (n + 2048 >= cap) {
+            cap *= 2;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) { free(buf); pclose(f); return NULL; }
+            buf = nb;
+        }
+        size_t r = fread(buf + n, 1, 2048, f);
+        if (!r) break;
+        n += r;
+    }
+    pclose(f);
+    buf[n] = 0;
+    return buf;
+}
+
+static const char* json_after_key(const char* j, const char* key) {
+    char pat[80];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char* p = strstr(j, pat);
+    if (!p) return NULL;
+    p += strlen(pat);
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ':') p++;
+    return p;
+}
+
+static int json_get_num(const char* j, const char* key, double* out) {
+    const char* p = json_after_key(j, key);
+    if (!p) return 0;
+    char* end = NULL;
+    *out = strtod(p, &end);
+    return end && end != p;
+}
+
+static int json_get_str(const char* j, const char* key, char* out, size_t n) {
+    const char* p = json_after_key(j, key);
+    if (!p || *p != '"') return 0;
+    p++;
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < n) {
+        if (*p == '\\' && p[1]) p++;
+        out[i++] = *p++;
+    }
+    out[i] = 0;
+    return 1;
+}
+
+static int json_get_num_array(const char* j, const char* key, double* out, int max) {
+    const char* p = json_after_key(j, key);
+    if (!p || *p != '[') return 0;
+    p++;
+    int n = 0;
+    while (n < max && *p && *p != ']') {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') p++;
+        if (*p == ']') break;
+        char* end = NULL;
+        out[n] = strtod(p, &end);
+        if (!end || end == p) break;
+        p = end;
+        n++;
+    }
+    return n;
+}
+
+static int json_get_str_array(const char* j, const char* key, char out[][16], int max) {
+    const char* p = json_after_key(j, key);
+    if (!p || *p != '[') return 0;
+    p++;
+    int n = 0;
+    while (n < max && *p && *p != ']') {
+        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') p++;
+        if (*p == ']') break;
+        if (*p != '"') break;
+        p++;
+        size_t i = 0;
+        while (*p && *p != '"' && i + 1 < sizeof(out[0])) out[n][i++] = *p++;
+        out[n][i] = 0;
+        if (*p == '"') p++;
+        n++;
+    }
+    return n;
+}
+
+static const char* weather_icon_glyph(int code) {
+    if (code == 0) return "\uf185";
+    if (code == 1 || code == 2) return "\uf6c4";
+    if (code == 3) return "\uf0c2";
+    if (code == 45 || code == 48) return "\uf75f";
+    if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return "\uf73d";
+    if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) return "\uf2dc";
+    if (code >= 95) return "\uf0e7";
+    return "\uf2c9";
+}
+
+static const char* weather_code_text(int code) {
+    switch (code) {
+    case 0: return "Clear sky";
+    case 1: return "Mainly clear";
+    case 2: return "Partly cloudy";
+    case 3: return "Overcast";
+    case 45: case 48: return "Fog";
+    case 51: return "Light drizzle";
+    case 53: return "Drizzle";
+    case 55: return "Heavy drizzle";
+    case 61: return "Light rain";
+    case 63: return "Rain";
+    case 65: return "Heavy rain";
+    case 71: return "Light snow";
+    case 73: return "Snow";
+    case 75: return "Heavy snow";
+    case 80: return "Rain showers";
+    case 81: return "Showers";
+    case 82: return "Heavy showers";
+    case 95: case 96: case 99: return "Thunderstorm";
+    default: return "Unknown";
+    }
+}
+
+static int weather_fetch_sync(const char* city, WeatherData* out) {
+    memset(out, 0, sizeof(*out));
+    if (!city || !*city) {
+        snprintf(out->err, sizeof(out->err), "Enter a city");
+        return -1;
+    }
+    char enc[192], url[512];
+    url_encode(city, enc, sizeof(enc));
+    snprintf(url, sizeof(url),
+             "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&language=en&format=json",
+             enc);
+    char* geo = curl_slurp(url);
+    if (!geo || !geo[0]) {
+        free(geo);
+        snprintf(out->err, sizeof(out->err), "Network error (geocode)");
+        return -1;
+    }
+    if (!strstr(geo, "\"results\"")) {
+        free(geo);
+        snprintf(out->err, sizeof(out->err), "City not found");
+        return -1;
+    }
+    double lat = 0, lon = 0;
+    if (!json_get_num(geo, "latitude", &lat) || !json_get_num(geo, "longitude", &lon)) {
+        free(geo);
+        snprintf(out->err, sizeof(out->err), "City not found");
+        return -1;
+    }
+    json_get_str(geo, "name", out->city, sizeof(out->city));
+    json_get_str(geo, "country", out->country, sizeof(out->country));
+    free(geo);
+
+    snprintf(url, sizeof(url),
+             "https://api.open-meteo.com/v1/forecast?"
+             "latitude=%.4f&longitude=%.4f"
+             "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,apparent_temperature"
+             "&daily=weather_code,temperature_2m_max,temperature_2m_min"
+             "&timezone=auto&forecast_days=7",
+             lat, lon);
+    char* wx = curl_slurp(url);
+    if (!wx || !wx[0]) {
+        free(wx);
+        snprintf(out->err, sizeof(out->err), "Weather data unavailable");
+        return -1;
+    }
+    const char* cur = strstr(wx, "\"current\"");
+    const char* daily = strstr(wx, "\"daily\"");
+    if (!cur) {
+        free(wx);
+        snprintf(out->err, sizeof(out->err), "Weather data unavailable");
+        return -1;
+    }
+    double v = 0;
+    if (json_get_num(cur, "temperature_2m", &v)) out->temp = (float)v;
+    if (json_get_num(cur, "apparent_temperature", &v)) out->feels = (float)v;
+    if (json_get_num(cur, "relative_humidity_2m", &v)) out->humidity = (float)v;
+    if (json_get_num(cur, "wind_speed_10m", &v)) out->wind = (float)v;
+    if (json_get_num(cur, "weather_code", &v)) out->code = (int)v;
+
+    if (daily) {
+        char times[WEATHER_FORECAST_DAYS][16];
+        double codes[WEATHER_FORECAST_DAYS], tmax[WEATHER_FORECAST_DAYS], tmin[WEATHER_FORECAST_DAYS];
+        int nt = json_get_str_array(daily, "time", times, WEATHER_FORECAST_DAYS);
+        int nc = json_get_num_array(daily, "weather_code", codes, WEATHER_FORECAST_DAYS);
+        int nx = json_get_num_array(daily, "temperature_2m_max", tmax, WEATHER_FORECAST_DAYS);
+        int nn = json_get_num_array(daily, "temperature_2m_min", tmin, WEATHER_FORECAST_DAYS);
+        int n = nt;
+        if (nc < n) n = nc;
+        if (nx < n) n = nx;
+        if (nn < n) n = nn;
+        for (int i = 0; i < n && i < WEATHER_FORECAST_DAYS; i++) {
+            snprintf(out->days[i].date, sizeof(out->days[i].date), "%s", times[i]);
+            out->days[i].code = (int)codes[i];
+            out->days[i].tmax = (float)tmax[i];
+            out->days[i].tmin = (float)tmin[i];
+        }
+    }
+    free(wx);
+    out->ok = 1;
+    return 0;
+}
+
+static void weather_write_result(const WeatherData* d) {
+    FILE* f = fopen(g_weather_result_path, "w");
+    if (!f) return;
+    if (!d->ok) {
+        fprintf(f, "ERR\n%s\n", d->err[0] ? d->err : "Unknown error");
+        fclose(f);
+        return;
+    }
+    fprintf(f, "OK\n%s\n%s\n%d\n%.2f\n%.2f\n%.2f\n%.2f\n",
+            d->city, d->country, d->code, d->temp, d->feels, d->humidity, d->wind);
+    for (int i = 0; i < WEATHER_FORECAST_DAYS; i++) {
+        fprintf(f, "%s %d %.2f %.2f\n",
+                d->days[i].date[0] ? d->days[i].date : "-",
+                d->days[i].code, d->days[i].tmax, d->days[i].tmin);
+    }
+    fclose(f);
+}
+
+static int weather_read_result(WeatherData* d) {
+    memset(d, 0, sizeof(*d));
+    FILE* f = fopen(g_weather_result_path, "r");
+    if (!f) {
+        snprintf(d->err, sizeof(d->err), "No weather data");
+        return -1;
+    }
+    char line[128];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    trim_line(line);
+    if (!strcmp(line, "ERR")) {
+        if (fgets(line, sizeof(line), f)) {
+            trim_line(line);
+            snprintf(d->err, sizeof(d->err), "%s", line);
+        }
+        fclose(f);
+        return -1;
+    }
+    if (strcmp(line, "OK") != 0) { fclose(f); return -1; }
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    trim_line(line); snprintf(d->city, sizeof(d->city), "%s", line);
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    trim_line(line); snprintf(d->country, sizeof(d->country), "%s", line);
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    d->code = atoi(line);
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    d->temp = (float)atof(line);
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    d->feels = (float)atof(line);
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    d->humidity = (float)atof(line);
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return -1; }
+    d->wind = (float)atof(line);
+    for (int i = 0; i < WEATHER_FORECAST_DAYS; i++) {
+        if (!fgets(line, sizeof(line), f)) break;
+        trim_line(line);
+        sscanf(line, "%15s %d %f %f",
+               d->days[i].date, &d->days[i].code, &d->days[i].tmax, &d->days[i].tmin);
+    }
+    fclose(f);
+    d->ok = 1;
+    return 0;
+}
+
+static void weather_set_text_id(const char* id, const char* text) {
+    int idx = luna_get_element_by_id(id);
+    if (idx >= 0) luna_set_text(idx, text);
+}
+
+static void weather_set_day(const char* prefix, int i, const char* name,
+                            int code, float tmax, float tmin, int show_min) {
+    char id[32], buf[48];
+    snprintf(id, sizeof(id), "%s%d", prefix, i);
+    int root = luna_get_element_by_id(id);
+    if (root < 0) return;
+    for (int c = 0; c < elem_count; c++) {
+        LunaElement* e = luna_element_at(c);
+        if (!e || e->parent_idx != root) continue;
+        if (strstr(e->class_name, "wf_name"))
+            luna_set_text(c, name);
+        else if (strstr(e->class_name, "wf_icon"))
+            luna_set_text(c, weather_icon_glyph(code));
+        else if (strstr(e->class_name, "wf_temp")) {
+            if (show_min)
+                snprintf(buf, sizeof(buf), "%.0f° %.0f°", tmax, tmin);
+            else
+                snprintf(buf, sizeof(buf), "%.0f°", tmax);
+            luna_set_text(c, buf);
+        }
+    }
+}
+
+static void weather_apply_ui(const WeatherData* d) {
+    char buf[160];
+
+    if (!d->ok) {
+        weather_set_text_id("mb_weather_temp", "—");
+        weather_set_text_id("mb_weather_icon", "\uf2c9");
+        set_hidden(luna_get_element_by_id("weather_hint"), 1);
+        set_hidden(luna_get_element_by_id("weather_content"), 1);
+        set_hidden(luna_get_element_by_id("weather_error"), 0);
+        weather_set_text_id("weather_error", d->err[0] ? d->err : "Weather unavailable");
+        weather_set_text_id("wg_wx_city", "Weather");
+        weather_set_text_id("wg_wx_temp", "—");
+        weather_set_text_id("wg_wx_desc", d->err[0] ? d->err : "Unavailable");
+    } else {
+        snprintf(buf, sizeof(buf), "%.0f°", d->temp);
+        weather_set_text_id("mb_weather_temp", buf);
+        weather_set_text_id("mb_weather_icon", weather_icon_glyph(d->code));
+
+        set_hidden(luna_get_element_by_id("weather_hint"), 1);
+        set_hidden(luna_get_element_by_id("weather_error"), 1);
+        set_hidden(luna_get_element_by_id("weather_content"), 0);
+
+        snprintf(buf, sizeof(buf), "%s%s%s", d->city,
+                 d->country[0] ? ", " : "", d->country);
+        weather_set_text_id("weather_city_label", buf);
+        weather_set_text_id("weather_icon", weather_icon_glyph(d->code));
+        snprintf(buf, sizeof(buf), "%.0f°C", d->temp);
+        weather_set_text_id("weather_temp", buf);
+        weather_set_text_id("weather_desc", weather_code_text(d->code));
+        snprintf(buf, sizeof(buf), "Feels %.0f°C", d->feels);
+        weather_set_text_id("weather_feels", buf);
+        snprintf(buf, sizeof(buf), "%.0f%%", d->humidity);
+        weather_set_text_id("weather_hum", buf);
+        snprintf(buf, sizeof(buf), "%.0f km/h", d->wind);
+        weather_set_text_id("weather_wind", buf);
+
+        weather_set_text_id("wg_wx_city", d->city);
+        snprintf(buf, sizeof(buf), "%.0f°", d->temp);
+        weather_set_text_id("wg_wx_temp", buf);
+        weather_set_text_id("wg_wx_icon", weather_icon_glyph(d->code));
+        weather_set_text_id("wg_wx_desc", weather_code_text(d->code));
+
+        for (int i = 0; i < WEATHER_FORECAST_DAYS; i++) {
+            char dayname[16] = "—";
+            if (d->days[i].date[0] && strcmp(d->days[i].date, "-")) {
+                struct tm tm = {0};
+                if (sscanf(d->days[i].date, "%d-%d-%d",
+                           &tm.tm_year, &tm.tm_mon, &tm.tm_mday) == 3) {
+                    tm.tm_year -= 1900;
+                    tm.tm_mon -= 1;
+                    tm.tm_isdst = -1;
+                    mktime(&tm);
+                    if (i == 0) snprintf(dayname, sizeof(dayname), "Today");
+                    else strftime(dayname, sizeof(dayname), "%a", &tm);
+                }
+            }
+            weather_set_day("wf_", i, dayname, d->days[i].code,
+                            d->days[i].tmax, d->days[i].tmin, 1);
+            weather_set_day("wg_wf_", i, dayname, d->days[i].code,
+                            d->days[i].tmax, d->days[i].tmin, 0);
+        }
+    }
+
+    shell_request_repaint(1);
+    shell_request_repaint(0);
+    if (is_shown(g_weather_menu_idx)) shell_request_repaint(-1);
+}
+
+static void weather_request(const char* city) {
+    if (!city || !*city) return;
+    if (g_weather_busy) return;
+    if (!command_available("curl")) {
+        WeatherData d;
+        memset(&d, 0, sizeof(d));
+        snprintf(d.err, sizeof(d.err), "curl not installed");
+        g_weather = d;
+        weather_apply_ui(&g_weather);
+        return;
+    }
+    snprintf(g_weather_req_city, sizeof(g_weather_req_city), "%s", city);
+    weather_cache_path(g_weather_result_path, sizeof(g_weather_result_path));
+    unlink(g_weather_result_path);
+
+    set_hidden(luna_get_element_by_id("weather_content"), 1);
+    set_hidden(luna_get_element_by_id("weather_error"), 1);
+    set_hidden(luna_get_element_by_id("weather_hint"), 0);
+    weather_set_text_id("weather_hint", "Fetching…");
+    weather_set_text_id("mb_weather_temp", "…");
+    weather_set_text_id("wg_wx_desc", "Fetching…");
+
+    pid_t pid = fork();
+    if (pid < 0) return;
+    if (pid == 0) {
+        WeatherData d;
+        weather_fetch_sync(g_weather_req_city, &d);
+        weather_write_result(&d);
+        _exit(d.ok ? 0 : 1);
+    }
+    g_weather_pid = pid;
+    g_weather_busy = 1;
+}
+
+static void weather_finish(int status) {
+    (void)status;
+    g_weather_pid = -1;
+    g_weather_busy = 0;
+    g_last_weather = g_now > 0.0 ? g_now : 1.0;
+    WeatherData d;
+    if (weather_read_result(&d) == 0) {
+        g_weather = d;
+        if (g_weather_req_city[0] &&
+            strcmp(g_settings.weather_city, g_weather_req_city) != 0) {
+            snprintf(g_settings.weather_city, sizeof(g_settings.weather_city),
+                     "%s", g_weather_req_city);
+            settings_save();
+        }
+    } else {
+        g_weather = d;
+    }
+    weather_apply_ui(&g_weather);
+}
+
+static void weather_tick(void) {
+    if (g_weather_pid > 0) {
+        int status = 0;
+        pid_t r = waitpid(g_weather_pid, &status, WNOHANG);
+        if (r == g_weather_pid) weather_finish(status);
+    }
+    if (!g_weather_busy && (g_now - g_last_weather) >= WEATHER_REFRESH_SEC)
+        weather_request(g_settings.weather_city);
+}
+
+static void weather_do_search(void) {
+    int pi = luna_get_element_by_id("weather_city_input");
+    const char* v = pi >= 0 ? luna_get_value(pi) : "";
+    char city[64];
+    snprintf(city, sizeof(city), "%s", v ? v : "");
+    trim_line(city);
+    if (!city[0]) return;
+    weather_request(city);
+}
+
+static void dismiss_weather_menu(void) {
+    if (is_shown(g_weather_menu_idx)) set_hidden(g_weather_menu_idx, 1);
+}
+
+static void on_weather_menu(LunaElement* e) {
+    dismiss_luna_menu(g_luna_menu_idx);
+    dismiss_cc(g_cc_idx);
+    dismiss_win_menu();
+    dismiss_clip_menu();
+    dismiss_wifi_menu();
+    if (is_shown(g_weather_menu_idx)) { dismiss_weather_menu(); return; }
+    int pi = luna_get_element_by_id("weather_city_input");
+    if (pi >= 0) luna_set_value(pi, g_settings.weather_city);
+    set_hidden(g_weather_menu_idx, 0);
+    position_menu_near(g_weather_menu_idx,
+                       menu_anchor_from(e, g_mb_weather_idx),
+                       luna_window_width - 300.0f);
+    if (!g_weather.ok && !g_weather_busy)
+        weather_request(g_settings.weather_city);
+}
+
+static void on_weather_go(LunaElement* e) {
+    (void)e;
+    weather_do_search();
+}
+
+static void on_widget_weather(LunaElement* e) {
+    on_weather_menu(e);
+}
+
 static void reap_children(void) {
     int status;
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (pid == g_weather_pid) {
+            weather_finish(status);
+            continue;
+        }
         for (int i = 0; i < APP_COUNT; i++) {
             if (g_apps[i].pid == pid) {
                 g_apps[i].pid = 0;
@@ -1864,15 +3049,18 @@ static void dismiss_popovers(void) {
     dismiss_win_menu();
     dismiss_clip_menu();
     dismiss_wifi_menu();
+    dismiss_weather_menu();
 }
 
 static void on_luna_menu(LunaElement* e) {
-    (void)e;
     dismiss_cc(g_cc_idx);
     dismiss_win_menu();
     dismiss_clip_menu();
+    dismiss_weather_menu();
     if (is_shown(g_luna_menu_idx)) { dismiss_luna_menu(g_luna_menu_idx); return; }
     set_hidden(g_luna_menu_idx, 0);
+    int logo = luna_get_element_by_id("mb_logo");
+    position_menu_near(g_luna_menu_idx, menu_anchor_from(e, logo), 8.0f);
 }
 
 static void on_control_center(LunaElement* e) {
@@ -1881,22 +3069,25 @@ static void on_control_center(LunaElement* e) {
     dismiss_win_menu();
     dismiss_clip_menu();
     dismiss_wifi_menu();
+    dismiss_weather_menu();
     if (is_shown(g_cc_idx)) { dismiss_cc(g_cc_idx); return; }
     set_hidden(g_cc_idx, 0);
     position_control_center();
 }
 
 static void on_wifi_menu(LunaElement* e) {
-    (void)e;
     dismiss_luna_menu(g_luna_menu_idx);
     dismiss_cc(g_cc_idx);
     dismiss_win_menu();
     dismiss_clip_menu();
+    dismiss_weather_menu();
     if (is_shown(g_wifi_menu_idx)) { dismiss_wifi_menu(); return; }
     wifi_refresh();
     wifi_update_ui();
     set_hidden(g_wifi_menu_idx, 0);
-    position_menu_near(g_wifi_menu_idx, g_mb_wifi_idx, luna_window_width - 330.0f);
+    position_menu_near(g_wifi_menu_idx,
+                       menu_anchor_from(e, g_mb_wifi_idx),
+                       luna_window_width - 330.0f);
 }
 
 static void on_wifi_power(LunaElement* e) {
@@ -1950,9 +3141,16 @@ static void on_wifi_connect(LunaElement* e) {
     int pi = luna_get_element_by_id("wifi_password");
     const char* password = pi >= 0 ? luna_get_value(pi) : "";
     if (g_wifi_backend == WIFI_CONNMAN) {
-        if (!wifi_connman_connect(n->id, password ? password : "")) {
-            toast_show("Wi-Fi", "Could not start connection", 2.0);
-            return;
+        if (password && *password) {
+            if (!wifi_connman_connect(n->id, password)) {
+                toast_show("Wi-Fi", "Could not start connection", 2.0);
+                return;
+            }
+        } else {
+            /* Open and previously provisioned services do not request input
+             * from an Agent and can use connmanctl's one-shot mode. */
+            const char* const connect[] = { "connmanctl", "connect", n->id, NULL };
+            wifi_exec(connect);
         }
     } else if (g_wifi_backend == WIFI_NMCLI) {
         if (password && *password) {
@@ -2009,9 +3207,9 @@ static void on_dock_click(LunaElement* e) {
     }
     char cmd[64];
     if (w->focused && !w->minimized)
-        snprintf(cmd, sizeof(cmd), "minimize %u", w->id);
+        snprintf(cmd, sizeof(cmd), "minimize %" PRIu64, w->id);
     else
-        snprintf(cmd, sizeof(cmd), "activate %u", w->id);
+        snprintf(cmd, sizeof(cmd), "activate %" PRIu64, w->id);
     shell_send_cmd(cmd);
 }
 
@@ -2042,6 +3240,11 @@ static void on_mouse_release_hook(int hit, int drag_moved) {
         !hit_inside(hit, g_wifi_menu_idx) &&
         !hit_inside(hit, g_mb_wifi_idx))
         dismiss_wifi_menu();
+    if (is_shown(g_weather_menu_idx) &&
+        !hit_inside(hit, g_weather_menu_idx) &&
+        !hit_inside(hit, g_mb_weather_idx) &&
+        !hit_inside(hit, luna_get_element_by_id("widget_weather")))
+        dismiss_weather_menu();
     if (is_shown(g_win_menu_idx) && !hit_inside(hit, g_win_menu_idx)) {
         /* Keep open when the click was on a win_item (handler opens/repositions). */
         int on_win = 0;
@@ -2142,6 +3345,28 @@ static void settings_mark_wallpaper(const char* theme) {
     luna_mark_layout_dirty();
 }
 
+static void settings_populate_skins(void) {
+    int selected = skin_find(g_settings.skin);
+    for (int i = 0; i < MAX_SKINS; i++) {
+        char id[32];
+        snprintf(id, sizeof(id), "skin_%d", i);
+        int card = luna_get_element_by_id(id);
+        if (card < 0) continue;
+        set_hidden(card, i >= g_skin_count);
+        if (i >= g_skin_count) continue;
+        snprintf(id, sizeof(id), "skin_%d_name", i);
+        int name = luna_get_element_by_id(id);
+        if (name >= 0) luna_set_text(name, g_skins[i].name);
+        snprintf(id, sizeof(id), "skin_%d_desc", i);
+        int desc = luna_get_element_by_id(id);
+        if (desc >= 0) luna_set_text(desc, g_skins[i].description);
+        if (i == selected) luna_add_class(card, "selected");
+        else luna_remove_class(card, "selected");
+        luna_update_element_style(card);
+    }
+    luna_mark_layout_dirty();
+}
+
 static void settings_mark_cursor(const char* theme) {
     const char* ids[] = { "cur_aero", "cur_miku" };
     const char* names[] = { "aero", "miku" };
@@ -2188,10 +3413,15 @@ static void apply_wm_settings(void) {
     shell_send_cmd(cmd);
     snprintf(cmd, sizeof(cmd), "wm_config edge_snap %d", g_settings.edge_snap);
     shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config top_edge_maximize %d", g_settings.top_edge_maximize);
+    shell_send_cmd(cmd);
     snprintf(cmd, sizeof(cmd), "wm_config titlebar_double_click %d", g_settings.titlebar_double_click);
     shell_send_cmd(cmd);
     snprintf(cmd, sizeof(cmd), "wm_config super_shortcuts %d", g_settings.super_shortcuts);
     shell_send_cmd(cmd);
+    /* Skin titlebar style/colors/prefer_ssd win over the Settings toggle when
+     * the active skin declares them. */
+    skin_apply_wm_decoration(skin_find(g_settings.skin));
 }
 
 static void settings_populate_ui(void) {
@@ -2206,11 +3436,14 @@ static void settings_populate_ui(void) {
     int h = luna_get_element_by_id("pref_hostname");
     if (h >= 0) luna_set_value(h, g_settings.hostname);
     /* Wallpaper selection markers */
+    settings_populate_skins();
     settings_mark_wallpaper(g_settings.wallpaper);
     settings_mark_cursor(g_settings.cursor_theme);
     settings_mark_kb(g_settings.kb_layout);
     settings_mark_toggle("wm_snap", g_settings.edge_snap);
+    settings_mark_toggle("wm_top_maximize", g_settings.top_edge_maximize);
     settings_mark_toggle("wm_double_click", g_settings.titlebar_double_click);
+    settings_mark_toggle("wm_classic_titlebar", g_settings.classic_titlebar);
     settings_mark_toggle("wm_shortcuts", g_settings.super_shortcuts);
     settings_mark_toggle("wm_dock_mag", g_settings.dock_magnification);
     settings_mark_toggle("wm_restore", g_settings.session_restore);
@@ -2320,7 +3553,9 @@ static void on_wm_toggle(LunaElement* e) {
     if (!id) return;
     int* value = NULL;
     if (!strcmp(id, "wm_snap")) value = &g_settings.edge_snap;
+    else if (!strcmp(id, "wm_top_maximize")) value = &g_settings.top_edge_maximize;
     else if (!strcmp(id, "wm_double_click")) value = &g_settings.titlebar_double_click;
+    else if (!strcmp(id, "wm_classic_titlebar")) value = &g_settings.classic_titlebar;
     else if (!strcmp(id, "wm_shortcuts")) value = &g_settings.super_shortcuts;
     else if (!strcmp(id, "wm_dock_mag")) value = &g_settings.dock_magnification;
     else if (!strcmp(id, "wm_restore")) value = &g_settings.session_restore;
@@ -2358,6 +3593,42 @@ static void on_wallpaper_select(LunaElement* e) {
     snprintf(g_settings.wallpaper, sizeof(g_settings.wallpaper), "%s", theme);
     settings_mark_wallpaper(theme);
     apply_wallpaper(theme);
+}
+
+static void on_skin_select(LunaElement* e) {
+    int slot = -1;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* id = luna_element_at(i)->id;
+        if (id && id[0] == 's' && id[1] == 'k' && id[2] == 'i' &&
+            id[3] == 'n' && id[4] == '_' && isdigit((unsigned char)id[5])) {
+            slot = atoi(id + 5);
+            break;
+        }
+    }
+    if (slot < 0 || slot >= g_skin_count) return;
+    if (!skin_apply_styles(g_skins[slot].id)) {
+        toast_show("Appearance", "The skin stylesheet could not be loaded.", 3.0);
+        return;
+    }
+    snprintf(g_settings.skin, sizeof(g_settings.skin), "%s", g_skins[slot].id);
+    settings_save();
+    skin_apply_chrome(slot);
+    skin_apply_toolkit(slot);
+    skin_apply_wm_decoration(slot);
+    apply_wallpaper(g_settings.wallpaper);
+    settings_populate_skins();
+    shell_request_repaint(-1);
+    if (g_skins[slot].layout[0] &&
+        (!g_layout_path || strcmp(g_layout_path, g_skins[slot].layout) != 0))
+        toast_show("Appearance",
+                   "Style & chrome applied. Custom HTML layout loads at next sign-in. Restart apps for GTK/Qt themes.",
+                   5.0);
+    else if (g_skins[slot].gtk_theme[0] || g_skins[slot].qt_style[0] || g_skins[slot].qt_qss[0])
+        toast_show("Appearance",
+                   "Desktop skin applied. Restart apps to pick up GTK/Qt themes.",
+                   4.0);
+    else
+        toast_show("Appearance", "Desktop skin applied.", 2.0);
 }
 
 static void on_cursor_select(LunaElement* e) {
@@ -2488,10 +3759,21 @@ static void on_cc_toggle(LunaElement* e) {
     }
 }
 
-static void slider_tick(const char* thumb_id, const char* fill_id, const char* track_id) {
-    int ti = luna_get_element_by_id(thumb_id);
-    int fi = luna_get_element_by_id(fill_id);
-    int ki = luna_get_element_by_id(track_id);
+/* Slider geometry is re-clamped every frame, but the three element ids never
+ * change.  Resolve them once: the lookup is a hash probe plus a strcmp, and
+ * doing six of them per frame for two sliders is work the frame loop can do
+ * without. */
+typedef struct { int thumb, fill, track; int resolved; } LunaSliderIds;
+
+static void slider_tick_cached(LunaSliderIds* ids, const char* thumb_id,
+                               const char* fill_id, const char* track_id) {
+    if (!ids->resolved) {
+        ids->thumb = luna_get_element_by_id(thumb_id);
+        ids->fill  = luna_get_element_by_id(fill_id);
+        ids->track = luna_get_element_by_id(track_id);
+        ids->resolved = 1;
+    }
+    int ti = ids->thumb, fi = ids->fill, ki = ids->track;
     if (ti == -1 || fi == -1 || ki == -1) return;
     LunaElement* th = luna_element_at(ti);
     LunaElement* tr = luna_element_at(ki);
@@ -2591,7 +3873,7 @@ static const char* read_net_status(void) {
  * vertical lift) so the enlarged icons stay inside the dock's fixed-height
  * layer surface — no clipping, no input-region carving needed. */
 static void dock_magnify_tick(void) {
-    if (!g_settings.dock_magnification) {
+    if (g_chrome_dock_hidden || !g_settings.dock_magnification) {
         for (int i = 0; i < g_dock_icon_count; i++) {
             LunaElement* icon = luna_element_at(g_dock_icon_idx[i]);
             if (icon) icon->transform_scale = 1.0f;
@@ -2652,7 +3934,7 @@ static void poll_shell_state(void) {
     }
 
     if (g_pending_menu_id > 0) {
-        uint32_t wid = (uint32_t)g_pending_menu_id;
+        uint64_t wid = g_pending_menu_id;
         const char* title = "Window";
         LunaWinEntry* w = NULL;
         for (int i = 0; i < g_win_count; i++) {
@@ -2842,20 +4124,20 @@ static void session_restore_tick(void) {
                 if (best < 0) best = i;
             }
             if (best >= 0) {
-                uint32_t wid = g_wins[best].id;
+                uint64_t wid = g_wins[best].id;
                 char cmd[96];
                 if (rw->fullscreen) {
-                    snprintf(cmd, sizeof(cmd), "fullscreen %u", wid);
+                    snprintf(cmd, sizeof(cmd), "fullscreen %" PRIu64, wid);
                     shell_send_cmd(cmd);
                 } else if (rw->maximized) {
-                    snprintf(cmd, sizeof(cmd), "maximize %u", wid);
+                    snprintf(cmd, sizeof(cmd), "maximize %" PRIu64, wid);
                     shell_send_cmd(cmd);
                 } else {
-                    snprintf(cmd, sizeof(cmd), "move %u %d %d", wid, rw->x, rw->y);
+                    snprintf(cmd, sizeof(cmd), "move %" PRIu64 " %d %d", wid, rw->x, rw->y);
                     shell_send_cmd(cmd);
                 }
                 if (rw->minimized) {
-                    snprintf(cmd, sizeof(cmd), "minimize %u", wid);
+                    snprintf(cmd, sizeof(cmd), "minimize %" PRIu64, wid);
                     shell_send_cmd(cmd);
                 }
                 rw->applied = 1;
@@ -2869,7 +4151,7 @@ static void session_restore_tick(void) {
     }
 }
 
-static uint32_t win_id_from_element(LunaElement* e) {
+static uint64_t win_id_from_element(LunaElement* e) {
     for (int idx = elem_idx_of(e); idx != -1; idx = luna_element_at(idx)->parent_idx) {
         const char* id = luna_element_at(idx)->id;
         if (id[0] == 'w' && id[1] == 'i' && id[2] == 'n' && id[3] == '_') {
@@ -2881,7 +4163,7 @@ static uint32_t win_id_from_element(LunaElement* e) {
     return 0;
 }
 
-static void win_menu_open(uint32_t wid, int anchor_idx, const char* title) {
+static void win_menu_open(uint64_t wid, int anchor_idx, const char* title) {
     if (!wid || g_win_menu_idx < 0) return;
     dismiss_luna_menu(g_luna_menu_idx);
     dismiss_cc(g_cc_idx);
@@ -2899,7 +4181,7 @@ static void win_menu_open(uint32_t wid, int anchor_idx, const char* title) {
 }
 
 static void on_win_menu_action(LunaElement* e) {
-    uint32_t wid = g_win_menu_target;
+    uint64_t wid = g_win_menu_target;
     const char* id = NULL;
     for (int idx = elem_idx_of(e); idx != -1; idx = luna_element_at(idx)->parent_idx) {
         const char* cand = luna_element_at(idx)->id;
@@ -2913,36 +4195,36 @@ static void on_win_menu_action(LunaElement* e) {
     if (!wid || !id) return;
     char cmd[64];
     if (!strcmp(id, "wm_activate"))
-        snprintf(cmd, sizeof(cmd), "activate %u", wid);
+        snprintf(cmd, sizeof(cmd), "activate %" PRIu64, wid);
     else if (!strcmp(id, "wm_minimize"))
-        snprintf(cmd, sizeof(cmd), "minimize %u", wid);
+        snprintf(cmd, sizeof(cmd), "minimize %" PRIu64, wid);
     else if (!strcmp(id, "wm_maximize")) {
         if (w && w->fullscreen)
-            snprintf(cmd, sizeof(cmd), "unfullscreen %u", wid);
+            snprintf(cmd, sizeof(cmd), "unfullscreen %" PRIu64, wid);
         else if (w && w->maximized)
-            snprintf(cmd, sizeof(cmd), "unmaximize %u", wid);
+            snprintf(cmd, sizeof(cmd), "unmaximize %" PRIu64, wid);
         else
-            snprintf(cmd, sizeof(cmd), "toggle_maximize %u", wid);
+            snprintf(cmd, sizeof(cmd), "toggle_maximize %" PRIu64, wid);
     } else if (!strcmp(id, "wm_fullscreen")) {
         if (w && w->fullscreen)
-            snprintf(cmd, sizeof(cmd), "unfullscreen %u", wid);
+            snprintf(cmd, sizeof(cmd), "unfullscreen %" PRIu64, wid);
         else
-            snprintf(cmd, sizeof(cmd), "fullscreen %u", wid);
+            snprintf(cmd, sizeof(cmd), "fullscreen %" PRIu64, wid);
     } else if (!strcmp(id, "wm_tile_left"))
-        snprintf(cmd, sizeof(cmd), "tile_left %u", wid);
+        snprintf(cmd, sizeof(cmd), "tile_left %" PRIu64, wid);
     else if (!strcmp(id, "wm_tile_right"))
-        snprintf(cmd, sizeof(cmd), "tile_right %u", wid);
+        snprintf(cmd, sizeof(cmd), "tile_right %" PRIu64, wid);
     else if (!strcmp(id, "wm_center"))
-        snprintf(cmd, sizeof(cmd), "center %u", wid);
+        snprintf(cmd, sizeof(cmd), "center %" PRIu64, wid);
     else if (!strcmp(id, "wm_close"))
-        snprintf(cmd, sizeof(cmd), "close %u", wid);
+        snprintf(cmd, sizeof(cmd), "close %" PRIu64, wid);
     else
         return;
     shell_send_cmd(cmd);
 }
 
 static void on_win_click(LunaElement* e) {
-    uint32_t wid = win_id_from_element(e);
+    uint64_t wid = win_id_from_element(e);
     if (!wid) return;
     int slot_idx = -1;
     LunaWinEntry* w = NULL;
@@ -2970,9 +4252,9 @@ static void on_win_click(LunaElement* e) {
     char cmd[64];
     /* Taskbar-style toggle: focused window minimizes; otherwise activate. */
     if (w && w->focused && !w->minimized)
-        snprintf(cmd, sizeof(cmd), "minimize %u", wid);
+        snprintf(cmd, sizeof(cmd), "minimize %" PRIu64, wid);
     else
-        snprintf(cmd, sizeof(cmd), "activate %u", wid);
+        snprintf(cmd, sizeof(cmd), "activate %" PRIu64, wid);
     shell_send_cmd(cmd);
 }
 
@@ -3095,13 +4377,14 @@ static int clip_populate_menu(void) {
 }
 
 static void on_clipboard_menu(LunaElement* e) {
-    (void)e;
     dismiss_luna_menu(g_luna_menu_idx);
     dismiss_cc(g_cc_idx);
     dismiss_win_menu();
     if (is_shown(g_clip_menu_idx)) { dismiss_clip_menu(); return; }
     clip_populate_menu();
-    position_menu_near(g_clip_menu_idx, g_mb_clip_idx, luna_window_width - 300.0f);
+    position_menu_near(g_clip_menu_idx,
+                       menu_anchor_from(e, g_mb_clip_idx),
+                       luna_window_width - 300.0f);
     set_hidden(g_clip_menu_idx, 0);
 }
 
@@ -3151,7 +4434,7 @@ static void on_tray_click(LunaElement* e) {
             }
             if (slot >= 0 && slot < app_slots && g_tray[slot].surface_id) {
                 char cmd[64];
-                snprintf(cmd, sizeof(cmd), "activate %u", g_tray[slot].surface_id);
+                snprintf(cmd, sizeof(cmd), "activate %" PRIu64, g_tray[slot].surface_id);
                 shell_send_cmd(cmd);
                 return;
             }
@@ -3191,11 +4474,21 @@ static int set_bar_fill(const char* fill_id, float pct) {
     if (pct < 0.0f) pct = 0.0f;
     if (pct > 100.0f) pct = 100.0f;
     float nw = 2.0f + (bar_w - 2.0f) * pct / 100.0f;
-    if (fabsf(fill->css_width - nw) < 0.5f && fill->has_css_width) return 0;
+    if (fabsf(fill->css_width - nw) < 1.0f && fill->has_css_width) return 0;
     fill->css_width = nw;
     fill->has_css_width = 1;
     fill->w = nw;
     return 1;
+}
+
+/* Would repainting for this element actually change a pixel?
+ *
+ * The CPU/memory/disk readouts live on the wallpaper layer, which is the
+ * full-screen surface: marking it dirty costs a whole-document GL frame plus a
+ * whole-screen recomposite.  Doing that for a widget panel the user has closed
+ * is exactly the kind of periodic hitch this loop must not produce. */
+static int repaint_matters(int idx) {
+    return idx >= 0 && luna_element_visible(idx);
 }
 
 static void update_clock(void) {
@@ -3205,32 +4498,33 @@ static void update_clock(void) {
     struct tm* tm_info = localtime(&t);
     if (!tm_info) return;
     char buf[64];
-    int changed = 0;
+    /* The menubar clock and the desktop-widget clock live on different layer
+     * surfaces.  Track them apart: a minute rollover on the menubar must not
+     * drag the full-screen wallpaper surface through a repaint as well. */
+    int dirty_mb = 0, dirty_bg = 0;
     int idx = luna_get_element_by_id("mb_clock");
     if (idx != -1 && strftime(buf, sizeof(buf), "%a %b %e  %H:%M", tm_info) > 0) {
         if (strcmp(luna_element_at(idx)->text, buf) != 0) {
             luna_set_text(idx, buf);
-            changed = 1;
+            dirty_mb |= repaint_matters(idx);
         }
     }
     idx = luna_get_element_by_id("wg_time");
     if (idx != -1 && strftime(buf, sizeof(buf), "%H:%M", tm_info) > 0) {
         if (strcmp(luna_element_at(idx)->text, buf) != 0) {
             luna_set_text(idx, buf);
-            changed = 1;
+            dirty_bg |= repaint_matters(idx);
         }
     }
     idx = luna_get_element_by_id("wg_date");
     if (idx != -1 && strftime(buf, sizeof(buf), "%A, %B %e", tm_info) > 0) {
         if (strcmp(luna_element_at(idx)->text, buf) != 0) {
             luna_set_text(idx, buf);
-            changed = 1;
+            dirty_bg |= repaint_matters(idx);
         }
     }
-    if (changed) {
-        shell_request_repaint(1); /* menubar */
-        shell_request_repaint(0); /* widgets sit in document; bg if KMS */
-    }
+    if (dirty_mb) shell_request_repaint(1); /* menubar */
+    if (dirty_bg) shell_request_repaint(0); /* widgets sit in document; bg if KMS */
 }
 
 static int text_would_change(int idx, const char* buf) {
@@ -3255,20 +4549,29 @@ static void update_stats(void) {
     int idx;
     switch (phase) {
     case 0: {
+        /* CPU/memory/disk are only visible in the desktop widgets or Control
+         * Center.  Sampling procfs for closed panels was invisible render-
+         * thread work with a very recognisable five-second cadence. */
+        int widgets_live = repaint_matters(luna_get_element_by_id("st_cpu_val"));
+        int cc_live = is_shown(g_cc_idx);
+        if (!widgets_live && !cc_live) break;
         float cpu = read_cpu_percent();
         idx = luna_get_element_by_id("st_cpu_val");
         snprintf(buf, sizeof(buf), "%d%%", (int)cpu);
-        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg = 1; }
-        if (set_bar_fill("st_cpu_fill", cpu)) dirty_bg = 1;
+        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg |= repaint_matters(idx); }
+        if (set_bar_fill("st_cpu_fill", cpu)) dirty_bg |= repaint_matters(luna_get_element_by_id("st_cpu_fill"));
         if (set_bar_fill("cc_cpu_fill", cpu)) dirty_cc = 1;
         break;
     }
     case 1: {
+        int widgets_live = repaint_matters(luna_get_element_by_id("st_mem_val"));
+        int cc_live = is_shown(g_cc_idx);
+        if (!widgets_live && !cc_live) break;
         int mem = read_mem_percent(NULL);
         idx = luna_get_element_by_id("st_mem_val");
         snprintf(buf, sizeof(buf), "%d%%", mem);
-        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg = 1; }
-        if (set_bar_fill("st_mem_fill", (float)mem)) dirty_bg = 1;
+        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg |= repaint_matters(idx); }
+        if (set_bar_fill("st_mem_fill", (float)mem)) dirty_bg |= repaint_matters(luna_get_element_by_id("st_mem_fill"));
         if (set_bar_fill("cc_mem_fill", (float)mem)) dirty_cc = 1;
         break;
     }
@@ -3282,7 +4585,7 @@ static void update_stats(void) {
            both into mb_bat duplicates the child glyph and defeats flex's
            anonymous text-item layout. */
         if (g_mb_bat_icon_idx >= 0) luna_set_text(g_mb_bat_icon_idx, icon);
-        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_mb = 1; }
+        if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_mb |= repaint_matters(idx); }
         break;
     }
     case 3:
@@ -3291,11 +4594,12 @@ static void update_stats(void) {
         if (g_mb_wifi_icon_idx >= 0) luna_set_text(g_mb_wifi_icon_idx, "\uf1eb");
         if (text_would_change(idx, g_cached_net)) {
             luna_set_text(idx, g_cached_net);
-            dirty_mb = 1;
+            dirty_mb |= repaint_matters(idx);
         }
         break;
     case 4:
-        if (g_now - g_last_disk >= 30.0) {
+        if (repaint_matters(luna_get_element_by_id("st_disk_val")) &&
+            g_now - g_last_disk >= 30.0) {
             g_last_disk = g_now;
             struct statvfs vfs;
             if (statvfs("/", &vfs) == 0 && vfs.f_blocks > 0) {
@@ -3304,8 +4608,8 @@ static void update_stats(void) {
                 double used_pct = 100.0 * (total - avail) / total;
                 idx = luna_get_element_by_id("st_disk_val");
                 snprintf(buf, sizeof(buf), "%.0fG free", avail / (1024.0 * 1024.0 * 1024.0));
-                if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg = 1; }
-                if (set_bar_fill("st_disk_fill", (float)used_pct)) dirty_bg = 1;
+                if (text_would_change(idx, buf)) { luna_set_text(idx, buf); dirty_bg |= repaint_matters(idx); }
+                if (set_bar_fill("st_disk_fill", (float)used_pct)) dirty_bg |= repaint_matters(luna_get_element_by_id("st_disk_fill"));
             }
         }
         break;
@@ -3329,6 +4633,7 @@ static int shell_wait_timeout_ms(int max_ms, double repaint_deadline) {
     SOONER(g_last_shell_poll + (g_switcher_visible ? 0.05 : 0.12));
     SOONER(g_last_clock + 1.0);
     SOONER(g_last_stats + 1.0);
+    SOONER(g_last_weather + WEATHER_REFRESH_SEC);
     SOONER(g_toast_deadline);
     SOONER(g_session_restore_at);
     SOONER(repaint_deadline);
@@ -3397,6 +4702,7 @@ static void register_handlers(void) {
     luna_register_js_handler("onSettingsTab",   on_settings_tab);
     luna_register_js_handler("onWmToggle",      on_wm_toggle);
     luna_register_js_handler("onWmGap",         on_wm_gap);
+    luna_register_js_handler("onSkinSelect",    on_skin_select);
     luna_register_js_handler("onWpSelect",      on_wallpaper_select);
     luna_register_js_handler("onKbSelect",      on_kb_select);
     luna_register_js_handler("onCurSelect",     on_cursor_select);
@@ -3444,6 +4750,8 @@ static void bind_indices(void) {
     g_mb_cc_idx         = luna_get_element_by_id("mb_cc");
     g_mb_wifi_idx       = luna_get_element_by_id("mb_wifi");
     g_wifi_menu_idx     = luna_get_element_by_id("wifi_menu");
+    g_mb_weather_idx    = luna_get_element_by_id("mb_weather");
+    g_weather_menu_idx  = luna_get_element_by_id("weather_menu");
 
     /* The redesigned markup keeps the about box's visual class but no longer
      * includes sheet_box.  The shared class supplies its absolute positioning,
@@ -3484,6 +4792,9 @@ static void bind_indices(void) {
     }
     wire_subtree(luna_get_element_by_id("mb_logo"),       on_luna_menu);
     wire_subtree(luna_get_element_by_id("mb_wifi"),       on_wifi_menu);
+    wire_subtree(luna_get_element_by_id("mb_weather"),    on_weather_menu);
+    wire_subtree(luna_get_element_by_id("weather_go"),    on_weather_go);
+    wire_subtree(luna_get_element_by_id("widget_weather"),on_widget_weather);
     wire_subtree(luna_get_element_by_id("mb_cc"),         on_control_center);
     wire_subtree(luna_get_element_by_id("mi_about"),      on_about);
     wire_subtree(luna_get_element_by_id("mi_settings"),   on_settings_open);
@@ -3506,6 +4817,11 @@ static void bind_indices(void) {
     }
 
     /* Wire wallpaper selection thumbs */
+    for (int i = 0; i < MAX_SKINS; i++) {
+        char id[24];
+        snprintf(id, sizeof(id), "skin_%d", i);
+        wire_subtree(luna_get_element_by_id(id), on_skin_select);
+    }
     const char* wp_ids[] = {"wp_night","wp_ocean","wp_forest","wp_sunset"};
     for (int i = 0; i < 4; i++)
         wire_subtree(luna_get_element_by_id(wp_ids[i]), on_wallpaper_select);
@@ -3548,7 +4864,8 @@ static void bind_indices(void) {
     wire_subtree(g_stab_wm_idx, on_settings_tab);
     {
         const char* toggle_ids[] = {
-            "wm_snap", "wm_double_click", "wm_shortcuts", "wm_dock_mag", "wm_restore"
+            "wm_snap", "wm_top_maximize", "wm_double_click", "wm_classic_titlebar", "wm_shortcuts",
+            "wm_dock_mag", "wm_restore"
         };
         for (size_t i = 0; i < sizeof(toggle_ids) / sizeof(toggle_ids[0]); i++)
             wire_subtree(luna_get_element_by_id(toggle_ids[i]), on_wm_toggle);
@@ -3741,14 +5058,94 @@ static void  plat_cursor(int type) {
     if (g_backend && g_backend->set_cursor) g_backend->set_cursor(type);
 }
 
+/* Keep this in lockstep with luna-ui's screenshot request buffer so the path
+ * we later verify is exactly the path the renderer writes. */
+static char g_shell_screenshot_path[511] = {0};
+static double g_shell_screenshot_requested_at = 0.0;
+
+static int screenshot_mkdir_p(const char* path) {
+    char tmp[PATH_MAX];
+    size_t len;
+
+    if (!path || !*path) return 0;
+    len = strlen(path);
+    if (len >= sizeof(tmp)) return 0;
+    memcpy(tmp, path, len + 1);
+    while (len > 1 && tmp[len - 1] == '/') tmp[--len] = '\0';
+
+    for (char* p = tmp + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return 0;
+        *p = '/';
+    }
+    return mkdir(tmp, 0755) == 0 || errno == EEXIST;
+}
+
 static void take_timestamped_screenshot(void) {
-    char path[512];
-    time_t t = time(NULL);
-    struct tm* tm_info = localtime(&t);
-    if (tm_info && strftime(path, sizeof(path), "luna_%Y%m%d_%H%M%S.png", tm_info) > 0)
-        luna_take_screenshot(path);
-    else
-        luna_take_screenshot("luna.png");
+    char default_dir[PATH_MAX];
+    char stamp[64];
+    const char* dir = getenv("LUNA_SCREENSHOT_DIR");
+    const char* home = getenv("HOME");
+    struct timespec ts;
+    struct tm tm_info;
+
+    if (!dir || !*dir) {
+        if (home && *home) {
+            if (snprintf(default_dir, sizeof(default_dir),
+                         "%s/Pictures/Screenshots", home) >= (int)sizeof(default_dir)) {
+                toast_show("Screenshot", "The screenshot path is too long.", 4.0);
+                return;
+            }
+            dir = default_dir;
+        } else {
+            dir = ".";
+        }
+    }
+    if (!screenshot_mkdir_p(dir)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Cannot create %.220s", dir);
+        toast_show("Screenshot failed", msg, 5.0);
+        return;
+    }
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    localtime_r(&ts.tv_sec, &tm_info);
+    if (strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &tm_info) == 0 ||
+        snprintf(g_shell_screenshot_path, sizeof(g_shell_screenshot_path),
+                 "%s/luna-%s-%03ld.png", dir, stamp,
+                 ts.tv_nsec / 1000000L) >= (int)sizeof(g_shell_screenshot_path)) {
+        g_shell_screenshot_path[0] = '\0';
+        toast_show("Screenshot", "The screenshot path is too long.", 4.0);
+        return;
+    }
+
+    /* Read pixels after the next completed render.  Reading here handles the
+     * key event after the previous EGL swap, whose default buffer may already
+     * be undefined (notably on X11). */
+    luna_request_screenshot(g_shell_screenshot_path);
+    g_shell_screenshot_requested_at = g_now;
+    g_frame_dirty = 1;
+}
+
+static void finish_screenshot_notification(void) {
+    if (!g_shell_screenshot_path[0]) return;
+    if (access(g_shell_screenshot_path, F_OK) == 0) {
+        char msg[320];
+        snprintf(msg, sizeof(msg), "Saved to %.300s", g_shell_screenshot_path);
+        fprintf(stderr, "[luna-shell] screenshot: %s\n", g_shell_screenshot_path);
+        g_shell_screenshot_path[0] = '\0';
+        g_shell_screenshot_requested_at = 0.0;
+        toast_show("Screenshot saved", msg, 4.0);
+        g_frame_dirty = 1;
+    } else if (g_now - g_shell_screenshot_requested_at > 5.0) {
+        fprintf(stderr, "[luna-shell] screenshot failed: %s\n",
+                g_shell_screenshot_path);
+        g_shell_screenshot_path[0] = '\0';
+        g_shell_screenshot_requested_at = 0.0;
+        toast_show("Screenshot failed", "Could not write the PNG file.", 5.0);
+        g_frame_dirty = 1;
+    }
 }
 
 /* Shared key-press routing (menu shortcuts), used by both backends —
@@ -3766,7 +5163,7 @@ static void dispatch_key(int key, int scancode, int action, int mods) {
             for (int i = 0; i < g_win_count; i++) {
                 if (g_wins[i].focused && !g_wins[i].minimized) {
                     char cmd[64];
-                    snprintf(cmd, sizeof(cmd), "close %u", g_wins[i].id);
+                    snprintf(cmd, sizeof(cmd), "close %" PRIu64, g_wins[i].id);
                     shell_send_cmd(cmd);
                     return;
                 }
@@ -3780,8 +5177,23 @@ static void dispatch_key(int key, int scancode, int action, int mods) {
             if (is_shown(g_about_idx))       { on_about_close(NULL);    return; }
             if (is_shown(g_win_menu_idx))    { dismiss_win_menu();      return; }
             if (is_shown(g_clip_menu_idx))   { dismiss_clip_menu();     return; }
+            if (is_shown(g_wifi_menu_idx))   { dismiss_wifi_menu();     return; }
+            if (is_shown(g_weather_menu_idx)){ dismiss_weather_menu();  return; }
             if (is_shown(g_luna_menu_idx))   { dismiss_luna_menu(g_luna_menu_idx); return; }
             if (is_shown(g_cc_idx))          { dismiss_cc(g_cc_idx);    return; }
+        }
+        if (is_shown(g_weather_menu_idx) &&
+            (key == LUNA_KEY_ENTER || key == LUNA_KEY_KP_ENTER)) {
+            weather_do_search();
+            return;
+        }
+        /* Confirmation alerts expose a conventional default action.  This is
+         * handled by the shell rather than relying on whichever button happened
+         * to retain focus on the menubar surface that opened the dialog. */
+        if (is_shown(g_confirm_idx) &&
+            (key == LUNA_KEY_ENTER || key == LUNA_KEY_KP_ENTER)) {
+            on_confirm_ok(NULL);
+            return;
         }
         /* Super (or bare F4) toggles Launchpad — Alt+F4 is quit above. */
         if (key == LUNA_KEY_LEFT_SUPER || key == LUNA_KEY_RIGHT_SUPER ||
@@ -3794,7 +5206,10 @@ static void dispatch_key(int key, int scancode, int action, int mods) {
             on_settings_open(NULL);
             return;
         }
-        if (key == LUNA_KEY_F12) { take_timestamped_screenshot(); return; }
+        if (key == LUNA_KEY_PRINT_SCREEN || key == LUNA_KEY_F12) {
+            take_timestamped_screenshot();
+            return;
+        }
     }
     luna_key(key, scancode, action, mods);
 }
@@ -3819,6 +5234,7 @@ static int xkb_keysym_to_luna_key(xkb_keysym_t sym) {
         case XKB_KEY_End:       return LUNA_KEY_END;
         case XKB_KEY_F4:        return LUNA_KEY_F4;
         case XKB_KEY_F12:       return LUNA_KEY_F12;
+        case XKB_KEY_Print:     return LUNA_KEY_PRINT_SCREEN;
         case XKB_KEY_comma:     return LUNA_KEY_COMMA;
         case XKB_KEY_space:     return LUNA_KEY_SPACE;
         case XKB_KEY_Super_L:   return LUNA_KEY_LEFT_SUPER;
@@ -4519,6 +5935,7 @@ static const LunaBackend g_kms_backend = {
 typedef struct {
     const char*                    name;
     const char*                    root_id;
+    const char*                    input_root_id;     /* modeless input rectangle */
     uint32_t                       layer;
     uint32_t                       anchor;
     int32_t                        exclusive_zone;
@@ -4528,6 +5945,8 @@ typedef struct {
     int                            is_kbd;             /* keyboard interactivity */
     /* runtime */
     int                            root_idx;
+    int                            input_root_idx;
+    int                            input_x, input_y, input_w, input_h;
     struct wl_surface*             wl_surf;
     struct zwlr_layer_surface_v1*  layer_surf;
     struct wl_egl_window*          egl_win;
@@ -4536,6 +5955,10 @@ typedef struct {
     int                            surf_w, surf_h;
     float                          doc_x, doc_y;
     int                            was_shown;          /* previous is_shown() state */
+    /* Force whole-surface damage on the next swap.  Set for the first frame
+     * and after every resize, where the compositor's idea of this surface's
+     * contents cannot be trusted to match our incremental record. */
+    int                            full_damage;
 } LunaSurface;
 
 #define ZWLR_ANCHOR_TOP    ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP
@@ -4579,13 +6002,13 @@ static LunaSurface g_surfs[] = {
     { .name="launchpad",    .root_id="launchpad",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
       .is_overlay=1, .is_kbd=1 },
-    { .name="settings",     .root_id="settings_win",
+    { .name="settings",     .root_id="settings_win", .input_root_id="settings_sheet",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
       .is_overlay=1, .is_kbd=1 },
-    { .name="about",        .root_id="about_win",
+    { .name="about",        .root_id="about_win", .input_root_id="about_box",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
       .is_overlay=1 },
-    { .name="confirm",      .root_id="confirm_overlay",
+    { .name="confirm",      .root_id="confirm_overlay", .input_root_id="confirm_box",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
       .is_overlay=1, .is_kbd=1 },
     /* toast: small fixed surface, TOP|RIGHT anchored */
@@ -4598,6 +6021,9 @@ static LunaSurface g_surfs[] = {
     { .name="wifi_menu",    .root_id="wifi_menu",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
       .is_overlay=1 },
+    { .name="weather_menu", .root_id="weather_menu",
+      .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
+      .is_overlay=1, .is_kbd=1 },
 };
 #define LUNA_SURF_COUNT (int)(sizeof(g_surfs)/sizeof(g_surfs[0]))
 
@@ -4846,6 +6272,7 @@ static void layer_surf_configure(void* d, struct zwlr_layer_surface_v1* ls,
      * to jump after opening. */
     if (size_changed && s->egl_win && s->surf_w > 0 && s->surf_h > 0) {
         wl_egl_window_resize(s->egl_win, s->surf_w, s->surf_h, 0, 0);
+        s->full_damage = 1;
         shell_request_repaint((int)(s - g_surfs));
     }
     /* bg surface gives us the output resolution */
@@ -4928,8 +6355,60 @@ static int surf_egl_create(LunaSurface* s) {
     if (s->egl_surf == EGL_NO_SURFACE) {
         wl_egl_window_destroy(s->egl_win); s->egl_win = NULL; return 0;
     }
+    /* A brand new buffer chain shares nothing with what the compositor last
+     * saw for this surface. */
+    s->full_damage = 1;
     return 1;
 }
+
+/* EGL_EXT_swap_buffers_with_damage — resolved once, optional. */
+typedef EGLBoolean (*PFN_eglSwapBuffersWithDamage)(EGLDisplay, EGLSurface, const EGLint*, EGLint);
+static PFN_eglSwapBuffersWithDamage g_egl_swap_damage = NULL;
+
+static void egl_swap_damage_init(void) {
+    static int tried = 0;
+    if (tried) return;
+    tried = 1;
+    g_egl_swap_damage =
+        (PFN_eglSwapBuffersWithDamage)eglGetProcAddress("eglSwapBuffersWithDamageEXT");
+    if (!g_egl_swap_damage)
+        g_egl_swap_damage =
+            (PFN_eglSwapBuffersWithDamage)eglGetProcAddress("eglSwapBuffersWithDamageKHR");
+    /* Always track per-element damage: even without the EGL extension it lets
+     * us skip commits that would post an identical buffer (clock/CPU widgets
+     * that did not actually change a pixel).  Partial swaps are a bonus. */
+    luna_set_damage_tracking(1);
+    fprintf(stderr, "[luna-shell/wl] partial-swap damage %s\n",
+            g_egl_swap_damage ? "enabled" : "unavailable (identical-frame skip only)");
+}
+
+/* Post the frame, telling the compositor which part of it is actually new.
+ * Returns what eglSwapBuffers would have returned. */
+static EGLBoolean surf_swap(LunaSurface* s) {
+    float dx, dy, dw, dh;
+    int has_dmg = luna_render_damage(&dx, &dy, &dw, &dh);
+    if (!s->full_damage && !has_dmg)
+        return EGL_TRUE;   /* identical frame — skip the commit entirely */
+
+    if (s->full_damage || !g_egl_swap_damage) {
+        s->full_damage = 0;
+        return eglSwapBuffers(g_wl.dpy, s->egl_surf);
+    }
+    s->full_damage = 0;
+
+    int x0 = (int)floorf(dx), y0 = (int)floorf(dy);
+    int x1 = (int)ceilf(dx + dw), y1 = (int)ceilf(dy + dh);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > s->surf_w) x1 = s->surf_w;
+    if (y1 > s->surf_h) y1 = s->surf_h;
+    if (x1 <= x0 || y1 <= y0)
+        return eglSwapBuffers(g_wl.dpy, s->egl_surf);
+    /* EGL damage rects count y upward from the bottom of the surface. */
+    EGLint rect[4] = { x0, s->surf_h - y1, x1 - x0, y1 - y0 };
+    return g_egl_swap_damage(g_wl.dpy, s->egl_surf, rect, 1);
+}
+
 
 /* ── Drop the EGL window of a hidden overlay ──
  * Each full-screen overlay costs a whole buffer chain (1920x1200x4 x N) on the
@@ -4997,7 +6476,11 @@ static void surf_destroy(LunaSurface* s) {
 static void surf_set_shown(LunaSurface* s, int active) {
     if (!s->wl_surf) return;
     if (active) {
-        wl_surface_set_input_region(s->wl_surf, NULL);
+        /* Modeless utility windows accept pointer input only inside their
+         * visible window.  The rest of the transparent layer surface remains
+         * click-through, so applications below keep behaving normally. */
+        if (s->input_root_idx < 0)
+            wl_surface_set_input_region(s->wl_surf, NULL);
         /* Buffer + map happen on the next wl_surf_render()/eglSwapBuffers(). */
         if (!surf_egl_create(s))
             fprintf(stderr, "[luna-shell/wl] could not allocate '%s' overlay surface\n", s->name);
@@ -5009,6 +6492,125 @@ static void surf_set_shown(LunaSurface* s, int active) {
     }
     wl_surface_commit(s->wl_surf);
     if (!active) surf_egl_destroy(s);
+}
+
+/* Push the current LunaSurface chrome fields to the live layer-shell object. */
+static void surf_reconfigure_chrome(LunaSurface* s) {
+    if (!s || !s->layer_surf || !s->wl_surf) return;
+    zwlr_layer_surface_v1_set_anchor(s->layer_surf, s->anchor);
+    zwlr_layer_surface_v1_set_exclusive_zone(s->layer_surf, s->exclusive_zone);
+    zwlr_layer_surface_v1_set_size(s->layer_surf,
+                                   (uint32_t)(s->fixed_w > 0 ? s->fixed_w : 0),
+                                   (uint32_t)(s->fixed_h > 0 ? s->fixed_h : 0));
+    zwlr_layer_surface_v1_set_margin(s->layer_surf,
+        s->margin_top, s->margin_right, s->margin_bottom, s->margin_left);
+    wl_surface_commit(s->wl_surf);
+    s->full_damage = 1;
+}
+
+/* Apply menubar edge / dock visibility from the active skin.  Works for the
+ * Wayland multi-surface backend (layer anchors) and for single-framebuffer
+ * backends (DOM classes + CSS). */
+static void skin_apply_chrome(int skin_idx) {
+    if (skin_idx < 0 || skin_idx >= g_skin_count) skin_idx = 0;
+    const LunaSkin* skin = &g_skins[skin_idx];
+    int edge = skin->menubar_edge;
+    int height = skin->menubar_height > 0 ? skin->menubar_height : 32;
+    int dock_hidden = (skin->dock_mode == SKIN_DOCK_HIDDEN);
+
+    g_chrome_menubar_edge = edge;
+    g_chrome_menubar_height = height;
+    g_chrome_dock_hidden = dock_hidden;
+
+    int mb_idx = luna_get_element_by_id("menubar");
+    if (mb_idx >= 0) {
+        if (edge == SKIN_EDGE_BOTTOM) luna_add_class(mb_idx, "edge_bottom");
+        else luna_remove_class(mb_idx, "edge_bottom");
+        luna_update_element_style(mb_idx);
+    }
+    int dock_idx = luna_get_element_by_id("dock");
+    if (dock_idx >= 0) {
+        set_hidden(dock_idx, dock_hidden);
+        luna_update_element_style(dock_idx);
+    }
+    luna_mark_layout_dirty();
+
+    /* Wayland layer-shell surfaces are independent of CSS absolute insets. */
+    if (g_surfs[LUNA_SURF_MENUBAR].layer_surf) {
+        LunaSurface* mb = &g_surfs[LUNA_SURF_MENUBAR];
+        LunaSurface* dock = &g_surfs[LUNA_SURF_DOCK];
+        LunaSurface* toast = NULL;
+        for (int i = 0; i < LUNA_SURF_COUNT; i++)
+            if (g_surfs[i].root_id && !strcmp(g_surfs[i].root_id, "toast")) {
+                toast = &g_surfs[i];
+                break;
+            }
+
+        mb->fixed_h = height;
+        mb->exclusive_zone = height;
+        mb->fixed_w = 0;
+        mb->margin_top = mb->margin_right = mb->margin_bottom = mb->margin_left = 0;
+        if (edge == SKIN_EDGE_BOTTOM)
+            mb->anchor = ZWLR_ANCHOR_BOTTOM | ZWLR_ANCHOR_LEFT | ZWLR_ANCHOR_RIGHT;
+        else
+            mb->anchor = ZWLR_ANCHOR_TOP | ZWLR_ANCHOR_LEFT | ZWLR_ANCHOR_RIGHT;
+        surf_reconfigure_chrome(mb);
+
+        if (dock_hidden) {
+            dock->exclusive_zone = 0;
+            dock->margin_top = dock->margin_right = dock->margin_bottom = dock->margin_left = 0;
+            /* Keep a 1×1 mapped surface to avoid fighting configure races, but
+             * unmap so it neither paints nor reserves an exclusive zone. */
+            if (dock->egl_surf != EGL_NO_SURFACE || dock->was_shown) {
+                dock->was_shown = 0;
+                surf_set_shown(dock, 0);
+            }
+            surf_reconfigure_chrome(dock);
+        } else {
+            dock->anchor = ZWLR_ANCHOR_BOTTOM;
+            dock->exclusive_zone = 92;
+            dock->margin_top = 0;
+            dock->margin_right = 0;
+            dock->margin_bottom = 12;
+            dock->margin_left = 0;
+            dock->fixed_w = 542;
+            dock->fixed_h = 80;
+            surf_reconfigure_chrome(dock);
+            if (dock->egl_surf == EGL_NO_SURFACE) {
+                dock->was_shown = 1;
+                surf_set_shown(dock, 1);
+            }
+        }
+
+        if (toast) {
+            toast->margin_top = (edge == SKIN_EDGE_BOTTOM) ? 14 : (height + 6);
+            toast->margin_right = 14;
+            surf_reconfigure_chrome(toast);
+        }
+        shell_request_repaint(-1);
+        if (g_wl.display) wl_display_flush(g_wl.display);
+    }
+    skin_apply_wm_decoration(skin_idx);
+}
+
+static void surf_update_input_region(LunaSurface* s) {
+    if (!s->wl_surf || !s->was_shown || s->input_root_idx < 0) return;
+    LunaElement* box = luna_element_at(s->input_root_idx);
+    if (!box) return;
+    int x = (int)floorf(box->x - s->doc_x);
+    int y = (int)floorf(box->y - s->doc_y);
+    int w = (int)ceilf(box->w);
+    int h = (int)ceilf(box->h);
+    if (w <= 0 || h <= 0) return;
+    if (x == s->input_x && y == s->input_y && w == s->input_w && h == s->input_h)
+        return;
+    struct wl_region* region = wl_compositor_create_region(g_wl.compositor);
+    if (!region) return;
+    wl_region_add(region, x, y, w, h);
+    wl_surface_set_input_region(s->wl_surf, region);
+    wl_region_destroy(region);
+    wl_surface_commit(s->wl_surf);
+    s->input_x = x; s->input_y = y; s->input_w = w; s->input_h = h;
 }
 
 /* A surface only takes part in the frame loop when it has something to show. */
@@ -5082,6 +6684,7 @@ static int wl_backend_start(void) {
     if (g_wl.ctx == EGL_NO_CONTEXT) {
         fprintf(stderr, "[luna-shell/wl] eglCreateContext failed\n"); return 0;
     }
+    egl_swap_damage_init();
 
     /* Create all layer-shell surfaces, commit to get configure events */
     for (int i = 0; i < LUNA_SURF_COUNT; i++) {
@@ -5161,6 +6764,17 @@ static void wl_surf_render(LunaSurface* s, int surf_idx) {
     if (surf_idx >= 0 && surf_idx < LUNA_SURF_COUNT &&
         (g_surf_dirty & (1u << surf_idx)) == 0)
         return;
+    /* Probe before touching GL: a clock/stats tick often marks the wallpaper
+     * dirty even though every element's paint hash is unchanged.  Skipping the
+     * clear/draw/swap removes the periodic hitch those timers produced. */
+    if (!s->full_damage &&
+        !luna_probe_damage(s->root_idx, s->surf_w, s->surf_h,
+                           s->doc_x, s->doc_y,
+                           (float)s->surf_w, (float)s->surf_h)) {
+        if (surf_idx >= 0 && surf_idx < LUNA_SURF_COUNT)
+            g_surf_dirty &= ~(1u << surf_idx);
+        return;
+    }
     /* Drain any pending events before touching Mesa's EGL path: a protocol
      * error already queued here means the connection is dead, and calling
      * eglSwapBuffers() on a dead connection walks into create_wl_buffer()
@@ -5190,7 +6804,7 @@ static void wl_surf_render(LunaSurface* s, int surf_idx) {
         /* bg: no root filter, full-document render */
         luna_render(fw, fh);
     }
-    if (!eglSwapBuffers(g_wl.dpy, s->egl_surf)) {
+    if (!surf_swap(s)) {
         EGLint err = eglGetError();
         fprintf(stderr, "[luna-shell/wl] eglSwapBuffers failed for '%s' (EGL 0x%x)\n",
                 s->name, err);
@@ -5223,9 +6837,11 @@ static void wl_surfs_update(void) {
         int shown = (s->root_idx >= 0) ? is_shown(s->root_idx) : 0;
         if (shown != s->was_shown) {
             s->was_shown = shown;
+            if (shown) s->input_w = s->input_h = -1;
             surf_set_shown(s, shown);
             if (shown) shell_request_repaint(i);
         }
+        if (shown) surf_update_input_region(s);
     }
 }
 
@@ -5812,21 +7428,27 @@ static void parse_args(int argc, char** argv) {
             g_layout_path = argv[++i];
         else if (!strcmp(argv[i], "--css") && i + 1 < argc)
             g_css_path = argv[++i];
+        else if (!strcmp(argv[i], "--skin") && i + 1 < argc)
+            g_skin_override = argv[++i];
         else if (!strcmp(argv[i], "--screenshot") && i + 1 < argc)
             luna_request_screenshot(argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             fprintf(stderr,
                 "luna-shell " LUNA_SHELL_VERSION " — Luna Desktop shell\n"
                 "usage: luna-shell [--desktop] [--fullscreen] [--size WxH]\n"
-                "                  [--layout PATH] [--css PATH] [--screenshot PATH]\n"
+                "                  [--skin NAME] [--layout PATH] [--css PATH]\n"
+                "                  [--screenshot PATH]\n"
                 "  backend: auto-selected — Wayland/EGL if WAYLAND_DISPLAY is set,\n"
                 "           X11/EGL if DISPLAY is set (requires -DLUNA_BACKEND_X11 build),\n"
                 "           otherwise KMS/DRM bare console\n"
-                "  env: LUNA_DESKTOP_LAYOUT / LUNA_DESKTOP_CSS — external layout override\n"
+                "  env: LUNA_DESKTOP_SKIN — named skin from a discovered skins directory\n"
+                "       LUNA_SKIN_PATH — additional directory containing skin folders\n"
+                "       LUNA_DESKTOP_LAYOUT / LUNA_DESKTOP_CSS — external layout override\n"
                 "       LUNA_APP_<NAME>=<cmd> — override dock/launchpad app commands\n"
                 "       LUNA_SEAT — seat name for the KMS/libinput backend (default seat0)\n"
                 "       LUNA_CURSOR_THEME — one-shot cursor theme override (GUI/settings normally win)\n"
                 "       LUNA_CURSOR_PATH — directory of theme folders, or a theme dir itself\n"
+                "       LUNA_SCREENSHOT_DIR — screenshot directory (default: ~/Pictures/Screenshots)\n"
                 "       LUNA_IM_WAYLAND=0 — keep GTK_IM_MODULE=gim (default: wayland → whiz-im-wayland)\n"
                 "       LUNA_INPUT_METHOD / LUNA_CLIPBOARD — helper cmds (or 'none' to skip)\n"
                 "       LUNA_NO_HELPERS=1 — do not auto-start IME / clipboard manager\n"
@@ -5835,13 +7457,14 @@ static void parse_args(int argc, char** argv) {
                 "       display's native mode\n"
                 "  keys: Super/F4 — Launchpad, Esc — close overlay, Alt+Tab — switch apps\n"
                 "        Super+Arrows — tile/max/min, Super+D — show desktop, Alt+F4 — close window\n"
-                "        Cmd+, — Settings, F12 — screenshot\n"
+                "        Cmd+, — Settings, Print Screen/F12 — screenshot\n"
                 "  settings: ~/.config/luna-shell/settings.conf\n");
             exit(0);
         }
     }
     if (!g_layout_path) g_layout_path = getenv("LUNA_DESKTOP_LAYOUT");
     if (!g_css_path)    g_css_path    = getenv("LUNA_DESKTOP_CSS");
+    if (!g_skin_override) g_skin_override = getenv("LUNA_DESKTOP_SKIN");
 }
 
 static int env_is_true(const char* name) {
@@ -5874,6 +7497,14 @@ int main(int argc, char** argv) {
     luna_window_height = 900.0f;
     parse_args(argc, argv);
     settings_load();
+    skin_discover();
+    if (g_skin_override && *g_skin_override)
+        snprintf(g_settings.skin, sizeof(g_settings.skin), "%s", g_skin_override);
+    int startup_skin = skin_find(g_settings.skin);
+    if (startup_skin == 0 && strcmp(g_settings.skin, "luna"))
+        snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+    if (!g_layout_path && startup_skin > 0 && g_skins[startup_skin].layout[0])
+        g_layout_path = g_skins[startup_skin].layout;
     apply_xkb_session_env();
     shell_paths_init();
     setup_wayland_egl_env();
@@ -5911,14 +7542,13 @@ int main(int argc, char** argv) {
     };
     luna_set_platform(&plat);
 
-    LunaInitConfig cfg = { luna_window_width, luna_window_height, plat_proc };
+    LunaInitConfig cfg = { luna_window_width, luna_window_height, plat_proc, 0 };
     if (!luna_init(&cfg)) {
         fprintf(stderr, "[luna-shell] luna_init failed — check GL context version\n");
         g_backend->terminate();
         return 1;
     }
 
-    int css_loaded = g_css_path && luna_load_css_file(g_css_path);
     int loaded = 0;
     if (g_layout_path) {
         luna_set_html_base_dir(g_layout_path);
@@ -5926,8 +7556,41 @@ int main(int argc, char** argv) {
     }
     if (!loaded) {
         luna_set_html_base_dir("ui");
-        if (!css_loaded) luna_parse_css(default_css);
         luna_parse_html(default_html);
+    }
+    /* Authoring contract: layout.html may <link> ../_base/luna-shell.css and
+     * style.css so a browser preview matches the running shell.  When those
+     * links load successfully, trust that cascade as-is.  --css still wins
+     * and rebuilds the sheet; otherwise fall back to the embedded base and
+     * append the named skin's style.css when the document did not link it. */
+    if (g_css_path) {
+        luna_reset_css();
+        if (!luna_load_css_file(g_css_path)) luna_parse_css(default_css);
+        if (startup_skin > 0 && !luna_load_css_file(g_skins[startup_skin].css)) {
+            fprintf(stderr, "[luna-shell] skin '%s' could not load; using Luna Moonlight\n",
+                    g_settings.skin);
+            snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+        }
+    } else if (luna_css_from_document) {
+        /* layout.html already linked base (+ usually its own style.css).
+         * Only append the selected skin when the open layout is not that
+         * skin's file (e.g. --layout pointing at another theme's HTML). */
+        int layout_is_this_skin = startup_skin > 0 && g_layout_path &&
+            g_skins[startup_skin].layout[0] &&
+            !strcmp(g_layout_path, g_skins[startup_skin].layout);
+        if (startup_skin > 0 && !layout_is_this_skin &&
+            !luna_load_css_file(g_skins[startup_skin].css)) {
+            fprintf(stderr, "[luna-shell] skin '%s' could not load; using Luna Moonlight\n",
+                    g_settings.skin);
+            snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+        }
+    } else {
+        luna_parse_css(default_css);
+        if (startup_skin > 0 && !luna_load_css_file(g_skins[startup_skin].css)) {
+            fprintf(stderr, "[luna-shell] skin '%s' could not load; using Luna Moonlight\n",
+                    g_settings.skin);
+            snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+        }
     }
     luna_inject_body_background();
     register_handlers();
@@ -5938,11 +7601,20 @@ int main(int argc, char** argv) {
      * (element 0) rather than -1, which causes every overlay to appear "shown"
      * on the first frame and triggers wl_region_destroy(NULL) → SIGSEGV. */
     if (g_backend == &g_wl_backend) {
-        for (int i = 0; i < LUNA_SURF_COUNT; i++)
+        for (int i = 0; i < LUNA_SURF_COUNT; i++) {
             g_surfs[i].root_idx = g_surfs[i].root_id
                 ? luna_get_element_by_id(g_surfs[i].root_id)
                 : -1;
+            g_surfs[i].input_root_idx = g_surfs[i].input_root_id
+                ? luna_get_element_by_id(g_surfs[i].input_root_id)
+                : -1;
+        }
     }
+    /* Move the menubar / dock layer anchors to match the selected skin
+     * (e.g. Windows XP taskbar at the bottom).  Must run after the layer
+     * surfaces exist and the DOM ids have been bound. */
+    skin_apply_chrome(startup_skin);
+    skin_apply_toolkit(startup_skin);
     luna_set_mouse_release_hook(on_mouse_release_hook);
     fill_about_info();
     apply_wallpaper(g_settings.wallpaper);
@@ -5956,9 +7628,12 @@ int main(int argc, char** argv) {
     g_now = plat_time();
     toast_show("Welcome to Luna", "Your desktop is ready.", 8.0);
     session_restore_schedule();
+    weather_request(g_settings.weather_city);
 
     double last    = plat_time();
     int    prev_ww = 0, prev_wh = 0;
+    LunaSliderIds bright_slider = {0, 0, 0, 0};
+    LunaSliderIds vol_slider    = {0, 0, 0, 0};
 
     while (!g_should_close) {
         g_now = plat_time();
@@ -5978,11 +7653,12 @@ int main(int argc, char** argv) {
         reap_children();
         update_clock();
         update_stats();
+        weather_tick();
         update_launchpad_filter();
         poll_shell_state();
         session_restore_tick();
-        slider_tick("bright_thumb", "bright_fill", "bright_track");
-        slider_tick("vol_thumb", "vol_fill", "vol_track");
+        slider_tick_cached(&bright_slider, "bright_thumb", "bright_fill", "bright_track");
+        slider_tick_cached(&vol_slider, "vol_thumb", "vol_fill", "vol_track");
         dock_magnify_tick();
         cursor_theme_tick_and_refresh();
         if (g_toast_deadline > 0.0 && g_now > g_toast_deadline) {
@@ -5991,6 +7667,13 @@ int main(int argc, char** argv) {
         }
 
         luna_update(g_now, dt);
+        /* Does the wallpaper actually animate?  A still wallpaper needs no
+         * timed repaints at all, and the check itself scans the element array,
+         * so it runs once a second rather than once a frame. */
+        if (g_now - g_last_bg_anim_check >= 1.0) {
+            g_last_bg_anim_check = g_now;
+            g_bg_animated = luna_css_anim_running_under(g_surfs[LUNA_SURF_BG].root_idx);
+        }
         if (g_backend == &g_wl_backend) {
             wl_surfs_update();
             /* Wallpaper aurora/stars: only damage the bg layer when the
@@ -6001,12 +7684,20 @@ int main(int argc, char** argv) {
             for (int wi = 0; wi < g_win_count; wi++) {
                 if (!g_wins[wi].minimized) { desktop_busy = 1; break; }
             }
-            if (!desktop_busy && g_now - g_last_bg_paint >= 0.25)
+            int bg_ticking = g_bg_animated && !desktop_busy;
+            if (bg_ticking && g_now - g_last_bg_paint >= 0.25)
                 shell_request_repaint(LUNA_SURF_BG);
-            /* Per-surface settling — dock mag must not redraw the menubar. */
+            /* Per-surface settling — dock mag must not redraw the menubar.
+             * One pass answers for every surface at once; asking per surface
+             * meant a full element scan (with a parent-chain walk per element)
+             * a dozen times on every single frame, idle or not. */
+            int surf_roots[LUNA_SURF_COUNT];
+            for (int i = 0; i < LUNA_SURF_COUNT; i++)
+                surf_roots[i] = surf_is_live(&g_surfs[i]) ? g_surfs[i].root_idx : INT_MAX;
+            unsigned settle_mask = 0;
+            int settling = luna_visuals_settling_mask(surf_roots, LUNA_SURF_COUNT, &settle_mask);
             for (int i = 0; i < LUNA_SURF_COUNT; i++) {
-                if (!surf_is_live(&g_surfs[i])) continue;
-                if (luna_visuals_settling_under(g_surfs[i].root_idx))
+                if (settle_mask & (1u << i))
                     shell_request_repaint(i);
             }
             for (int i = 0; i < LUNA_SURF_COUNT; i++) {
@@ -6014,11 +7705,10 @@ int main(int argc, char** argv) {
             }
             /* Interactive easing is capped at roughly 60 fps.  When idle,
              * sleep until input or the next real shell/background deadline. */
-            int settling = luna_visuals_settling();
             g_wl_poll_timeout_ms = settling
                 ? shell_wait_timeout_ms(17, g_now + 1.0 / 60.0)
                 : shell_wait_timeout_ms(250,
-                      desktop_busy ? 0.0 : g_last_bg_paint + 0.25);
+                      bg_ticking ? g_last_bg_paint + 0.25 : 0.0);
         } else {
             /* Compute this once: it scans the element array.  The result is
              * also the complete redraw decision for the single KMS/X11
@@ -6027,9 +7717,14 @@ int main(int argc, char** argv) {
             /* Pointer/hover easing runs at vblank cadence, but CSS wallpaper
              * animation is intentionally 15 fps when nothing is changing.
              * The KMS hardware cursor remains full-rate without repainting the
-             * primary plane, saving GPU work and memory bandwidth. */
-            double idle_frame_deadline = g_last_bg_paint + 1.0 / 15.0;
-            if (g_now >= idle_frame_deadline)
+             * primary plane, saving GPU work and memory bandwidth.  A still
+             * wallpaper is entirely event-driven: the old two-second "safety"
+             * repaint was a periodic full-document render + KMS page flip and
+             * was visible as a regular hitch even though no pixel changed. */
+            double idle_frame_deadline = g_bg_animated
+                ? g_last_bg_paint + 1.0 / 15.0
+                : 0.0;
+            if (idle_frame_deadline > 0.0 && g_now >= idle_frame_deadline)
                 g_frame_dirty = 1;
             if (g_frame_dirty || settling) {
                 glViewport(0, 0, fbw, fbh);
@@ -6044,16 +7739,20 @@ int main(int argc, char** argv) {
                 g_backend->swap_buffers();
                 g_frame_dirty = 0;
                 g_last_bg_paint = g_now;
+                finish_screenshot_notification();
                 g_single_poll_timeout_ms = settling ? 0
-                    : shell_wait_timeout_ms(67, g_last_bg_paint + 1.0 / 15.0);
+                    : shell_wait_timeout_ms(67, g_bg_animated
+                          ? g_last_bg_paint + 1.0 / 15.0 : 0.0);
             } else {
                 g_single_poll_timeout_ms = shell_wait_timeout_ms(67, idle_frame_deadline);
             }
         }
         /* Wayland surfaces perform their own swap in wl_surf_render(); keep
          * the existing post-render capture point for that backend. */
-        if (g_backend == &g_wl_backend)
+        if (g_backend == &g_wl_backend) {
             luna_flush_pending_screenshot();
+            finish_screenshot_notification();
+        }
         g_backend->poll_events();
     }
     session_save();

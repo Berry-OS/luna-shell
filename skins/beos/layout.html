@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Luna Shell — BeOS</title>
+  <!-- Open this file in a browser to preview; luna-shell loads the same links. -->
+  <link rel="stylesheet" href="../_base/luna-shell.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Background wallpaper layer -->
+  <div id="bg_layer">
+    <div id="wallpaper" class="night">
+      <div id="wp_aurora1"></div>
+      <div id="wp_aurora2"></div>
+      <div id="wp_star1" class="star"></div>
+      <div id="wp_star2" class="star"></div>
+      <div id="wp_star3" class="star"></div>
+      <div id="wp_star4" class="star"></div>
+      <div id="wp_star5" class="star"></div>
+      <div id="wp_star6" class="star"></div>
+      <div id="wp_star7" class="star"></div>
+      <div id="wp_star8" class="star"></div>
+      <div id="wp_moon_halo"></div>
+      <div id="wp_moon"></div>
+    </div>
+  </div>
+
+  <!-- Top Menu Bar -->
+  <div id="menubar">
+    <div id="mb_left">
+      <div id="mb_logo" class="mb_item" aria-label="Luna menu"><div id="mb_logo_glyph" class="luna_icon" aria-hidden="true">&#xf186;</div></div>
+      <div id="mb_app" class="mb_item mb_app_name">Luna Shell</div>
+    </div>
+
+    <div id="mb_center">
+      <div id="win_list">
+        <div id="win_0" class="win_item active"><span class="win_label">Terminal</span></div>
+        <div id="win_1" class="win_item"><span class="win_label">Files</span></div>
+        <div id="win_2" class="win_item minimized"><span class="win_label">Editor</span></div>
+        <div id="win_3" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_4" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_5" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_6" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_7" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_8" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_9" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_10" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_11" class="win_item hidden"><span class="win_label">Window</span></div>
+      </div>
+    </div>
+
+    <div id="mb_right">
+      <div id="tray_area">
+        <div id="tray_0" class="tray_item icon_terminal"><span class="tray_glyph luna_icon">&#xf120;</span></div>
+        <div id="tray_1" class="tray_item icon_browser"><span class="tray_glyph luna_icon">&#xf0ac;</span></div>
+        <div id="tray_2" class="tray_item icon_files"><span class="tray_glyph luna_icon">&#xf07b;</span></div>
+      </div>
+      <div id="mb_clip" class="mb_item mb_status"><span class="luna_icon">&#xf0ea;</span></div>
+      <div id="mb_wifi" class="mb_item mb_status"><span class="luna_icon">&#xf1eb;</span> Wi-Fi</div>
+      <div id="mb_bat" class="mb_item mb_status"><span class="luna_icon">&#xf240;</span> 98%</div>
+      <div id="mb_cc" class="mb_item mb_status"><span class="luna_icon">&#xf1de;</span></div>
+      <div id="mb_weather" class="mb_item mb_status" title="Weather">
+        <span class="luna_icon" id="mb_weather_icon">&#xf2c9;</span>
+        <span id="mb_weather_temp">—</span>
+      </div>
+      <div id="mb_clock" class="mb_item">Tue Jul 28  23:00</div>
+    </div>
+  </div>
+
+  <!-- Window actions, opened by a title-bar or window-list right click. -->
+  <div id="win_menu" class="menu_panel hidden">
+    <span id="win_menu_title" class="menu_section_label">Window</span>
+    <div id="wm_activate" class="menu_item"><span class="mi_sym luna_icon">&#xf2d0;</span><span class="mi_label">Activate</span></div>
+    <div id="wm_minimize" class="menu_item"><span class="mi_sym luna_icon">&#xf2d1;</span><span class="mi_label">Minimize</span></div>
+    <div id="wm_maximize" class="menu_item"><span class="mi_sym luna_icon">&#xf2d0;</span><span class="mi_label">Maximize</span></div>
+    <div id="wm_fullscreen" class="menu_item"><span class="mi_sym luna_icon">&#xf065;</span><span class="mi_label">Fullscreen</span></div>
+    <div class="menu_sep"></div>
+    <div id="wm_tile_left" class="menu_item"><span class="mi_sym luna_icon">&#xf053;</span><span class="mi_label">Tile Left</span></div>
+    <div id="wm_tile_right" class="menu_item"><span class="mi_sym luna_icon">&#xf054;</span><span class="mi_label">Tile Right</span></div>
+    <div id="wm_center" class="menu_item"><span class="mi_sym luna_icon">&#xf192;</span><span class="mi_label">Center</span></div>
+    <div class="menu_sep"></div>
+    <div id="wm_close" class="menu_item mi_destructive"><span class="mi_sym luna_icon">&#xf00d;</span><span class="mi_label">Close</span></div>
+  </div>
+
+  <!-- Alt+Tab switcher.  Keep one element per MAX_SWITCHER_SLOTS. -->
+  <div id="switcher" class="switcher_overlay hidden">
+    <div id="switcher_strip">
+      <div id="sw_0" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_1" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_2" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_3" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_4" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_5" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_6" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_7" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_8" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_9" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_10" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+      <div id="sw_11" class="switcher_item"><span class="sw_app">app</span><span class="sw_title">Window</span></div>
+    </div>
+  </div>
+
+  <!-- Wi-Fi menu (backed by ConnMan, with NetworkManager fallback) -->
+  <div id="wifi_menu" class="menu_panel hidden">
+    <div id="wifi_head">
+      <span id="wifi_title">Wi-Fi</span>
+      <div class="cc_toggle" id="wifi_power"><div class="cc_knob"></div></div>
+    </div>
+    <span id="wifi_status">Checking network service...</span>
+    <div class="menu_sep"></div>
+    <div id="wifi_0" class="menu_item wifi_network hidden"><span class="mi_sym luna_icon">&#xf1eb;</span><span class="mi_label">Network</span><span class="wifi_signal"></span></div>
+    <div id="wifi_1" class="menu_item wifi_network hidden"><span class="mi_sym luna_icon">&#xf1eb;</span><span class="mi_label">Network</span><span class="wifi_signal"></span></div>
+    <div id="wifi_2" class="menu_item wifi_network hidden"><span class="mi_sym luna_icon">&#xf1eb;</span><span class="mi_label">Network</span><span class="wifi_signal"></span></div>
+    <div id="wifi_3" class="menu_item wifi_network hidden"><span class="mi_sym luna_icon">&#xf1eb;</span><span class="mi_label">Network</span><span class="wifi_signal"></span></div>
+    <div id="wifi_4" class="menu_item wifi_network hidden"><span class="mi_sym luna_icon">&#xf1eb;</span><span class="mi_label">Network</span><span class="wifi_signal"></span></div>
+    <div id="wifi_5" class="menu_item wifi_network hidden"><span class="mi_sym luna_icon">&#xf1eb;</span><span class="mi_label">Network</span><span class="wifi_signal"></span></div>
+    <div id="wifi_6" class="menu_item wifi_network hidden"><span class="mi_sym luna_icon">&#xf1eb;</span><span class="mi_label">Network</span><span class="wifi_signal"></span></div>
+    <div id="wifi_7" class="menu_item wifi_network hidden"><span class="mi_sym luna_icon">&#xf1eb;</span><span class="mi_label">Network</span><span class="wifi_signal"></span></div>
+    <div id="wifi_credentials" class="hidden">
+      <span id="wifi_selected">Connect to network</span>
+      <input type="password" id="wifi_password" placeholder="Password (leave blank if saved/open)">
+      <div id="wifi_connect" class="dlg_btn primary">Connect</div>
+    </div>
+    <div class="menu_sep"></div>
+    <div id="wifi_scan" class="menu_item"><span class="mi_sym luna_icon">&#xf021;</span><span class="mi_label">Scan for Networks</span></div>
+  </div>
+
+  <!-- Luna Dropdown Menu -->
+  <div id="luna_menu" class="menu_panel hidden">
+    <span class="menu_section_label">System</span>
+    <div class="menu_item" id="mi_about">
+      <span class="mi_sym luna_icon">&#xf186;</span>
+      <span class="mi_label">About This PC...</span>
+    </div>
+    <div class="menu_item" id="mi_settings">
+      <span class="mi_sym luna_icon">&#xf013;</span>
+      <span class="mi_label">System Settings...</span>
+      <span class="mi_key">⌘,</span>
+    </div>
+    <div class="menu_item" id="mi_launchpad">
+      <span class="mi_sym luna_icon">&#xf135;</span>
+      <span class="mi_label">Launchpad</span>
+      <span class="mi_key">F4</span>
+    </div>
+    <div class="menu_sep"></div>
+    <div class="menu_item" id="mi_restart">
+      <span class="mi_sym luna_icon">&#xf021;</span>
+      <span class="mi_label">Restart...</span>
+    </div>
+    <div class="menu_item mi_destructive" id="mi_shutdown">
+      <span class="mi_sym luna_icon">&#xf011;</span>
+      <span class="mi_label">Shut Down...</span>
+    </div>
+    <div class="menu_sep"></div>
+    <div class="menu_item mi_destructive" id="mi_logout">
+      <span class="mi_sym luna_icon">&#xf08b;</span>
+      <span class="mi_label">Log Out...</span>
+      <span class="mi_key">⇧⌘Q</span>
+    </div>
+  </div>
+
+  <!-- Clipboard history.  The shell populates and wires these items in C. -->
+  <div id="clip_menu" class="menu_panel hidden">
+    <div class="menu_section_label">Clipboard</div>
+    <div id="clip_empty" class="clip_empty">No recent copies</div>
+    <div id="clip_0" class="menu_item clip_item hidden"><div class="mi_sym">1</div><div class="mi_label clip_preview">—</div></div>
+    <div id="clip_1" class="menu_item clip_item hidden"><div class="mi_sym">2</div><div class="mi_label clip_preview">—</div></div>
+    <div id="clip_2" class="menu_item clip_item hidden"><div class="mi_sym">3</div><div class="mi_label clip_preview">—</div></div>
+    <div id="clip_3" class="menu_item clip_item hidden"><div class="mi_sym">4</div><div class="mi_label clip_preview">—</div></div>
+    <div id="clip_4" class="menu_item clip_item hidden"><div class="mi_sym">5</div><div class="mi_label clip_preview">—</div></div>
+    <div id="clip_5" class="menu_item clip_item hidden"><div class="mi_sym">6</div><div class="mi_label clip_preview">—</div></div>
+    <div id="clip_6" class="menu_item clip_item hidden"><div class="mi_sym">7</div><div class="mi_label clip_preview">—</div></div>
+    <div id="clip_7" class="menu_item clip_item hidden"><div class="mi_sym">8</div><div class="mi_label clip_preview">—</div></div>
+    <div class="menu_sep"></div>
+    <div id="clip_clear" class="menu_item mi_destructive"><div class="mi_sym">✕</div><div class="mi_label">Clear History</div></div>
+  </div>
+
+  <!-- Control Center -->
+  <div id="control_center" class="menu_panel hidden">
+    <div class="cc_row">
+      <div class="cc_cell">
+        <div class="cc_toggle on" id="cc_wifi"><div class="cc_knob"></div></div>
+        <span class="cc_label">Wi-Fi</span>
+      </div>
+      <div class="cc_cell">
+        <div class="cc_toggle on" id="cc_bt"><div class="cc_knob"></div></div>
+        <span class="cc_label">Bluetooth</span>
+      </div>
+      <div class="cc_cell">
+        <div class="cc_toggle" id="cc_night"><div class="cc_knob"></div></div>
+        <span class="cc_label">Night Shift</span>
+      </div>
+    </div>
+    <span class="cc_section">Display & Sound</span>
+    <div class="cc_track" id="bright_track">
+      <div class="cc_fill" id="bright_fill" style="width: 75%;"></div>
+      <div class="cc_thumb" id="bright_thumb" style="left: 73%;"></div>
+    </div>
+    <div class="cc_track" id="vol_track">
+      <div class="cc_fill" id="vol_fill" style="width: 60%;"></div>
+      <div class="cc_thumb" id="vol_thumb" style="left: 58%;"></div>
+    </div>
+    <span class="cc_section">System Performance</span>
+    <div class="cc_stat_row">
+      <span class="cc_stat_label">CPU</span>
+      <div class="cc_bar"><div class="cc_bar_fill" id="cc_cpu_fill" style="width: 24%;"></div></div>
+    </div>
+    <div class="cc_stat_row">
+      <span class="cc_stat_label">RAM</span>
+      <div class="cc_bar"><div class="cc_bar_fill" id="cc_mem_fill" style="width: 48%;"></div></div>
+    </div>
+  </div>
+
+  <!-- Weather popover (Open-Meteo; mirrors qberry-weather.js) -->
+  <div id="weather_menu" class="menu_panel hidden">
+    <div id="weather_search">
+      <input type="text" id="weather_city_input" placeholder="City (e.g. Tokyo)">
+      <div id="weather_go" class="dlg_btn primary">Go</div>
+    </div>
+    <div id="weather_body">
+      <span id="weather_hint">Locating…</span>
+      <div id="weather_content" class="hidden">
+        <div id="weather_city_label">—</div>
+        <div id="weather_main">
+          <span class="luna_icon" id="weather_icon">&#xf185;</span>
+          <div>
+            <div id="weather_temp">—°C</div>
+            <div id="weather_desc">—</div>
+          </div>
+        </div>
+        <div id="weather_stats_row">
+          <span id="weather_feels">Feels —</span>
+          <span id="weather_hum">—%</span>
+          <span id="weather_wind">— km/h</span>
+        </div>
+        <div id="weather_forecast">
+          <div id="wf_0" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+          <div id="wf_1" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+          <div id="wf_2" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+          <div id="wf_3" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+          <div id="wf_4" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+        </div>
+      </div>
+      <span id="weather_error" class="hidden">Weather unavailable</span>
+    </div>
+  </div>
+
+  <!-- Desktop Widgets -->
+  <div id="widget_clock" class="widget">
+    <div id="wg_time">23:00</div>
+    <div id="wg_date">Tuesday, July 28</div>
+  </div>
+
+  <div id="widget_stats" class="widget">
+    <div class="st_row">
+      <span class="st_label">CPU Usage</span>
+      <span class="st_val" id="st_cpu_val">24%</span>
+    </div>
+    <div class="st_bar"><div class="st_fill" id="st_cpu_fill" style="width: 24%;"></div></div>
+
+    <div class="st_row" style="margin-top: 12px;">
+      <span class="st_label">Memory</span>
+      <span class="st_val" id="st_mem_val">7.8 / 16 GB</span>
+    </div>
+    <div class="st_bar"><div class="st_fill g_mem" id="st_mem_fill" style="width: 48%;"></div></div>
+
+    <div class="st_row" style="margin-top: 12px;">
+      <span class="st_label">Storage</span>
+      <span class="st_val">142 / 512 GB</span>
+    </div>
+    <div class="st_bar"><div class="st_fill g_disk" style="width: 28%;"></div></div>
+  </div>
+
+  <div id="widget_weather" class="widget">
+    <div class="st_row">
+      <span class="st_label" id="wg_wx_city">Weather</span>
+      <span class="st_val" id="wg_wx_temp">—</span>
+    </div>
+    <div id="wg_wx_main">
+      <span class="luna_icon" id="wg_wx_icon">&#xf2c9;</span>
+      <span id="wg_wx_desc">Fetching…</span>
+    </div>
+    <div id="wg_wx_forecast">
+      <div id="wg_wf_0" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_1" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_2" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_3" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_4" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+    </div>
+  </div>
+
+  <!-- Dock -->
+  <div id="dock">
+    <div class="dock_item" id="dock_files">
+      <div class="dock_icon g_files luna_icon">&#xf07b;</div>
+      <div class="dock_dot" id="dot_files"></div>
+    </div>
+    <div class="dock_item" id="dock_launchpad">
+      <div class="dock_icon g_launchpad luna_icon">&#xf135;</div>
+      <div class="dock_dot spacer"></div>
+    </div>
+    <div class="dock_item" id="dock_terminal">
+      <div class="dock_icon g_terminal luna_icon">&#xf120;</div>
+      <div class="dock_dot" id="dot_terminal"></div>
+    </div>
+    <div class="dock_item" id="dock_browser">
+      <div class="dock_icon g_browser luna_icon">&#xf0ac;</div>
+      <div class="dock_dot" id="dot_browser"></div>
+    </div>
+    <div class="dock_item" id="dock_editor">
+      <div class="dock_icon g_editor luna_icon">&#xf15c;</div>
+      <div class="dock_dot" id="dot_editor"></div>
+    </div>
+    <div class="dock_item" id="dock_music">
+      <div class="dock_icon g_music luna_icon">&#xf001;</div>
+      <div class="dock_dot" id="dot_music"></div>
+    </div>
+    <div class="dock_item" id="dock_settings">
+      <div class="dock_icon g_settings luna_icon">&#xf013;</div>
+      <div class="dock_dot" id="dot_settings"></div>
+    </div>
+    <div class="dock_sep"></div>
+    <div class="dock_item" id="dock_trash">
+      <div class="dock_icon g_trash luna_icon">&#xf1f8;</div>
+      <div class="dock_dot spacer"></div>
+    </div>
+  </div>
+
+  <!-- Launchpad Overlay -->
+  <div id="launchpad" class="hidden">
+    <input type="text" id="lp_search" placeholder="Search applications">
+    <div id="lp_grid">
+      <div class="lp_app" id="lp_files">
+        <div class="lp_icon g_files luna_icon">&#xf07b;</div>
+        <span class="lp_label">Files</span>
+      </div>
+      <div class="lp_app" id="lp_terminal">
+        <div class="lp_icon g_terminal luna_icon">&#xf120;</div>
+        <span class="lp_label">Terminal</span>
+      </div>
+      <div class="lp_app" id="lp_browser">
+        <div class="lp_icon g_browser luna_icon">&#xf0ac;</div>
+        <span class="lp_label">Browser</span>
+      </div>
+      <div class="lp_app" id="lp_editor">
+        <div class="lp_icon g_editor luna_icon">&#xf15c;</div>
+        <span class="lp_label">Editor</span>
+      </div>
+      <div class="lp_app" id="lp_music">
+        <div class="lp_icon g_music luna_icon">&#xf001;</div>
+        <span class="lp_label">Music</span>
+      </div>
+      <div class="lp_app" id="lp_settings">
+        <div class="lp_icon g_settings luna_icon">&#xf013;</div>
+        <span class="lp_label">Settings</span>
+      </div>
+      <div class="lp_app" id="lp_demo">
+        <div class="lp_icon g_demo luna_icon">&#xf121;</div>
+        <span class="lp_label">GTK Demo</span>
+      </div>
+      <div class="lp_app" id="lp_hello">
+        <div class="lp_icon g_hello luna_icon">&#xf118;</div>
+        <span class="lp_label">Hello GTK</span>
+      </div>
+    </div>
+    <span id="lp_hint">Press Esc to close Launchpad</span>
+  </div>
+
+  <!-- Confirmation Dialog Overlay -->
+  <div id="confirm_overlay" class="modal_sheet modeless_dialog hidden">
+    <div id="confirm_backdrop" class="modal_backdrop"></div>
+    <div id="confirm_box" class="alert_box dialog_window dialog_alert" role="dialog" aria-modal="false" aria-labelledby="confirm_title" aria-describedby="confirm_msg">
+      <div class="tl tl_red" id="ctl_close"></div>
+      <div class="tl tl_yellow" id="ctl_min"></div>
+      <div class="tl tl_green" id="ctl_max"></div>
+      <div id="confirm_drag"></div>
+      <div id="confirm_content">
+        <div id="confirm_icon" class="luna_icon" aria-hidden="true">&#xf011;</div>
+        <div id="confirm_copy">
+          <div id="confirm_title">Shut Down?</div>
+          <div id="confirm_msg">Open applications will close. Save your work before continuing.</div>
+        </div>
+      </div>
+      <div id="confirm_btns">
+        <button id="confirm_cancel" class="dlg_btn">Cancel</button>
+        <button id="confirm_ok" class="dlg_btn danger">Shut Down</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Sheet Window -->
+  <div id="settings_win" class="modal_sheet modeless_dialog hidden">
+    <div id="settings_backdrop" class="modal_backdrop"></div>
+    <div id="settings_sheet" class="sheet_box dialog_window">
+      <div class="tl tl_red" id="stl_close"></div>
+      <div class="tl tl_yellow" id="stl_min"></div>
+      <div class="tl tl_green" id="stl_max"></div>
+      <div id="settings_drag"></div>
+      <div id="settings_title">System Settings</div>
+      <div id="settings_body">
+        <div id="settings_sidebar">
+          <div class="stab active" id="stab_apps"><span class="stab_icon luna_icon">&#xf013;</span> Applications</div>
+          <div class="stab" id="stab_disp"><span class="stab_icon luna_icon">&#xf108;</span> Appearance</div>
+          <div class="stab" id="stab_wm"><span class="stab_icon luna_icon">&#xf2d0;</span> Windows</div>
+        </div>
+        <div id="settings_content">
+          <!-- Apps Panel -->
+          <div id="settings_panel_apps">
+            <span class="panel_heading">Default Applications</span>
+            <div class="pref_row">
+              <span class="pref_label">File Manager</span>
+              <input type="text" id="pref_files" class="pref_input" value="luna-fm">
+            </div>
+            <div class="pref_row">
+              <span class="pref_label">Terminal</span>
+              <input type="text" id="pref_terminal" class="pref_input" value="foot">
+            </div>
+            <div class="pref_row">
+              <span class="pref_label">Web Browser</span>
+              <input type="text" id="pref_browser" class="pref_input" value="firefox">
+            </div>
+            <div class="pref_row">
+              <span class="pref_label">Text Editor</span>
+              <input type="text" id="pref_editor" class="pref_input" value="luna-edit">
+            </div>
+          </div>
+
+          <!-- Appearance Panel -->
+          <div id="settings_panel_disp" class="hidden">
+            <span class="panel_heading">Desktop Skin</span>
+            <span class="pref_hint">Choose a complete desktop look. Colors apply immediately; taskbar and deskbar skins also move the shell chrome.</span>
+            <div id="skin_cards" role="radiogroup" aria-label="Desktop skin">
+              <div class="skin_card selected" id="skin_0" role="radio" tabindex="0"><div class="skin_preview skin_preview_0"></div><div class="skin_copy"><span class="skin_name" id="skin_0_name">Luna Moonlight</span><span class="skin_desc" id="skin_0_desc">The built-in Luna desktop</span></div></div>
+              <div class="skin_card hidden" id="skin_1" role="radio" tabindex="0"><div class="skin_preview skin_preview_1"></div><div class="skin_copy"><span class="skin_name" id="skin_1_name">External skin</span><span class="skin_desc" id="skin_1_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_2" role="radio" tabindex="0"><div class="skin_preview skin_preview_2"></div><div class="skin_copy"><span class="skin_name" id="skin_2_name">External skin</span><span class="skin_desc" id="skin_2_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_3" role="radio" tabindex="0"><div class="skin_preview skin_preview_3"></div><div class="skin_copy"><span class="skin_name" id="skin_3_name">External skin</span><span class="skin_desc" id="skin_3_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_4" role="radio" tabindex="0"><div class="skin_preview skin_preview_4"></div><div class="skin_copy"><span class="skin_name" id="skin_4_name">External skin</span><span class="skin_desc" id="skin_4_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_5" role="radio" tabindex="0"><div class="skin_preview skin_preview_5"></div><div class="skin_copy"><span class="skin_name" id="skin_5_name">External skin</span><span class="skin_desc" id="skin_5_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_6" role="radio" tabindex="0"><div class="skin_preview skin_preview_6"></div><div class="skin_copy"><span class="skin_name" id="skin_6_name">External skin</span><span class="skin_desc" id="skin_6_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_7" role="radio" tabindex="0"><div class="skin_preview skin_preview_7"></div><div class="skin_copy"><span class="skin_name" id="skin_7_name">External skin</span><span class="skin_desc" id="skin_7_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_8" role="radio" tabindex="0"><div class="skin_preview skin_preview_0"></div><div class="skin_copy"><span class="skin_name" id="skin_8_name">External skin</span><span class="skin_desc" id="skin_8_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_9" role="radio" tabindex="0"><div class="skin_preview skin_preview_1"></div><div class="skin_copy"><span class="skin_name" id="skin_9_name">External skin</span><span class="skin_desc" id="skin_9_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_10" role="radio" tabindex="0"><div class="skin_preview skin_preview_2"></div><div class="skin_copy"><span class="skin_name" id="skin_10_name">External skin</span><span class="skin_desc" id="skin_10_desc">Discovered automatically</span></div></div>
+              <div class="skin_card hidden" id="skin_11" role="radio" tabindex="0"><div class="skin_preview skin_preview_0"></div><div class="skin_copy"><span class="skin_name" id="skin_11_name">External skin</span><span class="skin_desc" id="skin_11_desc">Discovered automatically</span></div></div>
+            </div>
+
+            <span class="panel_heading">Desktop Wallpaper</span>
+            <div id="wp_thumbs_row">
+              <div class="wp_thumb wp_t_night selected" id="wp_night"></div>
+              <div class="wp_thumb wp_t_ocean" id="wp_ocean"></div>
+              <div class="wp_thumb wp_t_forest" id="wp_forest"></div>
+              <div class="wp_thumb wp_t_sunset" id="wp_sunset"></div>
+            </div>
+            <div class="wp_label_row">
+              <span class="wp_lbl">Night Sky</span>
+              <span class="wp_lbl">Deep Ocean</span>
+              <span class="wp_lbl">Pine Forest</span>
+              <span class="wp_lbl">Dusk Sunset</span>
+            </div>
+
+            <span class="panel_heading" style="margin-top: 16px;">Cursor Theme</span>
+            <div id="cur_thumbs_row">
+              <div class="cur_card selected" id="cur_aero">
+                <div class="cur_preview cur_p_aero"></div>
+                <span class="cur_name">Aero Light</span>
+                <span class="cur_desc">Modern translucent</span>
+              </div>
+              <div class="cur_card" id="cur_miku">
+                <div class="cur_preview cur_p_miku"></div>
+                <span class="cur_name">Cyan Magic</span>
+                <span class="cur_desc">Vibrant glow</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Window-management panel: lightweight compositor settings. -->
+          <div id="settings_panel_wm" class="hidden">
+            <span class="panel_heading">Window Management</span>
+            <span class="pref_hint">Changes apply immediately and are saved with the other desktop settings.</span>
+
+            <div class="wm_pref" id="wm_snap" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Edge snapping</span><span class="wm_pref_desc">Tile windows at the left or right edge.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_top_maximize" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Maximize at top edge</span><span class="wm_pref_desc">Use the classic behavior when dragging a window to the top edge.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_double_click" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Double-click title bar</span><span class="wm_pref_desc">Maximize or restore the active window.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_classic_titlebar" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Classic title bars</span><span class="wm_pref_desc">Use the original solid bar and traffic-light controls for server-decorated windows.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_shortcuts" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Super-key shortcuts</span><span class="wm_pref_desc">Arrows tile and restore; Super+D shows the desktop.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+
+            <span class="pref_section">Tiled window gap</span>
+            <div class="wm_choice_row">
+              <div class="wm_choice" id="wm_gap_0" role="radio" tabindex="0">None</div>
+              <div class="wm_choice" id="wm_gap_8" role="radio" tabindex="0">Compact</div>
+              <div class="wm_choice" id="wm_gap_16" role="radio" tabindex="0">Comfortable</div>
+            </div>
+
+            <span class="pref_section">Desktop behavior</span>
+            <div class="wm_pref" id="wm_dock_mag" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Dock magnification</span><span class="wm_pref_desc">Scale nearby icons while pointing at the dock.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_restore" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Restore previous session</span><span class="wm_pref_desc">Reopen applications and restore window state after login.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="settings_btns">
+        <button class="dlg_btn" id="settings_cancel">Cancel</button>
+        <button class="dlg_btn primary" id="settings_ok">Apply Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- About Box Window -->
+  <div id="about_win" class="modal_sheet modeless_dialog hidden">
+    <div id="about_backdrop" class="modal_backdrop"></div>
+    <div id="about_box" class="sheet_box about_box dialog_window">
+      <div class="tl tl_red" id="tl_close"></div>
+      <div class="tl tl_yellow" id="tl_min"></div>
+      <div class="tl tl_green" id="tl_max"></div>
+      <div id="about_drag"></div>
+      <div id="about_content">
+        <div id="about_icon"><div class="luna_icon" aria-hidden="true">&#xf186;</div></div>
+        <div id="about_title">Luna OS</div>
+        <div id="about_ver"><span class="about_ver_dot"></span>Version 1.0 · Moonlight Edition</div>
+        <div id="about_sep"></div>
+        <div id="about_grid">
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf085;</div>
+            <div class="spec_text">
+              <span class="spec_label">Shell</span>
+              <span class="spec_value" id="about_shell">Luna Shell 1.0</span>
+            </div>
+          </div>
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf03e;</div>
+            <div class="spec_text">
+              <span class="spec_label">Compositor</span>
+              <span class="spec_value" id="about_comp">Luna UI Layer</span>
+            </div>
+          </div>
+          <div class="about_spec">
+            <div class="spec_icon luna_brand">&#xf17c;</div>
+            <div class="spec_text">
+              <span class="spec_label">Kernel</span>
+              <span class="spec_value" id="about_kernel">6.12.0-luna</span>
+            </div>
+          </div>
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf1c0;</div>
+            <div class="spec_text">
+              <span class="spec_label">Memory</span>
+              <span class="spec_value" id="about_mem">16.0 GB DDR5</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Toast -->
+  <div id="toast" class="hidden">
+    <div id="toast_icon" class="luna_icon">&#xf186;</div>
+    <div id="toast_body">
+      <div id="toast_title">System Notification</div>
+      <div id="toast_msg">Luna UI Engine updated to v2.0</div>
+    </div>
+    <div id="toast_close">✕</div>
+  </div>
+</body>
+</html>

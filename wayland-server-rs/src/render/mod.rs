@@ -52,10 +52,70 @@ pub fn probe_render_node(path: &str) -> Option<u64> {
     Some(st.st_rdev as u64)
 }
 
+/// Screen-space rectangle, `x1`/`y1` exclusive.  An empty rect (`x1 <= x0`)
+/// means "nothing to draw".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl Rect {
+    pub const EMPTY: Rect = Rect { x0: 0, y0: 0, x1: 0, y1: 0 };
+
+    pub fn new(x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.x1 <= self.x0 || self.y1 <= self.y0
+    }
+
+    pub fn union(&self, o: &Rect) -> Rect {
+        if self.is_empty() {
+            return *o;
+        }
+        if o.is_empty() {
+            return *self;
+        }
+        Rect {
+            x0: self.x0.min(o.x0),
+            y0: self.y0.min(o.y0),
+            x1: self.x1.max(o.x1),
+            y1: self.y1.max(o.y1),
+        }
+    }
+
+    pub fn intersect(&self, o: &Rect) -> Rect {
+        Rect {
+            x0: self.x0.max(o.x0),
+            y0: self.y0.max(o.y0),
+            x1: self.x1.min(o.x1),
+            y1: self.y1.min(o.y1),
+        }
+    }
+
+    pub fn area(&self) -> i64 {
+        if self.is_empty() {
+            0
+        } else {
+            (self.x1 - self.x0) as i64 * (self.y1 - self.y0) as i64
+        }
+    }
+}
+
 pub struct Framebuffer {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u32>,
+    /// Every write below goes through this rectangle.  A full composite sets it
+    /// to the whole screen; a damage-limited one narrows it so untouched pixels
+    /// keep the values the previous composite left behind, which is what turns
+    /// a blinking terminal cursor from a whole-desktop repaint into a few
+    /// hundred pixels of work.
+    clip: Rect,
 }
 
 impl Framebuffer {
@@ -64,30 +124,92 @@ impl Framebuffer {
             width,
             height,
             pixels: vec![0xff10_1014; (width * height) as usize],
+            clip: Rect::new(0, 0, width as i32, height as i32),
+        }
+    }
+
+    pub fn full_rect(&self) -> Rect {
+        Rect::new(0, 0, self.width as i32, self.height as i32)
+    }
+
+    pub fn clip(&self) -> Rect {
+        self.clip
+    }
+
+    /// Restrict drawing to `r` (clamped to the framebuffer).
+    pub fn set_clip(&mut self, r: Rect) {
+        self.clip = r.intersect(&self.full_rect());
+    }
+
+    pub fn reset_clip(&mut self) {
+        self.clip = self.full_rect();
+    }
+
+    #[inline]
+    pub fn in_clip(&self, x: i32, y: i32) -> bool {
+        x >= self.clip.x0 && x < self.clip.x1 && y >= self.clip.y0 && y < self.clip.y1
+    }
+
+    /// Write one pixel if it is inside the clip and the framebuffer.
+    #[inline]
+    pub fn put(&mut self, x: i32, y: i32, argb: u32) {
+        if !self.in_clip(x, y) {
+            return;
+        }
+        let i = y as usize * self.width as usize + x as usize;
+        if i < self.pixels.len() {
+            self.pixels[i] = argb;
+        }
+    }
+
+    /// Blend one premultiplied-ARGB pixel if it is inside the clip.
+    #[inline]
+    pub fn blend_px(&mut self, x: i32, y: i32, src: u32) {
+        if !self.in_clip(x, y) {
+            return;
+        }
+        let i = y as usize * self.width as usize + x as usize;
+        if i < self.pixels.len() {
+            self.pixels[i] = blend(self.pixels[i], src);
         }
     }
 
     pub fn clear(&mut self, argb: u32) {
-        for p in self.pixels.iter_mut() {
-            *p = argb;
+        let c = self.clip;
+        if c.is_empty() {
+            return;
+        }
+        if c == self.full_rect() {
+            for p in self.pixels.iter_mut() {
+                *p = argb;
+            }
+            return;
+        }
+        let stride = self.width as usize;
+        for y in c.y0 as usize..c.y1 as usize {
+            let row = y * stride;
+            self.pixels[row + c.x0 as usize..row + c.x1 as usize].fill(argb);
         }
     }
 
     /// Blit SHM/dmabuf with clipping; dmabuf triggers DMA_BUF_IOCTL_SYNC around CPU reads.
     pub fn blit_shm(&mut self, buf: &ShmBuffer, dx: i32, dy: i32) {
-        let src_x0 = (-dx).max(0);
-        let src_y0 = (-dy).max(0);
-        let dst_x0 = dx.max(0) as u32;
-        let dst_y0 = dy.max(0) as u32;
-        let copy_w = (buf.width - src_x0)
-            .min(self.width as i32 - dst_x0 as i32)
-            .max(0) as u32;
-        let copy_h = (buf.height - src_y0)
-            .min(self.height as i32 - dst_y0 as i32)
-            .max(0) as u32;
-        if copy_w == 0 || copy_h == 0 {
+        // Intersect the destination rect with the active clip up front, so a
+        // surface entirely outside the damaged area costs nothing at all — not
+        // even the dma-buf CPU-access ioctls.
+        let clip = self.clip;
+        let dst = Rect::new(dx, dy, dx.saturating_add(buf.width), dy.saturating_add(buf.height))
+            .intersect(&clip)
+            .intersect(&self.full_rect());
+        if dst.is_empty() {
             return;
         }
+        let src_x0 = dst.x0 - dx;
+        let src_y0 = dst.y0 - dy;
+        let dst_x0 = dst.x0 as u32;
+        let dst_y0 = dst.y0 as u32;
+        let copy_w = (dst.x1 - dst.x0) as u32;
+        let copy_h = (dst.y1 - dst.y0) as u32;
 
         buf.begin_cpu_read();
 
@@ -103,25 +225,50 @@ impl Framebuffer {
                 let dst_row =
                     &mut self.pixels[dst_start..dst_start + copy_w as usize];
                 if opaque {
-                    // XRGB: the byte order already matches native-endian
-                    // 0xAARRGGBB on supported little-endian targets.  Decode
-                    // one word and force alpha; no per-channel shuffle.
-                    for (i, dst) in dst_row.iter_mut().enumerate() {
-                        let off = i * 4;
-                        *dst = u32::from_le_bytes([
-                            src_row[off], src_row[off + 1],
-                            src_row[off + 2], 0xff,
-                        ]);
+                    // XRGB already matches native 0xAARRGGBB byte order on LE;
+                    // force opaque alpha without a per-channel shuffle.
+                    let n = copy_w as usize;
+                    if src_off % 4 == 0 && src_row.len() >= n * 4 {
+                        // Single pass: load + OR alpha.  A memcpy followed by a
+                        // second walk over the same cache lines was measurable
+                        // on full-screen wallpaper damage.
+                        unsafe {
+                            let src_w = src_row.as_ptr() as *const u32;
+                            let dst_w = dst_row.as_mut_ptr();
+                            let mut i = 0usize;
+                            while i + 4 <= n {
+                                let a = *src_w.add(i) | 0xff00_0000;
+                                let b = *src_w.add(i + 1) | 0xff00_0000;
+                                let c = *src_w.add(i + 2) | 0xff00_0000;
+                                let d = *src_w.add(i + 3) | 0xff00_0000;
+                                *dst_w.add(i) = a;
+                                *dst_w.add(i + 1) = b;
+                                *dst_w.add(i + 2) = c;
+                                *dst_w.add(i + 3) = d;
+                                i += 4;
+                            }
+                            while i < n {
+                                *dst_w.add(i) = *src_w.add(i) | 0xff00_0000;
+                                i += 1;
+                            }
+                        }
+                    } else {
+                        for (dst, src) in dst_row.iter_mut().zip(src_row.chunks_exact(4)) {
+                            let word = u32::from_le_bytes(src.try_into().unwrap());
+                            *dst = word | 0xff00_0000;
+                        }
                     }
                 } else {
-                    for (i, dst) in dst_row.iter_mut().enumerate() {
-                        let v = u32::from_le_bytes([
-                            src_row[i * 4],
-                            src_row[i * 4 + 1],
-                            src_row[i * 4 + 2],
-                            src_row[i * 4 + 3],
-                        ]);
-                        *dst = blend(*dst, v);
+                    // Skip the blend math for runs that are fully transparent
+                    // or fully opaque — the common case for CSD shadows and
+                    // terminal glyphs sitting on mostly-empty ARGB buffers.
+                    for (dst, src) in dst_row.iter_mut().zip(src_row.chunks_exact(4)) {
+                        let word = u32::from_le_bytes(src.try_into().unwrap());
+                        let a = word >> 24;
+                        if a == 0 {
+                            continue;
+                        }
+                        *dst = if a == 0xff { word } else { blend(*dst, word) };
                     }
                 }
             }
@@ -159,13 +306,63 @@ fn blend(dst: u32, src: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::blend;
+    use super::{blend, Framebuffer, Rect};
 
     #[test]
     fn premultiplied_source_over_preserves_channels() {
         assert_eq!(blend(0xff20_4060, 0x8080_0000), 0xff90_2030);
         assert_eq!(blend(0xff12_3456, 0x0000_0000), 0xff12_3456);
         assert_eq!(blend(0xff12_3456, 0xffab_cdef), 0xffab_cdef);
+    }
+
+    #[test]
+    fn rect_union_ignores_empty_operands() {
+        let a = Rect::new(10, 10, 20, 20);
+        assert_eq!(a.union(&Rect::EMPTY), a);
+        assert_eq!(Rect::EMPTY.union(&a), a);
+        assert_eq!(a.union(&Rect::new(0, 5, 12, 8)), Rect::new(0, 5, 20, 20));
+    }
+
+    #[test]
+    fn rect_intersect_of_disjoint_is_empty() {
+        assert!(Rect::new(0, 0, 4, 4).intersect(&Rect::new(9, 9, 12, 12)).is_empty());
+        assert_eq!(
+            Rect::new(0, 0, 10, 10).intersect(&Rect::new(4, 4, 20, 6)),
+            Rect::new(4, 4, 10, 6)
+        );
+    }
+
+    #[test]
+    fn clear_only_touches_the_clip() {
+        let mut fb = Framebuffer::new(4, 4);
+        fb.clear(0);
+        fb.set_clip(Rect::new(1, 1, 3, 2));
+        fb.clear(0xffff_ffff);
+        let row = |y: usize| &fb.pixels[y * 4..y * 4 + 4];
+        assert_eq!(row(0), [0, 0, 0, 0]);
+        assert_eq!(row(1), [0, 0xffff_ffff, 0xffff_ffff, 0]);
+        assert_eq!(row(2), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn put_outside_the_clip_is_dropped() {
+        let mut fb = Framebuffer::new(4, 4);
+        fb.clear(0);
+        fb.set_clip(Rect::new(2, 2, 4, 4));
+        fb.put(0, 0, 0xffff_ffff);
+        fb.put(2, 2, 0xffff_ffff);
+        assert_eq!(fb.pixels[0], 0);
+        assert_eq!(fb.pixels[2 * 4 + 2], 0xffff_ffff);
+    }
+
+    #[test]
+    fn set_clip_is_clamped_and_reset_restores_the_screen() {
+        let mut fb = Framebuffer::new(4, 4);
+        fb.set_clip(Rect::new(-5, -5, 100, 100));
+        assert_eq!(fb.clip(), Rect::new(0, 0, 4, 4));
+        fb.set_clip(Rect::new(1, 1, 2, 2));
+        fb.reset_clip();
+        assert_eq!(fb.clip(), fb.full_rect());
     }
 }
 
@@ -185,6 +382,12 @@ pub trait Backend {
     fn size(&self) -> (u32, u32);
     fn present(&mut self, fb: &Framebuffer);
 
+    /// Present a framebuffer whose changed pixels are bounded by `damage`.
+    /// Backends that cannot make use of the hint retain the old behaviour.
+    fn present_damage(&mut self, fb: &Framebuffer, _damage: Rect) {
+        self.present(fb);
+    }
+
     /// Present a client dma-buf without touching its pixels. Returns false
     /// when the backend or scanout hardware cannot use this buffer directly.
     #[cfg(not(target_arch = "wasm32"))]
@@ -197,12 +400,40 @@ pub trait Backend {
     fn present_dmabufs(&mut self, _surfaces: &[(i32, i32, ShmBuffer)], _bitmap: Option<GpuBitmap<'_>>) -> bool {
         false
     }
+
+    /// True when `present_dmabufs` has a chance of succeeding.  The software
+    /// composite path skips building the GPU plane list entirely when this is
+    /// false — that list cloned every visible buffer handle on every frame
+    /// even on hosts with no GBM/EGL composer.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn can_gpu_compose(&self) -> bool {
+        false
+    }
     /// Take input channel once (WebGL backend): (receiver, eventfd for epoll wakeup).
     #[cfg(not(target_arch = "wasm32"))]
     fn take_input_channel(
         &mut self,
     ) -> Option<(std::sync::mpsc::Receiver<InputEvent>, std::os::unix::io::RawFd)> {
         None
+    }
+
+    /// Descriptor the event loop must watch for presentation completions
+    /// (DRM page-flip events).  `None` means presentation is synchronous.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn event_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        None
+    }
+
+    /// Consume whatever `event_fd` signalled.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dispatch_events(&mut self) {}
+
+    /// True while a previous `present` is still being taken over by the
+    /// scanout hardware.  Compositing again before it clears would overwrite
+    /// pixels the display is about to show.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn present_busy(&self) -> bool {
+        false
     }
 
     #[cfg(not(target_arch = "wasm32"))]

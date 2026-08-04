@@ -1,0 +1,140 @@
+/* Hallmark · theme: BeOS · chrome: deskbar · enrichment: Tier A CSS
+ * audience: retro desktop users · use: live desktop skin switching
+ */
+:root {
+  --be-yellow: #ffd83a;
+  --be-yellow-hi: #ffe678;
+  --be-yellow-lo: #d4a80a;
+  --be-grey: #d8d8d8;
+  --be-grey-hi: #f0f0f0;
+  --be-grey-lo: #a8a8a8;
+  --be-blue: #1860b8;
+  --be-blue-hi: #3a88e0;
+  --be-ink: #101018;
+  --be-muted: #505060;
+  --be-desk: #3868a0;
+  --be-desk-lo: #204878;
+  --be-shadow: #00000066;
+  --be-clear: #00000000;
+  --color-accent: var(--be-blue);
+  --color-accent-ink: #ffffff;
+  --color-paper: var(--be-grey);
+  --color-ink: var(--be-ink);
+  --color-muted: var(--be-muted);
+  --color-focus: var(--be-yellow-lo);
+  --luna-accent: var(--be-blue);
+  --luna-accent-2: var(--be-blue-hi);
+  --luna-accent-dark: var(--be-desk-lo);
+  --luna-gold: var(--be-yellow);
+  --luna-glass: var(--be-grey);
+  --luna-glass-card: var(--be-grey-hi);
+  --luna-glass-edge: var(--be-grey-lo);
+  --luna-text: var(--be-ink);
+  --luna-text-dim: var(--be-muted);
+  --luna-text-muted: var(--be-muted);
+  --dialog-surface: var(--be-grey);
+  --dialog-footer: var(--be-grey-lo);
+  --dialog-divider: var(--be-grey-lo);
+  --about-surface: var(--be-grey);
+  --about-card: var(--be-grey-hi);
+  --about-card-hover: #ffffff;
+  --about-icon: var(--be-yellow);
+  --about-border: var(--be-grey-lo);
+  --radius-xl: 4px;
+  --radius-lg: 3px;
+  --radius-md: 2px;
+  --radius-sm: 2px;
+}
+
+html, body { background: var(--be-desk); color: var(--be-ink); }
+#wallpaper,
+#wallpaper.ocean,
+#wallpaper.forest,
+#wallpaper.sunset {
+  background: linear-gradient(180deg, var(--be-desk) 0%, var(--be-desk-lo) 100%);
+}
+#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none; }
+
+#menubar {
+  height: 28px; top: 0; bottom: auto;
+  padding: 0 4px;
+  background: linear-gradient(180deg, var(--be-grey-hi), var(--be-grey) 55%, var(--be-grey-lo));
+  border: 0; border-bottom: 1px solid var(--be-grey-lo);
+  border-radius: 0; box-shadow: 0 1px 0 #ffffff88 inset;
+}
+#mb_left, #mb_center, #mb_right { height: 28px; }
+#mb_logo {
+  width: 28px; height: 24px; border-radius: 2px;
+  background: linear-gradient(180deg, var(--be-yellow-hi), var(--be-yellow) 40%, var(--be-yellow-lo));
+  border: 1px solid var(--be-yellow-lo);
+  box-shadow: inset 0 1px #ffffff88;
+}
+#mb_logo_glyph, #mb_app, .mb_app_name, .mb_item, .mb_status, .tray_glyph, .win_label { color: var(--be-ink); }
+.mb_item { border-radius: 2px; height: 22px; }
+.mb_item:hover, .tray_item:hover { background-color: var(--be-blue); color: #ffffff; }
+.mb_item:hover .luna_icon, .tray_item:hover .tray_glyph { color: #ffffff; }
+.win_item {
+  height: 22px; border-radius: 2px;
+  background: linear-gradient(180deg, var(--be-yellow-hi), var(--be-yellow));
+  border: 1px solid var(--be-yellow-lo);
+}
+.win_item.active {
+  background: linear-gradient(180deg, var(--be-blue-hi), var(--be-blue));
+  border-color: var(--be-desk-lo);
+}
+.win_item.active .win_label { color: #ffffff; }
+
+.menu_panel {
+  top: 30px; bottom: auto;
+  background: var(--be-grey-hi); color: var(--be-ink);
+  border: 1px solid var(--be-ink); border-radius: 0;
+  box-shadow: 3px 3px 0 var(--be-shadow); animation: none;
+}
+.menu_item:hover { background: var(--be-blue); box-shadow: none; }
+.menu_item:hover .mi_label, .menu_item:hover .mi_sym, .menu_item:hover .mi_key { color: #ffffff; }
+.menu_section_label, .mi_label, .mi_sym, .mi_key { color: var(--be-ink); }
+.menu_sep { background-color: var(--be-grey-lo); }
+
+#dock, #dock.hidden { display: none !important; }
+
+.widget, #toast, #switcher_strip {
+  background: var(--be-grey); color: var(--be-ink);
+  border: 1px solid var(--be-ink); border-radius: 0;
+  box-shadow: 3px 3px 0 var(--be-shadow);
+}
+#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, #toast_msg, .sw_title, .sw_app { color: var(--be-ink); }
+
+.sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
+  background: var(--be-grey); color: var(--be-ink);
+  border: 2px solid var(--be-ink); border-radius: 0;
+  box-shadow: 4px 4px 0 var(--be-shadow);
+}
+#settings_title {
+  background: linear-gradient(90deg, var(--be-yellow), var(--be-yellow-hi));
+  color: var(--be-ink); text-align: left; padding-left: 88px;
+  border-bottom: 1px solid var(--be-ink);
+}
+#settings_sidebar, #settings_btns, #confirm_btns { background: var(--be-grey); }
+.panel_heading { color: var(--be-blue); }
+.stab, .pref_label, .pref_hint, .pref_section, .wm_pref_name, .wm_pref_desc,
+.skin_name, .skin_desc, .cur_name, .cur_desc, .kb_name, .kb_desc { color: var(--be-ink); }
+.stab:hover, .skin_card:hover, .cur_card:hover, .kb_card:hover, .wm_pref:hover { background-color: var(--be-grey-hi); color: var(--be-ink); }
+.stab.active, .skin_card.selected, .cur_card.selected, .kb_card.selected, .wm_choice.selected {
+  background: var(--be-blue); color: #ffffff; border-color: var(--be-desk-lo); box-shadow: none;
+}
+.stab.active .stab_icon, .skin_card.selected .skin_name, .skin_card.selected .skin_desc { color: #ffffff; }
+.pref_input, .pref_input_full, #wifi_password {
+  background: #ffffff; color: var(--be-ink); border-color: var(--be-ink); border-radius: 0;
+}
+.dlg_btn {
+  background: var(--be-grey-hi); color: var(--be-ink); border-color: var(--be-ink);
+  border-radius: 0; box-shadow: inset 1px 1px #ffffff;
+}
+.dlg_btn.primary { background: var(--be-yellow); color: var(--be-ink); border-color: var(--be-yellow-lo); }
+.dlg_btn:hover { background: #ffffff; color: var(--be-ink); }
+.dlg_btn.primary:hover { background: var(--be-yellow-hi); color: var(--be-ink); }
+.dlg_btn:focus-visible, .skin_card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 1ms; transition-duration: 1ms; }
+}
