@@ -451,7 +451,7 @@ static int luna_cur_find_theme_dir(const char* theme, char* out, size_t out_n) {
     roots[n++] = "/usr/share/luna-desktop/cursors";
     roots[n++] = "cursors";
     roots[n++] = "../cursors";
-    roots[n++] = "apps/luna-ui/cursors";
+    roots[n++] = "apps/luna-shell/cursors";
 
     char trial[LUNA_CUR_PATH_MAX];
     for (int i = 0; i < n; i++) {

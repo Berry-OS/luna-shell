@@ -20,7 +20,7 @@ GLFW_LIBS   := $(shell pkg-config --libs glfw3 2>/dev/null)
 .PHONY: all build build-dri build-webgl build-desktop build-desktop-system build-shell \
         symlinks symlinks-system run server demo webgl run-gtk desktop desktop-system \
         luna-session install install-system stop clean opengl_gui luna-shell luna-ui \
-        luna-clipboard luna-tray-notify luna-wifi sample
+        luna-clipboard luna-tray-notify sample
 
 all: build symlinks
 
@@ -38,7 +38,7 @@ build-desktop: build build-dri build-shell symlinks
 # Compositor + shell only; GTK/GLFW use system libwayland-client
 build-desktop-system: build-dri build-shell symlinks-system
 
-build-shell: luna-shell luna-clipboard luna-tray-notify luna-wifi opengl_gui luna-ui
+build-shell: luna-shell luna-clipboard luna-tray-notify opengl_gui luna-ui
 
 # Symlink libwayland-client.so.0 (SONAME expected by GTK4)
 symlinks:
@@ -67,10 +67,11 @@ $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h: $(UI_DIR)/luna-ui.css $(UI_DIR
 $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h: $(UI_DIR)/luna-shell.css $(UI_DIR)/luna-shell.html $(UI_DIR)/gen_include.sh
 	cd $(UI_DIR) && ./gen_include.sh luna-shell.css luna-shell.html
 
-SHELL_CFLAGS := $(shell pkg-config --cflags libdrm 2>/dev/null) \
+SHELL_CFLAGS := -pthread \
+                $(shell pkg-config --cflags libdrm 2>/dev/null) \
                 $(shell pkg-config --cflags wayland-client 2>/dev/null) \
                 $(shell pkg-config --cflags xkbcommon 2>/dev/null)
-SHELL_LIBS   := -lm -lEGL -lgbm -ldrm -linput -ludev -lxkbcommon \
+SHELL_LIBS   := -pthread -lm -lEGL -lgbm -ldrm -linput -ludev -lxkbcommon \
                 -lwayland-client -lwayland-egl -lGL
 
 LAYER_SHELL_XML  := $(UI_DIR)/protocols/wlr-layer-shell-unstable-v1.xml
@@ -85,11 +86,13 @@ $(LAYER_SHELL_SRC): $(LAYER_SHELL_XML)
 
 luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
-            $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h \
+            $(UI_DIR)/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
+            $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h \
             $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
 	@echo "→ Building luna-shell (Luna Desktop shell)"
 	# luna-shell's layout, animation and draw-list walks are hot on every KMS \
 	# frame.  Prefer runtime optimization over the size-oriented global default.
+	# Wi-Fi backend (luna-wifi.h) and the status poller both use pthreads.
 	gcc -O2 -Wall -Wextra -DLUNA_BACKEND_X11 $(SHELL_CFLAGS) -I$(UI_DIR) \
 	    $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c $(LAYER_SHELL_SRC) \
 	    -o luna-shell $(SHELL_LIBS) -lX11
@@ -102,10 +105,6 @@ luna-clipboard: clipboard/luna-clipboard.c
 luna-tray-notify: tray/luna-tray-notify.c
 	@echo "→ Building luna-tray-notify (XEmbed tray notification service)"
 	gcc -Os -Wall -Wextra $$(pkg-config --cflags dbus-1) -o luna-tray-notify tray/luna-tray-notify.c -lX11 $$(pkg-config --libs dbus-1)
-
-luna-wifi: tray/luna-wifi.c
-	@echo "→ Building Luna Wi-Fi (native Wayland tray service)"
-	gcc -Os -Wall -Wextra -o luna-wifi tray/luna-wifi.c
 
 opengl_gui: $(UI_DIR)/opengl_gui.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h
 	@echo "→ Building Luna UI demo host (opengl_gui)"
@@ -217,8 +216,6 @@ install: build-desktop
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
-	install -m 755 luna-wifi $(PREFIX)/bin/luna-wifi
-	install -D -m 644 tray/luna-wifi.desktop $(PREFIX)/share/applications/luna-wifi.desktop
 	install -D -m 644 tray/luna-tray-notify.desktop $(PREFIX)/share/applications/luna-tray-notify.desktop
 	install -m 755 $(TARGET)/libwayland_client.so $(LUNA_LIB)/
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so.0
@@ -258,9 +255,7 @@ install-system: build-desktop-system
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
-	install -m 755 luna-wifi $(PREFIX)/bin/luna-wifi
 	install -D -m 644 tray/luna-tray-notify.desktop $(PREFIX)/share/applications/luna-tray-notify.desktop
-	install -D -m 644 tray/luna-wifi.desktop $(PREFIX)/share/applications/luna-wifi.desktop
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 ui/luna-ui.h ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 skins/fonts/LunaSymbols-Solid.otf skins/fonts/LunaSymbols-Regular.otf \
@@ -294,7 +289,7 @@ stop:
 
 clean:
 	cargo clean
-	rm -f opengl_gui luna-shell luna-clipboard luna-tray-notify luna-wifi luna-ui $(UI_DIR)/sample \
+	rm -f opengl_gui luna-shell luna-clipboard luna-tray-notify luna-ui $(UI_DIR)/sample \
 	  $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h \
 	  $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h \
 	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h

@@ -393,7 +393,6 @@ int main(int argc, char** argv) {
     const char* title = g_desktop_mode ? "Lu Shell" : (luna_doc_title[0] ? luna_doc_title : "Aurora Noir");
     g_window = glfwCreateWindow((int)luna_window_width, (int)luna_window_height, title,
                                 g_fullscreen ? glfwGetPrimaryMonitor() : NULL, NULL);
-    g_luna_glfw_window = g_window;
     glfwMakeContextCurrent(g_window);
     glfwSwapInterval(1);
 

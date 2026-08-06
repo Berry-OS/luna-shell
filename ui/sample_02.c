@@ -1,7 +1,7 @@
 /*
  * sample_02.c — Luna UI showcase (CSS-only paint + text fields + JP IME)
  *
- * Build (from apps/luna-ui):
+ * Build (from apps/luna-shell):
  *   make sample
  *   ./ui/sample
  *

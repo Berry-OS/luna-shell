@@ -14,92 +14,7 @@
 #ifndef LUNA_UI_H
 #define LUNA_UI_H
 
-/*
- * The public entry point auto-selects a header-only native host. Define
- * LUNA_UI_NO_PLATFORM before including this file when embedding the renderer
- * in an existing window/event system.
- */
-#if !defined(LUNA_UI_NO_PLATFORM) && defined(LUNA_UI_IMPLEMENTATION)
-#  define LUNA_UI_PLATFORM_PRELUDE 1
-#  if defined(__EMSCRIPTEN__)
-#    include "luna_web.h"
-#  elif defined(__ANDROID__)
-#    include "luna_android.h"
-#  elif defined(__APPLE__)
-#    include <TargetConditionals.h>
-#    if TARGET_OS_IPHONE
-#      include "luna_ios.h"
-#    else
-#      include "luna_macos.h"
-#    endif
-#  elif defined(_WIN32)
-#    include "luna_windows.h"
-#  elif defined(__linux__)
-#    include "luna_linux.h"
-#  else
-#    error "Luna UI: unsupported platform; define LUNA_UI_NO_PLATFORM for a custom host"
-#  endif
-#  undef LUNA_UI_PLATFORM_PRELUDE
-#endif
-
 #include <stddef.h>
-#include <stdint.h>
-
-/* A custom host may include its GL headers before this file. Native Luna
- * platform preludes do that automatically. */
-#if !defined(LUNA_UI_PLATFORM_GL_INCLUDED) && !defined(GL_VERSION_1_1) && \
-    !defined(GL_ES_VERSION_2_0)
-typedef unsigned int GLenum;
-typedef unsigned char GLboolean;
-typedef unsigned int GLbitfield;
-typedef void GLvoid;
-typedef signed char GLbyte;
-typedef short GLshort;
-typedef int GLint;
-typedef int GLsizei;
-typedef unsigned char GLubyte;
-typedef unsigned short GLushort;
-typedef unsigned int GLuint;
-typedef float GLfloat;
-typedef ptrdiff_t GLsizeiptr;
-typedef ptrdiff_t GLintptr;
-typedef char GLchar;
-#endif
-
-/* Constants missing from the legacy Windows OpenGL 1.1 header. */
-#ifndef GL_ARRAY_BUFFER
-#define GL_ARRAY_BUFFER 0x8892
-#endif
-#ifndef GL_STATIC_DRAW
-#define GL_STATIC_DRAW 0x88E4
-#endif
-#ifndef GL_DYNAMIC_DRAW
-#define GL_DYNAMIC_DRAW 0x88E8
-#endif
-#ifndef GL_VERTEX_SHADER
-#define GL_VERTEX_SHADER 0x8B31
-#endif
-#ifndef GL_FRAGMENT_SHADER
-#define GL_FRAGMENT_SHADER 0x8B30
-#endif
-#ifndef GL_COMPILE_STATUS
-#define GL_COMPILE_STATUS 0x8B81
-#endif
-#ifndef GL_LINK_STATUS
-#define GL_LINK_STATUS 0x8B82
-#endif
-#ifndef GL_INFO_LOG_LENGTH
-#define GL_INFO_LOG_LENGTH 0x8B84
-#endif
-#ifndef GL_TEXTURE0
-#define GL_TEXTURE0 0x84C0
-#endif
-#ifndef GL_CLAMP_TO_EDGE
-#define GL_CLAMP_TO_EDGE 0x812F
-#endif
-#ifndef GL_RED
-#define GL_RED 0x1903
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -118,89 +33,29 @@ typedef void (*LunaEventHandler)(LunaElement* e);
 typedef void (*LunaTrapDismissFn)(int trap_idx);
 typedef void (*LunaMouseReleaseHook)(int hit, int drag_moved);
 
-#define LUNA_UI_API_VERSION 0x00010000u
-
-enum {
-    LUNA_FONT_REGULAR = 0,
-    LUNA_FONT_BOLD,
-    LUNA_FONT_CJK,
-    LUNA_FONT_MONO,
-    LUNA_FONT_SYMBOLS,
-    LUNA_FONT_BRANDS
-};
-
 typedef void* (*LunaGetProcFn)(const char* name);
 typedef double (*LunaGetTimeFn)(void);
 typedef void (*LunaSetCursorFn)(int cursor_type);
 typedef void (*LunaRequestCloseFn)(void);
 typedef void (*LunaIconifyFn)(void);
 typedef void (*LunaMaximizeToggleFn)(void);
-typedef void (*LunaRequestRedrawFn)(void);
-typedef unsigned char* (*LunaReadResourceFn)(const char* path, size_t* out_size);
-typedef unsigned char* (*LunaLoadFontFn)(int role, size_t* out_size);
-typedef int (*LunaSavePngFn)(const char* path, int width, int height,
-                             int channels, const unsigned char* pixels,
-                             int stride_bytes);
-typedef void (*LunaSetClipboardFn)(const char* utf8);
-typedef char* (*LunaGetClipboardFn)(void); /* malloc-compatible result */
-typedef void (*LunaTextInputFn)(int enabled, float x, float y, float w, float h);
-typedef float (*LunaGetScaleFn)(void);
 
 typedef struct LunaPlatform {
-    /* Original fields stay first for source compatibility with existing hosts. */
-    LunaGetTimeFn          get_time;
-    LunaGetProcFn          get_proc;
-    LunaSetCursorFn        set_cursor;
-    LunaRequestCloseFn     request_close;
-    LunaIconifyFn          iconify;
-    LunaMaximizeToggleFn   maximize_toggle;
-    LunaRequestRedrawFn    request_redraw;
-    LunaReadResourceFn     read_resource;
-    LunaLoadFontFn         load_font;
-    LunaSavePngFn          save_png;
-    LunaSetClipboardFn     set_clipboard;
-    LunaGetClipboardFn     get_clipboard;
-    LunaTextInputFn        text_input;
-    LunaGetScaleFn         get_scale;
-    uint32_t               struct_size;
-    uint32_t               api_version;
+    LunaGetTimeFn         get_time;
+    LunaGetProcFn         get_proc;
+    LunaSetCursorFn       set_cursor;
+    LunaRequestCloseFn    request_close;
+    LunaIconifyFn         iconify;
+    LunaMaximizeToggleFn  maximize_toggle;
 } LunaPlatform;
-
-typedef struct LunaAppConfig {
-    const char* title;
-    int width;
-    int height;
-    int resizable;
-    int frameless;
-    int transparent;
-    int vsync;
-    const char* html_path;
-    const char* css_path;
-    const char* html;
-    const char* css;
-    void (*on_init)(void* userdata);
-    void (*on_frame)(double dt, void* userdata);
-    void (*on_shutdown)(void* userdata);
-    void* userdata;
-} LunaAppConfig;
 
 typedef struct LunaInitConfig {
     float width, height;
     LunaGetProcFn get_proc;
-    /* Native hosts use this to select a borderless client area. Custom hosts
-     * may ignore it because window creation occurs outside the core. */
+    /* Remove native window decorations when using the GLFW integration.
+     * The host must set g_luna_glfw_window before calling luna_init(). */
     int frameless;
 } LunaInitConfig;
-
-/* Implemented by the automatically selected luna_*.h native host. */
-int   luna_app_run(const LunaAppConfig* cfg);
-void  luna_app_quit(void);
-void  luna_app_request_redraw(void);
-void* luna_app_native_handle(void);
-void  luna_clipboard_set(const char* utf8);
-char* luna_clipboard_get(void); /* free with luna_clipboard_free() */
-void  luna_clipboard_free(char* utf8);
-float luna_platform_scale(void);
 
 /*
  * Host-neutral input constants. Values intentionally match GLFW so existing
@@ -371,62 +226,17 @@ extern int   luna_css_from_document;
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <math.h>
 #include <time.h>
-#include <errno.h>
-
-#if !defined(_WIN32)
-#include <strings.h>
-#endif
-
-#ifndef LUNA_UI_ENABLE_FONT_SCAN
-#  if defined(__linux__) || defined(__FreeBSD__)
-#    define LUNA_UI_ENABLE_FONT_SCAN 1
-#  else
-#    define LUNA_UI_ENABLE_FONT_SCAN 0
-#  endif
-#endif
-
-#if LUNA_UI_ENABLE_FONT_SCAN
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+#ifdef LUNA_UI_GLFW
+#include <GLFW/glfw3.h>
 #endif
-
-#if defined(_MSC_VER)
-#  define LUNA_UNUSED
-#else
-#  define LUNA_UNUSED __attribute__((unused))
-#endif
-
-#if defined(_WIN32)
-#  define luna_strcasecmp  _stricmp
-#  define luna_strncasecmp _strnicmp
-#else
-#  define luna_strcasecmp  strcasecmp
-#  define luna_strncasecmp strncasecmp
-#endif
-
-static char* luna_strdup_local(const char* s) {
-    size_t n;
-    char* p;
-    if (!s) return NULL;
-    n = strlen(s) + 1;
-    p = (char*)malloc(n);
-    if (p) memcpy(p, s, n);
-    return p;
-}
-
-static const char* luna_strcasestr_local(const char* haystack, const char* needle) {
-    size_t n;
-    if (!haystack || !needle) return NULL;
-    if (!*needle) return haystack;
-    n = strlen(needle);
-    for (; *haystack; ++haystack)
-        if (luna_strncasecmp(haystack, needle, n) == 0) return haystack;
-    return NULL;
-}
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -451,19 +261,22 @@ static LunaPlatform g_luna_platform;
 static double g_luna_mx = 0.0, g_luna_my = 0.0;
 static int g_luna_shift = 0;
 static int g_luna_fbw = 0, g_luna_fbh = 0;
+#ifdef LUNA_UI_GLFW
+void* g_luna_glfw_window = NULL;
+#endif
 
 static double luna_now(void) {
     if (g_luna_platform.get_time) return g_luna_platform.get_time();
-    return (double)clock() / (double)CLOCKS_PER_SEC;
+#ifdef LUNA_UI_GLFW
+    return glfwGetTime();
+#else
+    return 0.0;
+#endif
 }
 
 void luna_set_platform(const LunaPlatform* p) {
-    memset(&g_luna_platform, 0, sizeof(g_luna_platform));
-    if (p) {
-        size_t n = p->struct_size ? p->struct_size : sizeof(*p);
-        if (n > sizeof(g_luna_platform)) n = sizeof(g_luna_platform);
-        memcpy(&g_luna_platform, p, n);
-    }
+    if (p) g_luna_platform = *p;
+    else memset(&g_luna_platform, 0, sizeof(g_luna_platform));
 }
 
 float luna_window_width = 1024.0f;
@@ -493,40 +306,34 @@ int   luna_css_from_document = 0;
 #define g_doc_title   luna_doc_title
 #define g_css_from_document luna_css_from_document
 
-typedef void (*LunaPFNGLCREATEVERTEXARRAYSPROC)(GLsizei n, GLuint* arrays);
-typedef void (*LunaPFNGLDELETEVERTEXARRAYSPROC)(GLsizei n, const GLuint* arrays);
-typedef void (*LunaPFNGLGENBUFFERSPROC)(GLsizei n, GLuint* buffers);
-typedef void (*LunaPFNGLBINDBUFFERPROC)(GLenum target, GLuint buffer);
-typedef void (*LunaPFNGLBUFFERDATAPROC)(GLenum target, GLsizeiptr size, const void* data, GLenum usage);
-typedef void (*LunaPFNGLBUFFERSUBDATAPROC)(GLenum target, GLintptr offset, GLsizeiptr size, const void* data);
-typedef void (*LunaPFNGLVERTEXATTRIBPOINTERPROC)(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void* pointer);
-typedef void (*LunaPFNGLENABLEVERTEXATTRIBARRAYPROC)(GLuint index);
-typedef void (*LunaPFNGLDELETEBUFFERSPROC)(GLsizei n, const GLuint* buffers);
-typedef void (*LunaPFNGLBINDVERTEXARRAYPROC)(GLuint array);
-typedef GLuint (*LunaPFNGLCREATESHADERPROC)(GLenum type);
-typedef void (*LunaPFNGLSHADERSOURCEPROC)(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length);
-typedef void (*LunaPFNGLCOMPILESHADERPROC)(GLuint shader);
-typedef void (*LunaPFNGLGETSHADERIVPROC)(GLuint shader, GLenum pname, GLint* params);
-typedef void (*LunaPFNGLGETSHADERINFOLOGPROC)(GLuint shader, GLsizei max_length, GLsizei* length, GLchar* info_log);
-typedef void (*LunaPFNGLDELETESHADERPROC)(GLuint shader);
-typedef GLuint (*LunaPFNGLCREATEPROGRAMPROC)(void);
-typedef void (*LunaPFNGLATTACHSHADERPROC)(GLuint program, GLuint shader);
-typedef void (*LunaPFNGLLINKPROGRAMPROC)(GLuint program);
-typedef void (*LunaPFNGLGETPROGRAMIVPROC)(GLuint program, GLenum pname, GLint* params);
-typedef void (*LunaPFNGLGETPROGRAMINFOLOGPROC)(GLuint program, GLsizei max_length, GLsizei* length, GLchar* info_log);
-typedef void (*LunaPFNGLUSEPROGRAMPROC)(GLuint program);
-typedef void (*LunaPFNGLDELETEPROGRAMPROC)(GLuint program);
-typedef GLint (*LunaPFNGLGETUNIFORMLOCATIONPROC)(GLuint program, const GLchar* name);
-typedef void (*LunaPFNGLUNIFORM4FPROC)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
-typedef void (*LunaPFNGLUNIFORM2FPROC)(GLint location, GLfloat v0, GLfloat v1);
-typedef void (*LunaPFNGLUNIFORM1FPROC)(GLint location, GLfloat v0);
-typedef void (*LunaPFNGLUNIFORM1IPROC)(GLint location, GLint v0);
-typedef void (*LunaPFNGLACTIVETEXTUREPROC)(GLenum texture);
-typedef void (*LunaPFNGLGENFRAMEBUFFERSPROC)(GLsizei n, GLuint* framebuffers);
-typedef void (*LunaPFNGLBINDFRAMEBUFFERPROC)(GLenum target, GLuint framebuffer);
-typedef void (*LunaPFNGLFRAMEBUFFERTEXTURE2DPROC)(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
-typedef void (*LunaPFNGLDELETEFRAMEBUFFERSPROC)(GLsizei n, const GLuint* framebuffers);
-typedef GLenum (*LunaPFNGLCHECKFRAMEBUFFERSTATUSPROC)(GLenum target);
+typedef void (*PFNGLCREATEVERTEXARRAYSPROC)(GLsizei n, GLuint* arrays);
+typedef void (*PFNGLDELETEVERTEXARRAYSPROC)(GLsizei n, const GLuint* arrays);
+typedef void (*PFNGLGENBUFFERSPROC)(GLsizei n, GLuint* buffers);
+typedef void (*PFNGLBINDBUFFERPROC)(GLenum target, GLuint buffer);
+typedef void (*PFNGLBUFFERDATAPROC)(GLenum target, GLsizeiptr size, const void* data, GLenum usage);
+typedef void (*PFNGLBUFFERSUBDATAPROC)(GLenum target, GLintptr offset, GLsizeiptr size, const void* data);
+typedef void (*PFNGLVERTEXATTRIBPOINTERPROC)(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void* pointer);
+typedef void (*PFNGLENABLEVERTEXATTRIBARRAYPROC)(GLuint index);
+typedef void (*PFNGLDELETEBUFFERSPROC)(GLsizei n, const GLuint* buffers);
+typedef void (*PFNGLBINDVERTEXARRAYPROC)(GLuint array);
+typedef GLuint (*PFNGLCREATESHADERPROC)(GLenum type);
+typedef void (*PFNGLSHADERSOURCEPROC)(GLuint shader, GLsizei count, const GLchar* const* string, const GLint* length);
+typedef void (*PFNGLCOMPILESHADERPROC)(GLuint shader);
+typedef GLuint (*PFNGLCREATEPROGRAMPROC)(void);
+typedef void (*PFNGLATTACHSHADERPROC)(GLuint program, GLuint shader);
+typedef void (*PFNGLLINKPROGRAMPROC)(GLuint program);
+typedef void (*PFNGLUSEPROGRAMPROC)(GLuint program);
+typedef GLint (*PFNGLGETUNIFORMLOCATIONPROC)(GLuint program, const GLchar* name);
+typedef void (*PFNGLUNIFORM4FPROC)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
+typedef void (*PFNGLUNIFORM2FPROC)(GLint location, GLfloat v0, GLfloat v1);
+typedef void (*PFNGLUNIFORM1FPROC)(GLint location, GLfloat v0);
+typedef void (*PFNGLUNIFORM1IPROC)(GLint location, GLint v0);
+typedef void (*PFNGLACTIVETEXTUREPROC)(GLenum texture);
+typedef void (*PFNGLGENFRAMEBUFFERSPROC)(GLsizei n, GLuint* framebuffers);
+typedef void (*PFNGLBINDFRAMEBUFFERPROC)(GLenum target, GLuint framebuffer);
+typedef void (*PFNGLFRAMEBUFFERTEXTURE2DPROC)(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+typedef void (*PFNGLDELETEFRAMEBUFFERSPROC)(GLsizei n, const GLuint* framebuffers);
+typedef GLenum (*PFNGLCHECKFRAMEBUFFERSTATUSPROC)(GLenum target);
 
 /* GL 1.0/1.1 core entry-point typedefs.  <GL/gl.h>/<GL/glext.h> only ship PFN
  * typedefs for GL 1.2+, so we declare the ones we need for the 1.0/1.1 calls
@@ -570,61 +377,34 @@ typedef void (*LUNA_PFNGLREADPIXELSPROC)(GLint x, GLint y, GLsizei width, GLsize
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #endif
 
-LunaPFNGLCREATEVERTEXARRAYSPROC luna_glCreateVertexArrays;
-LunaPFNGLDELETEVERTEXARRAYSPROC luna_glDeleteVertexArrays;
-LunaPFNGLGENBUFFERSPROC luna_glGenBuffers;
-LunaPFNGLBINDBUFFERPROC luna_glBindBuffer;
-LunaPFNGLBUFFERDATAPROC luna_glBufferData;
-LunaPFNGLBUFFERSUBDATAPROC luna_glBufferSubData;
-LunaPFNGLVERTEXATTRIBPOINTERPROC luna_glVertexAttribPointer;
-LunaPFNGLENABLEVERTEXATTRIBARRAYPROC luna_glEnableVertexAttribArray;
-LunaPFNGLDELETEBUFFERSPROC luna_glDeleteBuffers;
-LunaPFNGLBINDVERTEXARRAYPROC luna_glBindVertexArray;
-LunaPFNGLCREATESHADERPROC luna_glCreateShader;
-LunaPFNGLSHADERSOURCEPROC luna_glShaderSource;
-LunaPFNGLCOMPILESHADERPROC luna_glCompileShader;
-LunaPFNGLGETSHADERIVPROC glGetShaderiv_;
-LunaPFNGLGETSHADERINFOLOGPROC glGetShaderInfoLog_;
-LunaPFNGLDELETESHADERPROC glDeleteShader_;
-LunaPFNGLCREATEPROGRAMPROC luna_glCreateProgram;
-LunaPFNGLATTACHSHADERPROC luna_glAttachShader;
-LunaPFNGLLINKPROGRAMPROC luna_glLinkProgram;
-LunaPFNGLGETPROGRAMIVPROC glGetProgramiv_;
-LunaPFNGLGETPROGRAMINFOLOGPROC glGetProgramInfoLog_;
-LunaPFNGLUSEPROGRAMPROC luna_glUseProgram;
-LunaPFNGLDELETEPROGRAMPROC glDeleteProgram_;
-LunaPFNGLGETUNIFORMLOCATIONPROC luna_glGetUniformLocation;
-LunaPFNGLUNIFORM4FPROC luna_glUniform4f;
-LunaPFNGLUNIFORM2FPROC luna_glUniform2f;
-LunaPFNGLUNIFORM1FPROC luna_glUniform1f;
-#define glCreateVertexArrays luna_glCreateVertexArrays
-#define glDeleteVertexArrays luna_glDeleteVertexArrays
-#define glGenBuffers luna_glGenBuffers
-#define glBindBuffer luna_glBindBuffer
-#define glBufferData luna_glBufferData
-#define glBufferSubData luna_glBufferSubData
-#define glVertexAttribPointer luna_glVertexAttribPointer
-#define glEnableVertexAttribArray luna_glEnableVertexAttribArray
-#define glDeleteBuffers luna_glDeleteBuffers
-#define glBindVertexArray luna_glBindVertexArray
-#define glCreateShader luna_glCreateShader
-#define glShaderSource luna_glShaderSource
-#define glCompileShader luna_glCompileShader
-#define glCreateProgram luna_glCreateProgram
-#define glAttachShader luna_glAttachShader
-#define glLinkProgram luna_glLinkProgram
-#define glUseProgram luna_glUseProgram
-#define glGetUniformLocation luna_glGetUniformLocation
-#define glUniform4f luna_glUniform4f
-#define glUniform2f luna_glUniform2f
-#define glUniform1f luna_glUniform1f
-LunaPFNGLUNIFORM1IPROC glUniform1i_;
-LunaPFNGLACTIVETEXTUREPROC glActiveTexture_;
-LunaPFNGLGENFRAMEBUFFERSPROC glGenFramebuffers_;
-LunaPFNGLBINDFRAMEBUFFERPROC glBindFramebuffer_;
-LunaPFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D_;
-LunaPFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers_;
-LunaPFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatus_;
+PFNGLCREATEVERTEXARRAYSPROC glCreateVertexArrays;
+PFNGLDELETEVERTEXARRAYSPROC glDeleteVertexArrays;
+PFNGLGENBUFFERSPROC glGenBuffers;
+PFNGLBINDBUFFERPROC glBindBuffer;
+PFNGLBUFFERDATAPROC glBufferData;
+PFNGLBUFFERSUBDATAPROC glBufferSubData;
+PFNGLVERTEXATTRIBPOINTERPROC glVertexAttribPointer;
+PFNGLENABLEVERTEXATTRIBARRAYPROC glEnableVertexAttribArray;
+PFNGLDELETEBUFFERSPROC glDeleteBuffers;
+PFNGLBINDVERTEXARRAYPROC glBindVertexArray;
+PFNGLCREATESHADERPROC glCreateShader;
+PFNGLSHADERSOURCEPROC glShaderSource;
+PFNGLCOMPILESHADERPROC glCompileShader;
+PFNGLCREATEPROGRAMPROC glCreateProgram;
+PFNGLATTACHSHADERPROC glAttachShader;
+PFNGLLINKPROGRAMPROC glLinkProgram;
+PFNGLUSEPROGRAMPROC glUseProgram;
+PFNGLGETUNIFORMLOCATIONPROC glGetUniformLocation;
+PFNGLUNIFORM4FPROC glUniform4f;
+PFNGLUNIFORM2FPROC glUniform2f;
+PFNGLUNIFORM1FPROC glUniform1f;
+PFNGLUNIFORM1IPROC glUniform1i_;
+PFNGLACTIVETEXTUREPROC glActiveTexture_;
+PFNGLGENFRAMEBUFFERSPROC glGenFramebuffers_;
+PFNGLBINDFRAMEBUFFERPROC glBindFramebuffer_;
+PFNGLFRAMEBUFFERTEXTURE2DPROC glFramebufferTexture2D_;
+PFNGLDELETEFRAMEBUFFERSPROC glDeleteFramebuffers_;
+PFNGLCHECKFRAMEBUFFERSTATUSPROC glCheckFramebufferStatus_;
 
 /* GL 1.0/1.1 core function pointers, resolved in load_gl_functions() through
  * the same get_proc()/eglGetProcAddress() path as the modern entry points so
@@ -669,16 +449,8 @@ LUNA_PFNGLREADPIXELSPROC       luna_p_glReadPixels;
 
 // --- Shaders ---
 
-#if defined(LUNA_UI_GLES3)
-#  define LUNA_GLSL_VERTEX_HEADER   "#version 300 es\nprecision highp float;\nprecision highp int;\n"
-#  define LUNA_GLSL_FRAGMENT_HEADER "#version 300 es\nprecision highp float;\nprecision highp int;\n"
-#else
-#  define LUNA_GLSL_VERTEX_HEADER   "#version 330 core\n"
-#  define LUNA_GLSL_FRAGMENT_HEADER "#version 330 core\n"
-#endif
-
 const char* bg_vs =
-    LUNA_GLSL_VERTEX_HEADER
+    "#version 330 core\n"
     "layout (location = 0) in vec2 aPos;\n"
     "out vec2 FragPos;\n"
     "uniform vec2 uResolution;\n"
@@ -696,7 +468,7 @@ const char* bg_vs =
 // uRadius4: per-corner radius (tl, tr, br, bl in screen orientation).
 // FragPos.y is flipped (0=bottom), so p.y > 0 means the screen-top half.
 const char* bg_fs =
-    LUNA_GLSL_FRAGMENT_HEADER
+    "#version 330 core\n"
     "in vec2 FragPos;\n"
     "out vec4 FragColor;\n"
     "uniform vec4 uColor;\n"
@@ -812,7 +584,7 @@ const char* bg_fs =
 // uElemSize:    actual element size.
 // uOffset:      shadow offset (sh_dx, sh_dy) in FragPos space (x right, y down-flipped).
 const char* shadow_fs =
-    LUNA_GLSL_FRAGMENT_HEADER
+    "#version 330 core\n"
     "in vec2 FragPos;\n"
     "out vec4 FragColor;\n"
     "uniform vec4 uShadowColor;\n"
@@ -878,7 +650,7 @@ const char* shadow_fs =
     "}\0";
 
 const char* text_vs =
-    LUNA_GLSL_VERTEX_HEADER
+    "#version 330 core\n"
     "layout (location = 0) in vec4 vertex;\n"
     "out vec2 TexCoords;\n"
     "out vec2 ScreenPos;\n"
@@ -891,7 +663,7 @@ const char* text_vs =
     "}\0";
 
 const char* text_fs =
-    LUNA_GLSL_FRAGMENT_HEADER
+    "#version 330 core\n"
     "in vec2 TexCoords;\n"
     "in vec2 ScreenPos;\n"
     "out vec4 FragColor;\n"
@@ -937,7 +709,7 @@ const char* text_fs =
 // Uses same vertex shader as bg (bg_vs). FragPos.y is flipped (0=bottom, uSize.y=top).
 // stb_image is loaded with flip_vertically so UV = FragPos/uSize maps correctly.
 const char* img_fs =
-    LUNA_GLSL_FRAGMENT_HEADER
+    "#version 330 core\n"
     "in vec2 FragPos;\n"
     "out vec4 FragColor;\n"
     "uniform sampler2D uImage;\n"
@@ -971,7 +743,7 @@ const char* img_fs =
 // uBlurOrigin = (elem_x, elem_y) — where the element sits in screen coords
 //               so we can compute correct UV into the full-window capture texture.
 const char* blur_fs =
-    LUNA_GLSL_FRAGMENT_HEADER
+    "#version 330 core\n"
     "in vec2 FragPos;\n"
     "out vec4 FragColor;\n"
     "uniform sampler2D uSrc;\n"
@@ -1007,7 +779,7 @@ const char* blur_fs =
 // Backdrop composite: draws a blurred texture clipped to a rounded rect.
 // Uses bg_vs. FragPos local coord.
 const char* backdrop_fs =
-    LUNA_GLSL_FRAGMENT_HEADER
+    "#version 330 core\n"
     "in vec2 FragPos;\n"
     "out vec4 FragColor;\n"
     "uniform sampler2D uSrc;\n"
@@ -1213,8 +985,6 @@ struct LunaElement {
     int text_overflow;  /* 0=clip 1=ellipsis */
     int overflow_wrap;  /* 0=normal 1=break-word */
     float letter_spacing;
-    int letter_spacing_em; /* unresolved author value uses em until font-size is final */
-    int line_clamp;       /* -webkit-line-clamp; 0 = none */
     int text_transform;  /* 0=none 1=uppercase 2=lowercase 3=capitalize */
     int text_decoration; /* bit0=underline bit1=line-through */
     int has_text_shadow;
@@ -1541,8 +1311,7 @@ typedef struct {
     int has_white_space; int white_space;
     int has_text_overflow; int text_overflow;
     int has_overflow_wrap; int overflow_wrap;
-    int has_letter_spacing; float letter_spacing; int letter_spacing_em;
-    int has_line_clamp; int line_clamp;
+    int has_letter_spacing; float letter_spacing;
     int has_text_transform; int text_transform;
     int has_text_decoration; int text_decoration;
     int has_text_shadow;
@@ -1885,6 +1654,13 @@ static int    g_a11y_live_assertive = 0;
 static int    g_top_z = 100;
 #define DRAG_THRESHOLD 4.0
 
+#ifdef LUNA_UI_GLFW
+GLFWcursor* g_hand_cursor       = NULL;
+GLFWcursor* g_cursor_ibeam      = NULL;
+GLFWcursor* g_cursor_crosshair  = NULL;
+GLFWcursor* g_cursor_hresize    = NULL;
+GLFWcursor* g_cursor_vresize    = NULL;
+#endif
 int         g_current_cursor    = -1;
 
 GLuint text_vao, text_vbo;
@@ -2103,24 +1879,6 @@ static int font_path_score_ui(const char* path) {
     if (strstr(lower, "helvetica")) score += 290;
     if (score == 0 && strstr(lower, "sans")) score += 80;
     return score;
-}
-
-static int font_path_score_symbols(const char* path) {
-    const char* solid = luna_strcasestr_local(path, "LunaSymbols-Solid");
-    const char* awesome = luna_strcasestr_local(path, "Font Awesome");
-    const char* brands = luna_strcasestr_local(path, "Brands");
-    if (brands) return -1000;
-    if (solid) return 1000;
-    if (awesome && (luna_strcasestr_local(path, "Solid") ||
-                    luna_strcasestr_local(path, "Free"))) return 500;
-    return -1000;
-}
-
-static int font_path_score_brands(const char* path) {
-    if (luna_strcasestr_local(path, "LunaSymbols-Brands")) return 1000;
-    if (luna_strcasestr_local(path, "Font Awesome") &&
-        luna_strcasestr_local(path, "Brands")) return 500;
-    return -1000;
 }
 
 static void dyn_atlas_reset(void) {
@@ -2369,28 +2127,11 @@ typedef struct {
 FontAtlas font_regular[NUM_FONT_SIZES];
 FontAtlas font_bold_atlas[NUM_FONT_SIZES];
 
-/* Return glyph advance without allocating/rasterising an atlas entry.
- *
- * Width queries run during intrinsic layout, wrapping, hit-testing and caret
- * placement.  Calling dyn_bake_glyph() from this path made a harmless layout
- * pass upload font-atlas rows to GL.  Periodic status/event wakes could then
- * turn into an unexpected GPU upload and visible hitch.  The dynamic atlas
- * uses this exact stb_truetype metric, so measuring it directly is both
- * side-effect-free and pixel-consistent with the subsequent paint. */
-static float glyph_metric_advance(int cp, float css_px) {
-    stbtt_fontinfo* finfo = font_for_codepoint(cp);
-    int advance = 0, lsb = 0;
-    if (!finfo || css_px < 4.0f) return css_px * 0.5f;
-    float scale = stbtt_ScaleForMappingEmToPixels(finfo, css_px);
-    stbtt_GetCodepointHMetrics(finfo, cp, &advance, &lsb);
-    (void)lsb;
-    return (float)advance * scale;
-}
-
 static float glyph_advance(FontAtlas* atlas, int cp, float css_px) {
     if (cp >= 32 && cp < 128 && !g_text_dynamic_ascii)
         return atlas->cdata[cp - 32].xadvance;
-    return glyph_metric_advance(cp, css_px);
+    LunaDynGlyph* g = dyn_bake_glyph(cp, css_px);
+    return g ? g->xadvance : css_px * 0.5f;
 }
 
 static char g_screenshot_path[512] = {0};
@@ -2409,43 +2150,29 @@ static int g_cached_eff_z[MAX_ELEMENTS];
 // Utilities
 // ============================================================
 
-unsigned char* read_file_bytes(const char* filename, long* out_size) {
-    if (out_size) *out_size = 0;
-    if (!filename || !filename[0]) return NULL;
-    if (g_luna_platform.read_resource) {
-        size_t sz = 0;
-        unsigned char* p = g_luna_platform.read_resource(filename, &sz);
-        if (p) {
-            if (out_size) *out_size = (long)sz;
-            return p;
-        }
-    }
+char* read_file(const char* filename) {
     FILE* file = fopen(filename, "rb");
     if (!file) return NULL;
-    if (fseek(file, 0, SEEK_END) != 0) { fclose(file); return NULL; }
+    fseek(file, 0, SEEK_END);
     long length = ftell(file);
-    if (length < 0 || fseek(file, 0, SEEK_SET) != 0) { fclose(file); return NULL; }
-    unsigned char* buffer = (unsigned char*)malloc((size_t)length + 1u);
-    if (!buffer) { fclose(file); return NULL; }
-    size_t got = fread(buffer, 1, (size_t)length, file);
+    fseek(file, 0, SEEK_SET);
+    char* buffer = (char*)malloc(length + 1);
+    if (buffer) { fread(buffer, 1, length, file); buffer[length] = '\0'; }
     fclose(file);
-    if (got != (size_t)length) { free(buffer); return NULL; }
-    buffer[length] = 0;
-    if (out_size) *out_size = length;
     return buffer;
 }
 
-char* read_file(const char* filename) {
-    long n = 0;
-    unsigned char* bytes = read_file_bytes(filename, &n);
-    char* text;
-    if (!bytes || n < 0) { free(bytes); return NULL; }
-    text = (char*)malloc((size_t)n + 1u);
-    if (!text) { free(bytes); return NULL; }
-    memcpy(text, bytes, (size_t)n);
-    text[n] = '\0';
-    free(bytes);
-    return text;
+unsigned char* read_file_bytes(const char* filename, long* out_size) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) return NULL;
+    fseek(file, 0, SEEK_END);
+    long length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    unsigned char* buffer = (unsigned char*)malloc(length);
+    if (buffer) fread(buffer, 1, length, file);
+    fclose(file);
+    if (out_size) *out_size = length;
+    return buffer;
 }
 
 void trim_whitespace(char* str) {
@@ -4025,13 +3752,6 @@ static void apply_element_inline_style(LunaElement* e) {
     if (rule.has_white_space) e->white_space = rule.white_space;
     if (rule.has_text_overflow) e->text_overflow = rule.text_overflow;
     if (rule.has_overflow_wrap) e->overflow_wrap = rule.overflow_wrap;
-    if (rule.has_letter_spacing) {
-        e->letter_spacing = rule.letter_spacing;
-        e->letter_spacing_em = rule.letter_spacing_em;
-    }
-    if (rule.has_line_clamp) e->line_clamp = rule.line_clamp;
-    if (rule.has_text_transform) e->text_transform = rule.text_transform;
-    if (rule.has_text_decoration) e->text_decoration = rule.text_decoration;
     g_layout_dirty = 1; g_render_order_dirty = 1;
 }
 
@@ -4374,41 +4094,12 @@ static void apply_one_declaration(const char* key, const char* val, StyleRule* r
     parse_declarations(buf, rule);
 }
 
-/* Map the CSS family stack to one of Luna UI's loaded font roles.
- *
- * The monospace role was added to LunaPlatform, but the CSS parser still sent
- * every non-icon family to the regular UI face.  As a result, editors,
- * terminals and any `font-family: monospace` declaration silently changed
- * appearance after the platform/font API update.  Match the generic family
- * and the common concrete monospace names case-insensitively. */
+/* Apply a font-family value: only icon/brand faces select a dedicated atlas. */
 static void apply_font_family_value(StyleRule* rule, const char* val) {
     rule->has_font_face = 1;
-    if (val && (luna_strcasestr_local(val, "Luna Symbols") ||
-                luna_strcasestr_local(val, "Font Awesome 6 Free") ||
-                luna_strcasestr_local(val, "Font Awesome 5 Free"))) {
-        rule->font_face = 1;
-    } else if (val && (luna_strcasestr_local(val, "Luna Brands") ||
-                       luna_strcasestr_local(val, "Font Awesome 6 Brands") ||
-                       luna_strcasestr_local(val, "Font Awesome 5 Brands"))) {
-        rule->font_face = 2;
-    } else if (val && (luna_strcasestr_local(val, "monospace") ||
-                       luna_strcasestr_local(val, "SFMono") ||
-                       luna_strcasestr_local(val, "SF Mono") ||
-                       luna_strcasestr_local(val, "Menlo") ||
-                       luna_strcasestr_local(val, "Monaco") ||
-                       luna_strcasestr_local(val, "Consolas") ||
-                       luna_strcasestr_local(val, "Cascadia Code") ||
-                       luna_strcasestr_local(val, "JetBrains Mono") ||
-                       luna_strcasestr_local(val, "Fira Code") ||
-                       luna_strcasestr_local(val, "Source Code Pro") ||
-                       luna_strcasestr_local(val, "IBM Plex Mono") ||
-                       luna_strcasestr_local(val, "Ubuntu Mono") ||
-                       luna_strcasestr_local(val, "Liberation Mono") ||
-                       luna_strcasestr_local(val, "DejaVu Sans Mono"))) {
-        rule->font_face = 3;
-    } else {
-        rule->font_face = 0;
-    }
+    if (strstr(val, "Luna Symbols")) rule->font_face = 1;
+    else if (strstr(val, "Luna Brands")) rule->font_face = 2;
+    else rule->font_face = 0;
 }
 
 /* Absolute / relative CSS font-size keywords → px (medium = 16). */
@@ -4421,17 +4112,17 @@ static int font_size_keyword_px(const char* tok, float* out_px) {
         {"smaller", 13.0f}, {"larger", 19.0f},
     };
     for (size_t i = 0; i < sizeof(kws) / sizeof(kws[0]); i++) {
-        if (luna_strcasecmp(tok, kws[i].name) == 0) { *out_px = kws[i].px; return 1; }
+        if (strcasecmp(tok, kws[i].name) == 0) { *out_px = kws[i].px; return 1; }
     }
     return 0;
 }
 
 static int font_token_is_weight(const char* t, int* out_bold) {
-    if (luna_strcasecmp(t, "bold") == 0 || luna_strcasecmp(t, "bolder") == 0) {
+    if (strcasecmp(t, "bold") == 0 || strcasecmp(t, "bolder") == 0) {
         if (out_bold) *out_bold = 1;
         return 1;
     }
-    if (luna_strcasecmp(t, "normal") == 0 || luna_strcasecmp(t, "lighter") == 0) {
+    if (strcasecmp(t, "normal") == 0 || strcasecmp(t, "lighter") == 0) {
         if (out_bold) *out_bold = 0;
         return 1;
     }
@@ -4450,7 +4141,7 @@ static int font_token_is_stretch(const char* t) {
         "normal", "semi-expanded", "expanded", "extra-expanded", "ultra-expanded"
     };
     for (size_t i = 0; i < sizeof(kws) / sizeof(kws[0]); i++)
-        if (luna_strcasecmp(t, kws[i]) == 0) return 1;
+        if (strcasecmp(t, kws[i]) == 0) return 1;
     /* font-stretch percentage, e.g. 75% — only accept when no length unit */
     char* end = NULL;
     strtof(t, &end);
@@ -4484,15 +4175,11 @@ static int font_token_is_size(const char* tok, float* out_px) {
 
 /* Parse <line-height>: normal | <number> | <length> | <percentage>. */
 static float font_parse_line_height(const char* tok) {
-    if (!tok || !*tok || luna_strcasecmp(tok, "normal") == 0) return 0.0f;
+    if (!tok || !*tok || strcasecmp(tok, "normal") == 0) return 0.0f;
     char* endp = NULL;
     float lh = strtof(tok, &endp);
     while (endp && isspace((unsigned char)*endp)) endp++;
-    if (!endp || endp == tok || lh <= 0.0f) return 0.0f;
-    /* Negative values are an internal marker for a font-size multiplier. */
-    if (*endp == '\0' || strcmp(endp, "em") == 0) return -lh;
-    if (*endp == '%') return -(lh / 100.0f);
-    if (strncmp(endp, "rem", 3) == 0) return lh * 16.0f;
+    if (endp && *endp == '\0' && lh > 0.0f) return -lh; /* unitless multiplier */
     return parse_float_val(tok);
 }
 
@@ -4516,13 +4203,13 @@ static void parse_font_shorthand(const char* val, StyleRule* rule) {
         "caption", "icon", "menu", "message-box", "small-caption", "status-bar"
     };
     for (size_t i = 0; i < sizeof(sys) / sizeof(sys[0]); i++) {
-        if (luna_strcasecmp(buf, sys[i]) == 0) {
+        if (strcasecmp(buf, sys[i]) == 0) {
             rule->has_font_italic = 1; rule->font_italic = 0;
             rule->has_font_weight = 1; rule->font_bold = 0;
             rule->has_line_height = 1; rule->line_height = 0.0f;
             rule->has_font_size = 1;
-            rule->font_size = (luna_strcasecmp(buf, "small-caption") == 0 ||
-                               luna_strcasecmp(buf, "status-bar") == 0) ? 12.0f : 13.0f;
+            rule->font_size = (strcasecmp(buf, "small-caption") == 0 ||
+                               strcasecmp(buf, "status-bar") == 0) ? 12.0f : 13.0f;
             apply_font_family_value(rule, "sans-serif");
             return;
         }
@@ -4615,8 +4302,8 @@ static void parse_font_shorthand(const char* val, StyleRule* rule) {
                     }
                     if (font_token_is_size(cand, &dummy)) { later = 1; break; }
                     int wb = 0;
-                    if (luna_strcasecmp(toks[j], "italic") == 0 || luna_strcasecmp(toks[j], "oblique") == 0 ||
-                        luna_strcasecmp(toks[j], "small-caps") == 0 ||
+                    if (strcasecmp(toks[j], "italic") == 0 || strcasecmp(toks[j], "oblique") == 0 ||
+                        strcasecmp(toks[j], "small-caps") == 0 ||
                         font_token_is_weight(toks[j], &wb) ||
                         font_token_is_stretch(toks[j]))
                         continue;
@@ -4656,15 +4343,15 @@ static void parse_font_shorthand(const char* val, StyleRule* rule) {
 
         /* Optional prefixes before <font-size>. "normal" is shared — ignore. */
         int wbold = 0;
-        if (luna_strcasecmp(tok, "italic") == 0 || luna_strcasecmp(tok, "oblique") == 0) {
+        if (strcasecmp(tok, "italic") == 0 || strcasecmp(tok, "oblique") == 0) {
             italic = 1;
-        } else if (luna_strcasecmp(tok, "small-caps") == 0) {
+        } else if (strcasecmp(tok, "small-caps") == 0) {
             /* font-variant: accepted for CSS parity; no dedicated atlas. */
-        } else if (font_token_is_weight(tok, &wbold) && luna_strcasecmp(tok, "normal") != 0) {
+        } else if (font_token_is_weight(tok, &wbold) && strcasecmp(tok, "normal") != 0) {
             bold = wbold;
-        } else if (font_token_is_stretch(tok) && luna_strcasecmp(tok, "normal") != 0) {
+        } else if (font_token_is_stretch(tok) && strcasecmp(tok, "normal") != 0) {
             /* font-stretch: accepted / ignored for layout. */
-        } else if (luna_strcasecmp(tok, "normal") == 0) {
+        } else if (strcasecmp(tok, "normal") == 0) {
             /* style|variant|weight|stretch initial — no-op */
         } else {
             return; /* unexpected token before size → invalid shorthand */
@@ -4747,7 +4434,7 @@ void parse_declarations(char* declarations, StyleRule* rule) {
             else if (strcmp(key, "background") == 0)       { parse_background_shorthand(val, rule); }
             else if (strcmp(key, "background-image") == 0) {
                 char path[256];
-                if (luna_strcasecmp(val, "none") == 0) {
+                if (strcasecmp(val, "none") == 0) {
                     rule->has_bg_image_reset = 1;
                     rule->has_bg_image = 0;
                     rule->bg_image_path[0] = '\0';
@@ -4883,12 +4570,6 @@ void parse_declarations(char* declarations, StyleRule* rule) {
                 } else if (strcmp(val, "grid") == 0 || strcmp(val, "inline-grid") == 0) {
                     rule->display_none = 0;
                     rule->display_mode = DISPLAY_GRID;
-                } else if (strcmp(val, "-webkit-box") == 0) {
-                    /* Legacy WebKit box is used by the line-clamp idiom.
-                       Luna lays it out as a block and applies the clamp in the
-                       text sizing/paint paths below. */
-                    rule->display_none = 0;
-                    rule->display_mode = DISPLAY_BLOCK;
                 } else {
                     rule->display_none = 0;
                     rule->display_mode = DISPLAY_BLOCK;
@@ -5284,7 +4965,17 @@ void parse_declarations(char* declarations, StyleRule* rule) {
             else if (strcmp(key, "font-weight") == 0) { rule->has_font_weight = 1; rule->font_bold = (strstr(val, "bold") != NULL || atoi(val) >= 600); }
             else if (strcmp(key, "line-height") == 0) {
                 rule->has_line_height = 1;
-                rule->line_height = font_parse_line_height(val);
+                if (strcmp(val, "normal") == 0) rule->line_height = 0.0f;
+                else {
+                    char* endp = NULL;
+                    float lh = strtof(val, &endp);
+                    while (endp && isspace((unsigned char)*endp)) endp++;
+                    /* A unitless line-height is a multiplier of font-size,
+                     * not a pixel value.  Keep it negative until the final
+                     * font size is known so inheritance stays correct. */
+                    rule->line_height = (endp && *endp == '\0' && lh > 0.0f)
+                        ? -lh : parse_float_val(val);
+                }
             }
             else if (strcmp(key, "white-space") == 0) {
                 rule->has_white_space = 1;
@@ -5302,27 +4993,7 @@ void parse_declarations(char* declarations, StyleRule* rule) {
             }
             else if (strcmp(key, "letter-spacing") == 0) {
                 rule->has_letter_spacing = 1;
-                rule->letter_spacing_em = 0;
-                if (strcmp(val, "normal") == 0) {
-                    rule->letter_spacing = 0.0f;
-                } else {
-                    char* endp = NULL;
-                    rule->letter_spacing = strtof(val, &endp);
-                    while (endp && isspace((unsigned char)*endp)) endp++;
-                    if (endp && strcmp(endp, "em") == 0) rule->letter_spacing_em = 1;
-                    else if (endp && strncmp(endp, "rem", 3) == 0)
-                        rule->letter_spacing *= 16.0f;
-                    else if (!endp || endp == val) rule->letter_spacing = 0.0f;
-                }
-            }
-            else if (strcmp(key, "-webkit-line-clamp") == 0 || strcmp(key, "line-clamp") == 0) {
-                rule->has_line_clamp = 1;
-                rule->line_clamp = (strcmp(val, "none") == 0) ? 0 : atoi(val);
-                if (rule->line_clamp < 0) rule->line_clamp = 0;
-            }
-            else if (strcmp(key, "-webkit-box-orient") == 0) {
-                /* Accepted for browser-compatible `display:-webkit-box` +
-                   `-webkit-line-clamp`. Only the vertical text mode is needed. */
+                rule->letter_spacing = (strcmp(val, "normal") == 0) ? 0.0f : parse_float_val(val);
             }
             else if (strcmp(key, "text-transform") == 0) {
                 rule->has_text_transform = 1;
@@ -5360,6 +5031,17 @@ void parse_declarations(char* declarations, StyleRule* rule) {
                 }
             }
             else if (strcmp(key, "box-shadow") == 0)  { parse_box_shadow(val, rule); }
+            else if (strcmp(key, "letter-spacing") == 0) {
+                rule->has_letter_spacing = 1;
+                rule->letter_spacing = (strcmp(val, "normal") == 0) ? 0.0f : parse_float_val(val);
+            }
+            else if (strcmp(key, "text-transform") == 0) {
+                rule->has_text_transform = 1;
+                if (strstr(val, "upper")) rule->text_transform = 1;
+                else if (strstr(val, "lower")) rule->text_transform = 2;
+                else if (strstr(val, "capital")) rule->text_transform = 3;
+                else rule->text_transform = 0;
+            }
             else if (strcmp(key, "border-top-color") == 0 || strcmp(key, "border-right-color") == 0 ||
                      strcmp(key, "border-bottom-color") == 0 || strcmp(key, "border-left-color") == 0) {
                 float cr = 0, cg = 0, cb = 0, ca = 1.0f;
@@ -5613,8 +5295,8 @@ static void parse_nth_arg(const char* arg, int* out_a, int* out_b) {
     snprintf(buf, sizeof(buf), "%.*s", (int)(sizeof(buf) - 1), arg ? arg : "");
     trim_whitespace(buf);
     *out_a = 0; *out_b = 0;
-    if (luna_strcasecmp(buf, "odd") == 0)  { *out_a = 2; *out_b = 1; return; }
-    if (luna_strcasecmp(buf, "even") == 0) { *out_a = 2; *out_b = 0; return; }
+    if (strcasecmp(buf, "odd") == 0)  { *out_a = 2; *out_b = 1; return; }
+    if (strcasecmp(buf, "even") == 0) { *out_a = 2; *out_b = 0; return; }
     char* n = strchr(buf, 'n');
     if (!n) n = strchr(buf, 'N');
     if (!n) { *out_b = atoi(buf); return; }
@@ -5822,8 +5504,8 @@ static void ingest_parsed_rule(const CSSRule *pr) {
 
 static float parse_keyframe_stop_pos(const char* sel) {
     if (!sel) return 0.0f;
-    if (luna_strcasecmp(sel, "from") == 0 || luna_strcasecmp(sel, "0%") == 0) return 0.0f;
-    if (luna_strcasecmp(sel, "to") == 0 || luna_strcasecmp(sel, "100%") == 0) return 1.0f;
+    if (strcasecmp(sel, "from") == 0 || strcasecmp(sel, "0%") == 0) return 0.0f;
+    if (strcasecmp(sel, "to") == 0 || strcasecmp(sel, "100%") == 0) return 1.0f;
     if (strchr(sel, '%')) return (float)atof(sel) / 100.0f;
     return (float)atof(sel);
 }
@@ -5910,8 +5592,8 @@ static void ingest_keyframes_from_sheet(const CSSStyleSheet* sheet) {
  * animations even when the user had not requested reduced motion. */
 static int css_media_matches(const char* prelude) {
     const char* reduced = getenv("LUNA_PREFERS_REDUCED_MOTION");
-    int wants_reduced = reduced && (*reduced == '1' || luna_strcasecmp(reduced, "true") == 0 ||
-                                   luna_strcasecmp(reduced, "reduce") == 0);
+    int wants_reduced = reduced && (*reduced == '1' || strcasecmp(reduced, "true") == 0 ||
+                                   strcasecmp(reduced, "reduce") == 0);
     char query[CSS_MAX_VALUE];
     snprintf(query, sizeof(query), "%s", prelude ? prelude : "");
     for (char* p = query; *p; ++p) *p = (char)tolower((unsigned char)*p);
@@ -6079,13 +5761,12 @@ void update_element_style(LunaElement* e) {
     e->grid_area_rows = e->grid_area_cols = 0;
     e->grid_area_rect_count = 0;
     memset(e->grid_area_cell, 0, sizeof(e->grid_area_cell));
-    /* Scroll offsets, destinations, and measured content extents are runtime
-     * state, not computed CSS.  Restyling for :hover, :focus, class changes,
-     * or dialog visibility must preserve them.  apply_scroll_metrics()
-     * recalculates the extents and clamps the offsets after a real layout. */
+    e->scroll_top = e->scroll_left = 0.0f;
+    e->scroll_dest_top = e->scroll_dest_left = 0.0f;
     e->scroll_smooth = 0;
     e->scroll_snap_type = 0;
     e->scroll_snap_align = 0;
+    e->scroll_content_h = e->scroll_content_w = 0.0f;
     e->scrollbar_width = 5.0f;
     e->has_scrollbar_width = 0;
     e->has_scrollbar_color = 0;
@@ -6133,8 +5814,7 @@ void update_element_style(LunaElement* e) {
     e->has_text_align = strcmp(e->type, "button") == 0;
     e->font_size = 16; e->font_bold = 0; e->font_face = 0;
     e->line_height = 0.0f; e->white_space = 0; e->text_overflow = 0; e->overflow_wrap = 1;
-    e->letter_spacing = 0.0f; e->letter_spacing_em = 0; e->line_clamp = 0;
-    e->text_transform = 0; e->text_decoration = 0;
+    e->letter_spacing = 0.0f; e->text_transform = 0; e->text_decoration = 0;
     if (e->parent_idx >= 0 && e->parent_idx < elem_count) {
         const LunaElement* parent = &elements[e->parent_idx];
         e->font_size = parent->font_size;
@@ -6143,10 +5823,7 @@ void update_element_style(LunaElement* e) {
         e->line_height = parent->line_height;
         e->white_space = parent->white_space;
         e->overflow_wrap = parent->overflow_wrap;
-        /* letter-spacing inherits as its computed length, not as the parent's
-           original em token.  line-clamp is intentionally not inherited. */
         e->letter_spacing = parent->letter_spacing;
-        e->letter_spacing_em = 0;
         e->text_transform = parent->text_transform;
         e->text_decoration = parent->text_decoration;
         if (!e->has_custom_color) {
@@ -6544,11 +6221,7 @@ void update_element_style(LunaElement* e) {
         if (r->has_white_space) e->white_space = r->white_space;
         if (r->has_text_overflow) e->text_overflow = r->text_overflow;
         if (r->has_overflow_wrap) e->overflow_wrap = r->overflow_wrap;
-        if (r->has_letter_spacing) {
-            e->letter_spacing = r->letter_spacing;
-            e->letter_spacing_em = r->letter_spacing_em;
-        }
-        if (r->has_line_clamp) e->line_clamp = r->line_clamp;
+        if (r->has_letter_spacing) e->letter_spacing = r->letter_spacing;
         if (r->has_text_transform) e->text_transform = r->text_transform;
         if (r->has_text_decoration) e->text_decoration = r->text_decoration;
         if (r->has_text_shadow) {
@@ -6611,11 +6284,6 @@ void update_element_style(LunaElement* e) {
     }
 
     apply_element_inline_style(e);
-
-    if (e->letter_spacing_em) {
-        e->letter_spacing *= e->font_size;
-        e->letter_spacing_em = 0;
-    }
 
     if (e->has_css_animation) {
         int same_animation = prev_has_animation &&
@@ -6767,14 +6435,10 @@ static void resolve_resource_path(const char* href, char* out, size_t outsz) {
         return;
     }
     if (g_html_base_dir[0]) {
-#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-truncation"
-#endif
         snprintf(out, outsz, "%s/%s", g_html_base_dir, href);
-#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
-#endif
     }
     else
         snprintf(out, outsz, "%s", href);
@@ -6787,7 +6451,7 @@ static int tag_attr_equals(const char* tag_buf, const char* key, const char* val
     if (!a) return 0;
     char got[64] = {0};
     sscanf(a + (int)strlen(pattern), "%63[^\"]", got);
-    return luna_strcasecmp(got, val) == 0;
+    return strcasecmp(got, val) == 0;
 }
 
 static int tag_is_stylesheet_link(const char* tag_buf) {
@@ -6796,7 +6460,7 @@ static int tag_is_stylesheet_link(const char* tag_buf) {
         if (!rel) return 0;
         char rval[32] = {0};
         sscanf(rel + 5, "%31[^\"]", rval);
-        return luna_strcasestr_local(rval, "stylesheet") != NULL;
+        return strcasestr(rval, "stylesheet") != NULL;
     }
     return 1;
 }
@@ -6829,19 +6493,19 @@ static int is_void_element(const char* t) {
         "area","base","br","col","embed","hr","img","input",
         "link","meta","param","source","track","wbr",NULL
     };
-    for (int i = 0; v[i]; i++) if (luna_strcasecmp(t, v[i]) == 0) return 1;
+    for (int i = 0; v[i]; i++) if (strcasecmp(t, v[i]) == 0) return 1;
     return 0;
 }
 
 static int is_ignored_element(const char* t) {
     static const char* ig[] = {"html","head","body","style","script","title",NULL};
-    for (int i = 0; ig[i]; i++) if (luna_strcasecmp(t, ig[i]) == 0) return 1;
+    for (int i = 0; ig[i]; i++) if (strcasecmp(t, ig[i]) == 0) return 1;
     return 0;
 }
 
 static int is_semantic_shell_element(const char* t) {
     static const char* sh[] = {"html","head","body","meta","link","title",NULL};
-    for (int i = 0; sh[i]; i++) if (luna_strcasecmp(t, sh[i]) == 0) return 1;
+    for (int i = 0; sh[i]; i++) if (strcasecmp(t, sh[i]) == 0) return 1;
     return 0;
 }
 
@@ -6962,7 +6626,7 @@ void parse_html(const char* html) {
         int tl = (int)strlen(type);
         while (tl > 0 && (type[tl-1] == '/' || isspace((unsigned char)type[tl-1]))) type[--tl] = '\0';
 
-        if (luna_strcasecmp(type, "link") == 0) {
+        if (strcasecmp(type, "link") == 0) {
             if (tag_is_stylesheet_link(tag_buf)) {
                 char href[256] = {0};
                 char* attr_href = strstr(tag_buf, "href=\"");
@@ -6973,14 +6637,14 @@ void parse_html(const char* html) {
             continue;
         }
 
-        if (luna_strcasecmp(type, "meta") == 0) {
+        if (strcasecmp(type, "meta") == 0) {
             p = tag_end + 1;
             continue;
         }
 
-        if (luna_strcasecmp(type, "title") == 0) {
+        if (strcasecmp(type, "title") == 0) {
             const char* text_start = tag_end + 1;
-            const char* close_title = luna_strcasestr_local(text_start, "</title>");
+            const char* close_title = strcasestr(text_start, "</title>");
             if (close_title && close_title > text_start) {
                 int tlen = (int)(close_title - text_start);
                 if (tlen > (int)sizeof(g_doc_title) - 1) tlen = (int)sizeof(g_doc_title) - 1;
@@ -6993,18 +6657,18 @@ void parse_html(const char* html) {
         }
 
         // Skip style/script content (style ingests CSS; script is ignored)
-        if (luna_strcasecmp(type, "style") == 0) {
+        if (strcasecmp(type, "style") == 0) {
             const char* css_start = tag_end + 1;
-            const char* close_pos = luna_strcasestr_local(css_start, "</style>");
+            const char* close_pos = strcasestr(css_start, "</style>");
             if (close_pos && close_pos > css_start)
                 ingest_inline_style(css_start, (int)(close_pos - css_start));
             const char* gt2 = close_pos ? strchr(close_pos, '>') : NULL;
             p = gt2 ? gt2 + 1 : tag_end + 1;
             continue;
         }
-        if (luna_strcasecmp(type, "script") == 0) {
+        if (strcasecmp(type, "script") == 0) {
             char close_tag[40]; snprintf(close_tag, sizeof(close_tag), "</%s", type);
-            const char* close_pos = luna_strcasestr_local(tag_end + 1, close_tag);
+            const char* close_pos = strcasestr(tag_end + 1, close_tag);
             const char* gt2 = close_pos ? strchr(close_pos, '>') : NULL;
             p = gt2 ? gt2 + 1 : tag_end + 1;
             continue;
@@ -7012,7 +6676,7 @@ void parse_html(const char* html) {
 
         /* <body> becomes a real window-sized container element so body-level
            CSS (display:flex/grid, padding, gap, ...) lays out its children. */
-        if (luna_strcasecmp(type, "body") == 0) {
+        if (strcasecmp(type, "body") == 0) {
             int existing = -1;
             for (int i = 0; i < elem_count; i++)
                 if (strcmp(elements[i].type, "body") == 0) { existing = i; break; }
@@ -7056,8 +6720,8 @@ void parse_html(const char* html) {
 
         if (is_ignored_element(type)) {
             if (!is_void_element(type) && !is_self_closing &&
-                luna_strcasecmp(type, "html") != 0 && luna_strcasecmp(type, "head") != 0 &&
-                luna_strcasecmp(type, "body") != 0) {
+                strcasecmp(type, "html") != 0 && strcasecmp(type, "head") != 0 &&
+                strcasecmp(type, "body") != 0) {
                 // Need to push so close tag pops correctly
                 if (stack_ptr < 63) parent_stack[stack_ptr++] = -1;
             }
@@ -7095,8 +6759,8 @@ void parse_html(const char* html) {
         if (attr_live) {
             char live_val[16] = {0};
             sscanf(attr_live + 11, "%15[^\"]", live_val);
-            if (luna_strcasecmp(live_val, "polite") == 0) aria_live = 1;
-            else if (luna_strcasecmp(live_val, "assertive") == 0) aria_live = 2;
+            if (strcasecmp(live_val, "polite") == 0) aria_live = 1;
+            else if (strcasecmp(live_val, "assertive") == 0) aria_live = 2;
         }
         int aria_hidden = 0;
         char* attr_hidden = strstr(tag_buf, "aria-hidden=\"");
@@ -7154,7 +6818,7 @@ void parse_html(const char* html) {
         e.anim_start_time = -1.0;
 
         // <img src="..."> — treat src as background image
-        if (luna_strcasecmp(type, "img") == 0) {
+        if (strcasecmp(type, "img") == 0) {
             char src[256] = {0};
             char* attr_src = strstr(tag_buf, "src=\"");
             if (attr_src) sscanf(attr_src + 5, "%255[^\"]", src);
@@ -7171,19 +6835,19 @@ void parse_html(const char* html) {
         }
 
         /* <input> / <textarea> — editable CSS-painted controls */
-        if (luna_strcasecmp(type, "input") == 0 || luna_strcasecmp(type, "textarea") == 0) {
+        if (strcasecmp(type, "input") == 0 || strcasecmp(type, "textarea") == 0) {
             e.is_input = 1;
-            e.input_multiline = (luna_strcasecmp(type, "textarea") == 0) ? 1 : 0;
+            e.input_multiline = (strcasecmp(type, "textarea") == 0) ? 1 : 0;
             e.caret = 0;
             e.cursor_type = 2; /* text */
             if (e.tabindex == -2) e.tabindex = 0;
             char itype[32] = {0};
             extract_html_attr(tag_buf, "type", itype, sizeof(itype));
-            if (itype[0] && luna_strcasecmp(itype, "password") == 0) e.input_password = 1;
-            if (itype[0] && (luna_strcasecmp(itype, "submit") == 0 || luna_strcasecmp(itype, "button") == 0 ||
-                             luna_strcasecmp(itype, "checkbox") == 0 || luna_strcasecmp(itype, "radio") == 0 ||
-                             luna_strcasecmp(itype, "file") == 0 || luna_strcasecmp(itype, "hidden") == 0 ||
-                             luna_strcasecmp(itype, "image") == 0 || luna_strcasecmp(itype, "reset") == 0)) {
+            if (itype[0] && strcasecmp(itype, "password") == 0) e.input_password = 1;
+            if (itype[0] && (strcasecmp(itype, "submit") == 0 || strcasecmp(itype, "button") == 0 ||
+                             strcasecmp(itype, "checkbox") == 0 || strcasecmp(itype, "radio") == 0 ||
+                             strcasecmp(itype, "file") == 0 || strcasecmp(itype, "hidden") == 0 ||
+                             strcasecmp(itype, "image") == 0 || strcasecmp(itype, "reset") == 0)) {
                 e.is_input = 0; /* non-text inputs are not text editors */
             }
             char val[512] = {0};
@@ -7441,96 +7105,6 @@ static float intrinsic_grid_content_height(LunaElement* grid,
     return total;
 }
 
-/* CSS `normal` is font-metric dependent.  1.2 closely matches the browser
- * line boxes used by the bundled Inter/fallback stack and avoids the previous
- * 1.5x + 12px minimum inflation for small labels. */
-static float css_normal_line_height(float font_size) {
-    if (font_size <= 0.0f) font_size = 16.0f;
-    return font_size * 1.2f;
-}
-
-static float css_used_line_height(const LunaElement* e) {
-    float lh = e ? e->line_height : 0.0f;
-    float fs = (e && e->font_size > 0.0f) ? e->font_size : 16.0f;
-    if (lh < 0.0f) lh = -lh * fs;
-    if (lh <= 0.0f) lh = css_normal_line_height(fs);
-    return lh;
-}
-
-static int count_text_lines(FontAtlas* atlas, const char* text, float box_w,
-                            float line_h, int max_lines,
-                            int white_space, int text_overflow, int overflow_wrap);
-
-static float flow_text_available_width(const LunaElement* e) {
-    float outer = 0.0f;
-    if (!e) return 0.0f;
-    if (e->has_css_width && !e->pct_w) {
-        outer = css_outer_width(e, e->css_width);
-    } else if (e->parent_idx >= 0 && e->parent_idx < elem_count) {
-        const LunaElement* p = &elements[e->parent_idx];
-        outer = p->w - p->pad_l - p->pad_r - p->border_width * 2.0f
-              - e->margin_left - e->margin_right;
-    } else {
-        outer = e->w;
-    }
-    outer -= e->pad_l + e->pad_r + e->border_width * 2.0f;
-    return outer > 0.0f ? outer : 0.0f;
-}
-
-/* Used by headless/layout-only builds where no atlas is available.  It is not
- * a painter approximation: the normal runtime path below uses the real glyph
- * advances.  This fallback still gives auto-height text browser-like wrapping. */
-static int flow_approx_text_lines(const LunaElement* e, float box_w, int max_lines) {
-    const char* p;
-    float advance;
-    int cols, lines = 1, col = 0, last_space = -1;
-    if (!e || !e->text[0]) return 0;
-    if (e->white_space == 1 || box_w <= 0.0f) return 1;
-    advance = e->font_size * 0.55f + e->letter_spacing;
-    if (advance < 1.0f) advance = 1.0f;
-    cols = (int)floorf(box_w / advance);
-    if (cols < 1) cols = 1;
-    for (p = e->text; *p && lines < max_lines; p++) {
-        if (*p == '\n' || *p == '\r') {
-            lines++; col = 0; last_space = -1; continue;
-        }
-        if (*p == ' ' || *p == '\t') last_space = col;
-        col++;
-        if (col > cols) {
-            lines++;
-            col = (last_space >= 0) ? col - last_space - 1 : 1;
-            last_space = -1;
-        }
-    }
-    return lines > max_lines ? max_lines : lines;
-}
-
-static float flow_leaf_text_height(LunaElement* e) {
-    float lh, box_w;
-    int max_lines, lines;
-    if (!e || !e->text[0])
-        return e ? e->pad_t + e->pad_b + e->border_width * 2.0f : 0.0f;
-    lh = css_used_line_height(e);
-    box_w = flow_text_available_width(e);
-    max_lines = e->line_clamp > 0 ? e->line_clamp : 4096;
-    if (e->white_space == 1) max_lines = 1;
-    if (font_loaded && box_w > 0.0f) {
-        FontAtlas* atlas = get_atlas(e->font_size, e->font_bold, NULL);
-        text_metrics_begin(e->font_size, e->font_bold, e->font_face, atlas);
-        g_text_letter_spacing = e->letter_spacing;
-        lines = count_text_lines(atlas, e->text, box_w, lh, max_lines,
-                                 e->white_space,
-                                 (e->text_overflow || e->line_clamp > 0),
-                                 e->overflow_wrap);
-        g_text_letter_spacing = 0.0f;
-        text_metrics_end();
-    } else {
-        lines = flow_approx_text_lines(e, box_w, max_lines);
-    }
-    if (lines < 1) lines = 1;
-    return (float)lines * lh + e->pad_t + e->pad_b + e->border_width * 2.0f;
-}
-
 static float flow_content_height(LunaElement* e) {
     int idx = (int)(e - elements);
 
@@ -7591,7 +7165,13 @@ static float flow_content_height(LunaElement* e) {
            made compact rows such as the About version badge collapse to the
            height of their tiny icon child. */
         if (row && e->text[0]) {
-            float text_lh = css_used_line_height(e);
+            float text_lh = e->line_height;
+            if (text_lh < 0.0f) text_lh = -text_lh * e->font_size;
+            if (text_lh <= 0.0f) {
+                text_lh = (float)e->font_size;
+                if (text_lh < 10.0f) text_lh = 12.0f;
+                text_lh *= 1.5f;
+            }
             if (text_lh > maxh) maxh = text_lh;
         }
 
@@ -7652,7 +7232,14 @@ static float flow_content_height(LunaElement* e) {
         return inner + e->pad_t + e->pad_b + e->border_width * 2.0f;
     }
 
-    return flow_leaf_text_height(e);
+    float lh = e->line_height;
+    if (lh < 0.0f) lh = -lh * e->font_size; /* unitless CSS multiplier */
+    if (lh <= 0.0f) {
+        lh = (float)e->font_size;
+        if (lh < 10.0f) lh = 12.0f;
+        lh *= 1.5f;
+    }
+    return lh + e->pad_t + e->pad_b + e->border_width * 2.0f;
 }
 
 static float intrinsic_content_width(LunaElement* e) {
@@ -7661,13 +7248,13 @@ static float intrinsic_content_width(LunaElement* e) {
         return g_intrinsic_width_cache[idx];
 
     float result;
-    int n = 0;
-    float total = 0.0f, maxw = 0.0f;
     if (e->has_css_width && !e->pct_w) {
         result = e->css_width;
         goto done;
     }
 
+    int n = 0;
+    float total = 0.0f, maxw = 0.0f;
     for (int c = 0; c < elem_count; c++) {
         LunaElement* ch = &elements[c];
         if (ch->parent_idx != idx || !is_visible(c)) continue;
@@ -10484,9 +10071,7 @@ static int take_screenshot(const char* path) {
             dst[x * 3 + 2] = src[x * 4 + 2];
         }
     }
-    int ok = g_luna_platform.save_png
-        ? g_luna_platform.save_png(path, fbw, fbh, 3, flipped, fbw * 3)
-        : stbi_write_png(path, fbw, fbh, 3, flipped, fbw * 3);
+    int ok = stbi_write_png(path, fbw, fbh, 3, flipped, fbw * 3);
     free(pixels);
     free(flipped);
     if (ok) fprintf(stderr, "[vespera] Screenshot saved: %s (%dx%d)\n", path, fbw, fbh);
@@ -10501,7 +10086,7 @@ static int take_screenshot(const char* path) {
 // Effective z-index accumulates ancestor stacking contexts.  Taking max()
 // discards a child's local z-index when its parent has a higher value, which
 // makes a later drag overlay intercept traffic-light buttons in a dialog.
-static int LUNA_UNUSED effective_z_index(int idx) {
+static int __attribute__((unused)) effective_z_index(int idx) {
     if (idx >= 0 && idx < elem_count && !g_render_order_dirty)
         return g_cached_eff_z[idx];
     int z = elements[idx].z_index;
@@ -10610,10 +10195,9 @@ static int is_font_file(const char* name) {
     size_t n = strlen(name);
     if (n < 4) return 0;
     const char* ext = name + n - 4;
-    return (luna_strcasecmp(ext, ".ttf") == 0 ||
-            luna_strcasecmp(ext, ".otf") == 0 ||
-            luna_strcasecmp(ext, ".ttc") == 0 ||
-            luna_strcasecmp(ext, ".otc") == 0);
+    return (strcasecmp(ext, ".ttf") == 0 ||
+            strcasecmp(ext, ".otf") == 0 ||
+            strcasecmp(ext + 1, "tc") == 0); // .ttc / .otc (n>=5 implied by ext check)
 }
 
 // Returns 1 if the filename looks like a bold variant.
@@ -10635,16 +10219,11 @@ typedef struct {
 } FontPathList;
 
 static void fpl_add(FontPathList* fpl, const char* path) {
-    char* copy;
     if (fpl->count >= fpl->cap) {
-        int new_cap = fpl->cap ? fpl->cap * 2 : 64;
-        char** grown = (char**)realloc(fpl->paths, sizeof(char*) * (size_t)new_cap);
-        if (!grown) return;
-        fpl->paths = grown;
-        fpl->cap = new_cap;
+        fpl->cap = fpl->cap ? fpl->cap * 2 : 64;
+        fpl->paths = realloc(fpl->paths, sizeof(char*) * fpl->cap);
     }
-    copy = luna_strdup_local(path);
-    if (copy) fpl->paths[fpl->count++] = copy;
+    fpl->paths[fpl->count++] = strdup(path);
 }
 
 static void fpl_free(FontPathList* fpl) {
@@ -10653,7 +10232,6 @@ static void fpl_free(FontPathList* fpl) {
     fpl->paths = NULL; fpl->count = fpl->cap = 0;
 }
 
-#if LUNA_UI_ENABLE_FONT_SCAN
 // Recursively scan dir and collect font paths into reg/bold lists.
 static void scan_fonts_dir(const char* dir, FontPathList* reg, FontPathList* bold) {
     DIR* d = opendir(dir);
@@ -10679,12 +10257,6 @@ static void scan_fonts_dir(const char* dir, FontPathList* reg, FontPathList* bol
     closedir(d);
 }
 
-#else
-static void scan_fonts_dir(const char* dir, FontPathList* reg, FontPathList* bold) {
-    (void)dir; (void)reg; (void)bold;
-}
-#endif
-
 // Try each path in the list; return first successfully loaded buffer.
 static unsigned char* try_load_font_list(FontPathList* fpl, int (*score_fn)(const char*), long* out_sz) {
     long dummy = 0;
@@ -10706,144 +10278,64 @@ static unsigned char* try_load_font_list(FontPathList* fpl, int (*score_fn)(cons
 
 // ------------------------------------------------------------------
 
-static unsigned char* luna_load_font_role(int role, long* out_size) {
-    size_t n = 0;
-    unsigned char* p = NULL;
-    if (g_luna_platform.load_font) p = g_luna_platform.load_font(role, &n);
-    if (out_size) *out_size = (long)n;
-    return p;
-}
-
-static unsigned char* luna_try_font_candidates(const char* const* paths,
-                                                size_t count, long* out_size,
-                                                const char* label) {
-    for (size_t i = 0; i < count; ++i) {
-        if (!paths[i] || !paths[i][0]) continue;
-        unsigned char* p = read_file_bytes(paths[i], out_size);
-        if (p) {
-            fprintf(stderr, "[luna-ui] %s loaded: %s\n", label, paths[i]);
-            return p;
-        }
-    }
-    return NULL;
-}
-
 void init_font() {
-    FontPathList reg = {0};
+    FontPathList reg  = {0};
     FontPathList bold_list = {0};
-    unsigned char* reg_buf = NULL;
-    long cjk_sz = 0, mono_sz = 0, icon_sz = 0, brand_sz = 0, bold_sz = 0;
 
-#if LUNA_UI_ENABLE_FONT_SCAN
     scan_fonts_dir("/usr/share/fonts", &reg, &bold_list);
-    scan_fonts_dir("/usr/local/share/fonts", &reg, &bold_list);
-#endif
     scan_fonts_dir("ui/fonts", &reg, &bold_list);
     scan_fonts_dir("skins/fonts", &reg, &bold_list);
 
-    reg_buf = luna_load_font_role(LUNA_FONT_REGULAR, &g_font_ttf_sz);
-    g_bold_font_ttf = luna_load_font_role(LUNA_FONT_BOLD, &bold_sz);
-    g_cjk_font_ttf = luna_load_font_role(LUNA_FONT_CJK, &cjk_sz);
-    g_mono_font_ttf = luna_load_font_role(LUNA_FONT_MONO, &mono_sz);
-    g_icon_font_ttf = luna_load_font_role(LUNA_FONT_SYMBOLS, &icon_sz);
-    g_brand_font_ttf = luna_load_font_role(LUNA_FONT_BRANDS, &brand_sz);
-
-    if (!reg_buf) {
-        const char* env_ui = getenv("LUNA_FONT_REGULAR");
-        if (env_ui && env_ui[0]) reg_buf = read_file_bytes(env_ui, &g_font_ttf_sz);
+    const char* env_ui = getenv("LUNA_FONT_REGULAR");
+    unsigned char* reg_buf = NULL;
+    if (env_ui && env_ui[0]) {
+        reg_buf = read_file_bytes(env_ui, &g_font_ttf_sz);
+        if (reg_buf) fprintf(stderr, "[vespera] Font loaded: %s (LUNA_FONT_REGULAR)\n", env_ui);
     }
+    /* The shell CSS uses Inter.  Prefer the bundled, browser-identical face
+     * before probing arbitrary system sans-serif fonts, which vary by host. */
     if (!reg_buf) {
-        static const char* const cands[] = {
-            "fonts/Inter-Regular.ttf", "ui/fonts/Inter-Regular.ttf",
+        const char* inter_cands[] = {
             "skins/fonts/web/Inter-Regular.ttf",
-            "apps/luna-shell/skins/fonts/web/Inter-Regular.ttf",
-            "../skins/fonts/web/Inter-Regular.ttf"
+            "apps/luna-ui/skins/fonts/web/Inter-Regular.ttf",
+            "../skins/fonts/web/Inter-Regular.ttf",
         };
-        reg_buf = luna_try_font_candidates(cands, sizeof(cands)/sizeof(cands[0]),
-                                           &g_font_ttf_sz, "regular font");
+        for (size_t i = 0; i < sizeof(inter_cands) / sizeof(inter_cands[0]); i++) {
+            reg_buf = read_file_bytes(inter_cands[i], &g_font_ttf_sz);
+            if (reg_buf) {
+                fprintf(stderr, "[vespera] Font loaded: %s (bundled Inter)\n", inter_cands[i]);
+                break;
+            }
+        }
     }
     if (!reg_buf) reg_buf = try_load_font_list(&reg, font_path_score_ui, &g_font_ttf_sz);
 
-    if (!g_bold_font_ttf) {
-        static const char* const cands[] = {
-            "fonts/Inter-Bold.ttf", "ui/fonts/Inter-Bold.ttf",
-            "skins/fonts/web/Inter-Bold.ttf",
-            "apps/luna-shell/skins/fonts/web/Inter-Bold.ttf",
-            "../skins/fonts/web/Inter-Bold.ttf"
-        };
-        g_bold_font_ttf = luna_try_font_candidates(cands, sizeof(cands)/sizeof(cands[0]),
-                                                   &bold_sz, "bold font");
-    }
-    if (!g_bold_font_ttf)
-        g_bold_font_ttf = try_load_font_list(&bold_list, font_path_score_ui, &bold_sz);
-
-    if (!g_cjk_font_ttf) {
-        const char* env = getenv("LUNA_FONT_CJK");
-        if (env && env[0]) g_cjk_font_ttf = read_file_bytes(env, &cjk_sz);
+    const char* env_cjk = getenv("LUNA_FONT_CJK");
+    long cjk_sz = 0;
+    if (env_cjk && env_cjk[0]) {
+        g_cjk_font_ttf = read_file_bytes(env_cjk, &cjk_sz);
+        if (g_cjk_font_ttf) fprintf(stderr, "[vespera] CJK font loaded: %s (LUNA_FONT_CJK)\n", env_cjk);
     }
     if (!g_cjk_font_ttf) g_cjk_font_ttf = try_load_font_list(&reg, font_path_score, &cjk_sz);
 
-    if (!g_mono_font_ttf) {
-        const char* env = getenv("LUNA_FONT_MONO");
-        if (env && env[0]) g_mono_font_ttf = read_file_bytes(env, &mono_sz);
+    const char* env_mono = getenv("LUNA_FONT_MONO");
+    long mono_sz = 0;
+    if (env_mono && env_mono[0]) {
+        g_mono_font_ttf = read_file_bytes(env_mono, &mono_sz);
+        if (g_mono_font_ttf) fprintf(stderr, "[vespera] Mono font loaded: %s (LUNA_FONT_MONO)\n", env_mono);
     }
     if (!g_mono_font_ttf) g_mono_font_ttf = try_load_font_list(&reg, font_path_score_mono, &mono_sz);
 
-    if (!g_icon_font_ttf) {
-        const char* env = getenv("LUNA_FONT_ICONS");
-        const char* const cands[] = {
-            env && env[0] ? env : NULL,
-            "fonts/LunaSymbols-Solid.otf", "ui/fonts/LunaSymbols-Solid.otf",
-            "skins/fonts/LunaSymbols-Solid.otf", "../skins/fonts/LunaSymbols-Solid.otf",
-            "apps/luna-shell/skins/fonts/LunaSymbols-Solid.otf",
-            "/usr/share/fonts/LunaSymbols-Solid.otf",
-            "/usr/share/fonts/luna/LunaSymbols-Solid.otf",
-            "/usr/local/share/fonts/LunaSymbols-Solid.otf",
-            "/usr/local/share/fonts/luna/LunaSymbols-Solid.otf"
-        };
-        g_icon_font_ttf = luna_try_font_candidates(cands, sizeof(cands)/sizeof(cands[0]),
-                                                   &icon_sz, "symbol font");
-    }
-    if (!g_icon_font_ttf)
-        g_icon_font_ttf = try_load_font_list(&reg, font_path_score_symbols, &icon_sz);
-
-    if (!g_brand_font_ttf) {
-        const char* env = getenv("LUNA_FONT_BRANDS");
-        const char* const cands[] = {
-            env && env[0] ? env : NULL,
-            "fonts/LunaSymbols-Brands.otf", "ui/fonts/LunaSymbols-Brands.otf",
-            "skins/fonts/LunaSymbols-Brands.otf", "../skins/fonts/LunaSymbols-Brands.otf",
-            "apps/luna-shell/skins/fonts/LunaSymbols-Brands.otf",
-            "/usr/share/fonts/LunaSymbols-Brands.otf",
-            "/usr/share/fonts/luna/LunaSymbols-Brands.otf",
-            "/usr/local/share/fonts/LunaSymbols-Brands.otf",
-            "/usr/local/share/fonts/luna/LunaSymbols-Brands.otf"
-        };
-        g_brand_font_ttf = luna_try_font_candidates(cands, sizeof(cands)/sizeof(cands[0]),
-                                                    &brand_sz, "brand font");
-    }
-    if (!g_brand_font_ttf)
-        g_brand_font_ttf = try_load_font_list(&reg, font_path_score_brands, &brand_sz);
-
-    if (reg_buf) {
+    if (!reg_buf) fprintf(stderr, "[vespera] Warning: no regular font found under /usr/share/fonts\n");
+    else {
         bake_font_set(reg_buf, font_regular);
         g_font_ttf = reg_buf;
         int off = stbtt_GetFontOffsetForIndex(g_font_ttf, 0);
         if (off < 0) off = 0;
         g_font_info_ok = stbtt_InitFont(&g_font_info, g_font_ttf, off) ? 1 : 0;
         dyn_atlas_reset();
-        font_loaded = 1;
-    } else {
-        fprintf(stderr, "[luna-ui] warning: no regular font available\n");
     }
 
-    if (g_bold_font_ttf) {
-        bake_font_set(g_bold_font_ttf, font_bold_atlas);
-        int off = stbtt_GetFontOffsetForIndex(g_bold_font_ttf, 0);
-        if (off < 0) off = 0;
-        g_bold_font_info_ok = stbtt_InitFont(&g_bold_font_info, g_bold_font_ttf, off) ? 1 : 0;
-        bold_font_loaded = 1;
-    }
     if (g_cjk_font_ttf) {
         int off = stbtt_GetFontOffsetForIndex(g_cjk_font_ttf, 0);
         if (off < 0) off = 0;
@@ -10854,28 +10346,124 @@ void init_font() {
         if (off < 0) off = 0;
         g_mono_font_info_ok = stbtt_InitFont(&g_mono_font_info, g_mono_font_ttf, off) ? 1 : 0;
     }
-    if (g_icon_font_ttf) {
-        int off = stbtt_GetFontOffsetForIndex(g_icon_font_ttf, 0);
-        if (off < 0) off = 0;
-        g_icon_font_info_ok = stbtt_InitFont(&g_icon_font_info, g_icon_font_ttf, off) ? 1 : 0;
+
+    /* LunaSymbols — env override, then /usr/share/fonts, then source-tree.
+     * NOTE: candidate slots may be NULL; never stop the loop on a middle NULL. */
+    {
+        const char* env_icon = getenv("LUNA_FONT_ICONS");
+        const char* icon_cands[] = {
+            env_icon && env_icon[0] ? env_icon : NULL,
+            /* Match the @font-face resource used by the document before a
+             * system installation.  Distros can ship an older subset of the
+             * same named font (notably without f1eb/Wi-Fi), which otherwise
+             * makes browser and native output diverge. */
+            "skins/fonts/LunaSymbols-Solid.otf",
+            "../skins/fonts/LunaSymbols-Solid.otf",
+            "apps/luna-ui/skins/fonts/LunaSymbols-Solid.otf",
+            "/usr/share/fonts/luna/LunaSymbols-Solid.otf",
+            "/usr/share/fonts/LunaSymbols-Solid.otf",
+            "/usr/local/share/fonts/luna/LunaSymbols-Solid.otf",
+        };
+        long isz = 0;
+        for (size_t i = 0; i < sizeof(icon_cands) / sizeof(icon_cands[0]); i++) {
+            if (!icon_cands[i]) continue;
+            g_icon_font_ttf = read_file_bytes(icon_cands[i], &isz);
+            if (g_icon_font_ttf) {
+                fprintf(stderr, "[vespera] Symbol font loaded: %s\n", icon_cands[i]);
+                break;
+            }
+        }
+        /* Fallback: any scanned path named LunaSymbols-Solid.* */
+        if (!g_icon_font_ttf) {
+            for (int i = 0; i < reg.count; i++) {
+                const char* p = reg.paths[i];
+                char lower[1024];
+                size_t n = strlen(p);
+                if (n >= sizeof(lower)) n = sizeof(lower) - 1;
+                for (size_t k = 0; k < n; k++) lower[k] = (char)tolower((unsigned char)p[k]);
+                lower[n] = 0;
+                if (!strstr(lower, "lunasymbols-solid")) continue;
+                g_icon_font_ttf = read_file_bytes(p, &isz);
+                if (g_icon_font_ttf) {
+                    fprintf(stderr, "[vespera] Symbol font loaded: %s\n", p);
+                    break;
+                }
+            }
+        }
+        if (g_icon_font_ttf) {
+            int off = stbtt_GetFontOffsetForIndex(g_icon_font_ttf, 0);
+            if (off < 0) off = 0;
+            g_icon_font_info_ok = stbtt_InitFont(&g_icon_font_info, g_icon_font_ttf, off) ? 1 : 0;
+        } else {
+            fprintf(stderr, "[vespera] Warning: LunaSymbols-Solid.otf not found (icon glyphs unavailable)\n");
+            fprintf(stderr, "[vespera]   install: skins/fonts/LunaSymbols-*.otf → /usr/share/fonts/luna/\n");
+        }
+
+        const char* env_brand = getenv("LUNA_FONT_BRANDS");
+        const char* brand_cands[] = {
+            env_brand && env_brand[0] ? env_brand : NULL,
+            "skins/fonts/LunaSymbols-Brands.otf",
+            "../skins/fonts/LunaSymbols-Brands.otf",
+            "apps/luna-ui/skins/fonts/LunaSymbols-Brands.otf",
+            "/usr/share/fonts/luna/LunaSymbols-Brands.otf",
+            "/usr/share/fonts/LunaSymbols-Brands.otf",
+            "/usr/local/share/fonts/luna/LunaSymbols-Brands.otf",
+        };
+        long bsz = 0;
+        for (size_t i = 0; i < sizeof(brand_cands) / sizeof(brand_cands[0]); i++) {
+            if (!brand_cands[i]) continue;
+            g_brand_font_ttf = read_file_bytes(brand_cands[i], &bsz);
+            if (g_brand_font_ttf) {
+                fprintf(stderr, "[vespera] Brand font loaded: %s\n", brand_cands[i]);
+                break;
+            }
+        }
+        if (!g_brand_font_ttf) {
+            for (int i = 0; i < reg.count; i++) {
+                const char* p = reg.paths[i];
+                char lower[1024];
+                size_t n = strlen(p);
+                if (n >= sizeof(lower)) n = sizeof(lower) - 1;
+                for (size_t k = 0; k < n; k++) lower[k] = (char)tolower((unsigned char)p[k]);
+                lower[n] = 0;
+                if (!strstr(lower, "lunasymbols-brands")) continue;
+                g_brand_font_ttf = read_file_bytes(p, &bsz);
+                if (g_brand_font_ttf) {
+                    fprintf(stderr, "[vespera] Brand font loaded: %s\n", p);
+                    break;
+                }
+            }
+        }
+        if (g_brand_font_ttf) {
+            int off = stbtt_GetFontOffsetForIndex(g_brand_font_ttf, 0);
+            if (off < 0) off = 0;
+            g_brand_font_info_ok = stbtt_InitFont(&g_brand_font_info, g_brand_font_ttf, off) ? 1 : 0;
+        }
     }
-    if (g_brand_font_ttf) {
-        int off = stbtt_GetFontOffsetForIndex(g_brand_font_ttf, 0);
+
+    long bold_sz = 0;
+    g_bold_font_ttf = try_load_font_list(&bold_list, font_path_score_ui, &bold_sz);
+    int bold_loaded = 0;
+    if (g_bold_font_ttf) {
+        bake_font_set(g_bold_font_ttf, font_bold_atlas);
+        int off = stbtt_GetFontOffsetForIndex(g_bold_font_ttf, 0);
         if (off < 0) off = 0;
-        g_brand_font_info_ok = stbtt_InitFont(&g_brand_font_info, g_brand_font_ttf, off) ? 1 : 0;
+        g_bold_font_info_ok = stbtt_InitFont(&g_bold_font_info, g_bold_font_ttf, off) ? 1 : 0;
+        bold_font_loaded = 1;
+        bold_loaded = 1;
     }
 
     fpl_free(&reg);
     fpl_free(&bold_list);
 
-    glCreateVertexArrays(1, &text_vao);
-    glGenBuffers(1, &text_vbo);
+    glCreateVertexArrays(1, &text_vao); glGenBuffers(1, &text_vbo);
     glBindVertexArray(text_vao); g_current_vao = text_vao;
     glBindBuffer(GL_ARRAY_BUFFER, text_vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 6 * LUNA_TEXT_BATCH_GLYPHS,
-                 NULL, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * 6 * LUNA_TEXT_BATCH_GLYPHS, NULL, GL_DYNAMIC_DRAW);
     glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), 0);
     glEnableVertexAttribArray(0);
+    if (reg_buf) font_loaded = 1;
+    (void)bold_loaded;
 }
 
 FontAtlas* get_atlas(float size, int bold, int* out_is_fake_bold) {
@@ -11000,7 +10588,7 @@ void init_rect_geometry() {
 }
 
 // Load (or retrieve cached) texture from file path.
-static GLuint LUNA_UNUSED load_or_get_texture(const char* path) {
+static GLuint __attribute__((unused)) load_or_get_texture(const char* path) {
     if (!path || !path[0]) return 0;
     for (int i = 0; i < g_tex_count; i++)
         if (strcmp(g_tex_cache[i].path, path) == 0) return g_tex_cache[i].tex;
@@ -11011,13 +10599,8 @@ static GLuint LUNA_UNUSED load_or_get_texture(const char* path) {
 
     stbi_set_flip_vertically_on_load(1);
     int w, h, ch;
-    long encoded_sz = 0;
-    unsigned char* encoded = read_file_bytes(resolved, &encoded_sz);
-    if (!encoded && strcmp(resolved, path) != 0)
-        encoded = read_file_bytes(path, &encoded_sz);
-    if (!encoded || encoded_sz <= 0) { free(encoded); return 0; }
-    unsigned char* data = stbi_load_from_memory(encoded, (int)encoded_sz, &w, &h, &ch, 4);
-    free(encoded);
+    unsigned char* data = stbi_load(resolved, &w, &h, &ch, 4);
+    if (!data) data = stbi_load(path, &w, &h, &ch, 4);
     if (!data) return 0;
 
     GLuint tex;
@@ -11524,13 +11107,11 @@ void render_text_fx(const char* text, float x, float y, float box_w, float box_h
      * atlas size.  Otherwise 17px text laid out as 16px and was then visibly
      * scaled or vertically misplaced. */
     float cap_h   = fsize * 0.72f;
-    float line_h = css_line_height > 0.0f ? css_line_height : css_normal_line_height(fsize);
+    float line_h = css_line_height > 0.0f ? css_line_height : fsize * 1.25f;
     if (line_h < cap_h + 1.0f) line_h = cap_h + 1.0f;
 
     int max_lines = (int)floorf(box_h / line_h);
     if (max_lines < 1) max_lines = (box_h >= cap_h) ? 1 : 0;
-    if (fx && fx->line_clamp > 0 && max_lines > fx->line_clamp)
-        max_lines = fx->line_clamp;
     if (max_lines <= 0) {
         g_text_letter_spacing = 0.0f;
         text_metrics_end();
@@ -11538,9 +11119,7 @@ void render_text_fx(const char* text, float x, float y, float box_w, float box_h
     }
 
     int line_count = count_text_lines(atlas, text, box_w, line_h, max_lines,
-                                      white_space,
-                                      (text_overflow || (fx && fx->line_clamp > 0)),
-                                      overflow_wrap);
+                                      white_space, text_overflow, overflow_wrap);
     if (line_count < 1) line_count = 1;
     float used_h = (float)line_count * line_h;
     float y_off = 0.0f;
@@ -11600,8 +11179,7 @@ void render_text_fx(const char* text, float x, float y, float box_w, float box_h
         line[n] = '\0';
         while (n > 0 && (line[n - 1] == ' ' || line[n - 1] == '\t')) line[--n] = '\0';
 
-        if ((white_space == 1 || is_last_visible_line) &&
-            (text_overflow == 1 || (fx && fx->line_clamp > 0)) && has_more) {
+        if ((white_space == 1 || is_last_visible_line) && text_overflow == 1 && has_more) {
             float ell_w = measure_text_width(atlas, "…");
             while (n > 0 && measure_text_range(atlas, line, n) + ell_w > box_w)
                 line[--n] = '\0';
@@ -11868,6 +11446,19 @@ static void set_window_cursor(void* window, int cursor_type) {
     if (cursor_type == g_current_cursor) return;
     g_current_cursor = cursor_type;
     if (g_luna_platform.set_cursor) g_luna_platform.set_cursor(cursor_type);
+#ifdef LUNA_UI_GLFW
+    else if (g_luna_glfw_window) {
+        GLFWcursor* cur = NULL;
+        extern GLFWcursor *g_hand_cursor, *g_cursor_ibeam, *g_cursor_crosshair;
+        extern GLFWcursor *g_cursor_hresize, *g_cursor_vresize;
+        switch (cursor_type) {
+            case 1: cur = g_hand_cursor; break; case 2: cur = g_cursor_ibeam; break;
+            case 3: cur = g_cursor_crosshair; break; case 4: cur = g_cursor_hresize; break;
+            case 5: cur = g_cursor_vresize; break;
+        }
+        glfwSetCursor((GLFWwindow*)g_luna_glfw_window, cur);
+    }
+#endif
 }
 
 void recompute_hover(void* window, double xpos, double ypos) {
@@ -12118,7 +11709,11 @@ void mouse_button_callback(void* window, int button, int action, int mods) {
     }
 }
 
-static void LUNA_UNUSED framebuffer_size_callback(void* window, int width, int height) {
+static void __attribute__((unused)) glfw_error_callback(int error, const char* description) {
+    fprintf(stderr, "GLFW Error %d: %s\n", error, description);
+}
+
+static void __attribute__((unused)) framebuffer_size_callback(void* window, int width, int height) {
     (void)window;
     (void)width;
     (void)height;
@@ -12136,19 +11731,6 @@ static int element_is_inert(int idx) {
     return 0;
 }
 
-static void platform_sync_text_input(int idx) {
-    if (!g_luna_platform.text_input) return;
-    if (idx >= 0 && idx < elem_count && elements[idx].is_input) {
-        LunaElement* e = &elements[idx];
-        float x = e->x, y = e->y, w = e->w, h = e->h;
-        if (w < 1.0f) w = 1.0f;
-        if (h < 1.0f) h = e->font_size > 0.0f ? e->font_size * 1.5f : 24.0f;
-        g_luna_platform.text_input(1, x, y, w, h);
-    } else {
-        g_luna_platform.text_input(0, 0.0f, 0.0f, 0.0f, 0.0f);
-    }
-}
-
 static void focus_element(int idx) {
     focus_element_ex(idx, 0, 1);
 }
@@ -12163,7 +11745,6 @@ static void focus_element_ex(int idx, int via_keyboard, int scroll_view) {
     if (idx == g_focused_element_idx) {
         g_focus_via_keyboard = via_keyboard ? 1 : 0;
         if (idx != -1) update_element_style(&elements[idx]);
-        platform_sync_text_input(idx);
         return;
     }
     g_focused_element_idx = idx;
@@ -12173,9 +11754,6 @@ static void focus_element_ex(int idx, int via_keyboard, int scroll_view) {
         update_focus_within_styles(idx);
         if (scroll_view) scroll_into_view(idx);
     }
-    if ((old >= 0 && old < elem_count && elements[old].is_input) ||
-        (idx >= 0 && idx < elem_count && elements[idx].is_input))
-        platform_sync_text_input(idx);
 }
 
 static int element_is_focusable(int idx) {
@@ -12187,8 +11765,8 @@ static int element_is_focusable(int idx) {
     if (e->tabindex >= 0) return 1;
     if (e->role[0] && strcmp(e->role, "button") == 0) return 1;
     if (e->role[0] && strcmp(e->role, "combobox") == 0) return 1;
-    if (luna_strcasecmp(e->type, "button") == 0) return 1;
-    if (luna_strcasecmp(e->type, "input") == 0 || luna_strcasecmp(e->type, "textarea") == 0) return 1;
+    if (strcasecmp(e->type, "button") == 0) return 1;
+    if (strcasecmp(e->type, "input") == 0 || strcasecmp(e->type, "textarea") == 0) return 1;
     return e->on_click || e->cursor_pointer;
 }
 
@@ -12421,33 +11999,9 @@ static void key_callback(void* window, int key, int scancode, int action, int mo
         }
     }
 
-    /* Text field editing — consume keys so scroll/button shortcuts don't fight IME.
-     * This compact editor has no selection model yet, so copy/cut operate on
-     * the complete value and paste inserts at the caret. */
+    /* Text field editing — consume keys so scroll/button shortcuts don't fight IME */
     if (focused_is_input() && (action == LUNA_PRESS || action == LUNA_REPEAT)) {
         LunaElement* fe = &elements[g_focused_element_idx];
-        int primary_mod = (mods & (LUNA_MOD_CONTROL | LUNA_MOD_SUPER)) != 0;
-        if (primary_mod && action == LUNA_PRESS && key == 'C') {
-            if (g_luna_platform.set_clipboard && !fe->input_password)
-                g_luna_platform.set_clipboard(fe->text);
-            return;
-        }
-        if (primary_mod && action == LUNA_PRESS && key == 'X') {
-            if (!fe->input_password && g_luna_platform.set_clipboard)
-                g_luna_platform.set_clipboard(fe->text);
-            if (!fe->input_password) { fe->text[0] = '\0'; fe->caret = 0; }
-            return;
-        }
-        if (primary_mod && action == LUNA_PRESS && key == 'V') {
-            if (g_luna_platform.get_clipboard) {
-                char* clip = g_luna_platform.get_clipboard();
-                if (clip) {
-                    input_insert_utf8(fe, clip, (int)strlen(clip));
-                    free(clip);
-                }
-            }
-            return;
-        }
         if (key == LUNA_KEY_BACKSPACE) { input_backspace(fe); return; }
         if (key == LUNA_KEY_DELETE) { input_delete_forward(fe); return; }
         if (key == LUNA_KEY_LEFT) {
@@ -12537,98 +12091,47 @@ static void key_callback(void* window, int key, int scancode, int action, int mo
 // GL setup
 // ============================================================
 
-static GLuint compile_shader(const char* src, GLenum type, const char* label) {
+static GLuint compile_shader(const char* src, GLenum type) {
     GLuint shader = glCreateShader(type);
-    GLint ok = 0;
-    if (!shader) return 0;
     glShaderSource(shader, 1, &src, NULL);
     glCompileShader(shader);
-    glGetShaderiv_(shader, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        GLchar log[4096]; GLsizei n = 0;
-        log[0] = '\0';
-        glGetShaderInfoLog_(shader, (GLsizei)sizeof(log) - 1, &n, log);
-        if (n < 0) n = 0;
-        if ((size_t)n >= sizeof(log)) n = (GLsizei)sizeof(log) - 1;
-        log[n] = '\0';
-        fprintf(stderr, "[luna-ui] %s shader compile failed: %s\n",
-                label ? label : "GLSL", log);
-        glDeleteShader_(shader);
-        return 0;
-    }
     return shader;
 }
 
-static GLuint create_shader_program(const char* vertex_src, const char* fragment_src,
-                                    const char* label) {
-    GLuint vs = compile_shader(vertex_src, GL_VERTEX_SHADER, label);
-    GLuint fs; GLuint program; GLint ok = 0;
-    if (!vs) return 0;
-    fs = compile_shader(fragment_src, GL_FRAGMENT_SHADER, label);
-    if (!fs) { glDeleteShader_(vs); return 0; }
-    program = glCreateProgram();
-    if (!program) { glDeleteShader_(vs); glDeleteShader_(fs); return 0; }
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glLinkProgram(program);
-    glGetProgramiv_(program, GL_LINK_STATUS, &ok);
-    glDeleteShader_(vs);
-    glDeleteShader_(fs);
-    if (!ok) {
-        GLchar log[4096]; GLsizei n = 0;
-        log[0] = '\0';
-        glGetProgramInfoLog_(program, (GLsizei)sizeof(log) - 1, &n, log);
-        if (n < 0) n = 0;
-        if ((size_t)n >= sizeof(log)) n = (GLsizei)sizeof(log) - 1;
-        log[n] = '\0';
-        fprintf(stderr, "[luna-ui] %s program link failed: %s\n",
-                label ? label : "GLSL", log);
-        glDeleteProgram_(program);
-        return 0;
-    }
-    return program;
-}
-
-static int load_gl_functions() {
+static void load_gl_functions() {
 #define LOAD(T, name) name = (T)g_luna_platform.get_proc(#name)
-    LOAD(LunaPFNGLCREATEVERTEXARRAYSPROC, glCreateVertexArrays);
+    LOAD(PFNGLCREATEVERTEXARRAYSPROC, glCreateVertexArrays);
     /* GL 4.5 DSA fallback: glGenVertexArrays has identical signature */
     if (!glCreateVertexArrays)
-        glCreateVertexArrays = (LunaPFNGLCREATEVERTEXARRAYSPROC)
+        glCreateVertexArrays = (PFNGLCREATEVERTEXARRAYSPROC)
             g_luna_platform.get_proc("glGenVertexArrays");
-    LOAD(LunaPFNGLDELETEVERTEXARRAYSPROC, glDeleteVertexArrays);
-    LOAD(LunaPFNGLGENBUFFERSPROC,         glGenBuffers);
-    LOAD(LunaPFNGLBINDBUFFERPROC,         glBindBuffer);
-    LOAD(LunaPFNGLBUFFERDATAPROC,         glBufferData);
-    LOAD(LunaPFNGLBUFFERSUBDATAPROC,      glBufferSubData);
-    LOAD(LunaPFNGLVERTEXATTRIBPOINTERPROC,    glVertexAttribPointer);
-    LOAD(LunaPFNGLENABLEVERTEXATTRIBARRAYPROC, glEnableVertexAttribArray);
-    LOAD(LunaPFNGLDELETEBUFFERSPROC,      glDeleteBuffers);
-    LOAD(LunaPFNGLBINDVERTEXARRAYPROC,    glBindVertexArray);
-    LOAD(LunaPFNGLCREATESHADERPROC,       glCreateShader);
-    LOAD(LunaPFNGLSHADERSOURCEPROC,       glShaderSource);
-    LOAD(LunaPFNGLCOMPILESHADERPROC,      glCompileShader);
-    glGetShaderiv_ = (LunaPFNGLGETSHADERIVPROC)g_luna_platform.get_proc("glGetShaderiv");
-    glGetShaderInfoLog_ = (LunaPFNGLGETSHADERINFOLOGPROC)g_luna_platform.get_proc("glGetShaderInfoLog");
-    glDeleteShader_ = (LunaPFNGLDELETESHADERPROC)g_luna_platform.get_proc("glDeleteShader");
-    LOAD(LunaPFNGLCREATEPROGRAMPROC,      glCreateProgram);
-    LOAD(LunaPFNGLATTACHSHADERPROC,       glAttachShader);
-    LOAD(LunaPFNGLLINKPROGRAMPROC,        glLinkProgram);
-    glGetProgramiv_ = (LunaPFNGLGETPROGRAMIVPROC)g_luna_platform.get_proc("glGetProgramiv");
-    glGetProgramInfoLog_ = (LunaPFNGLGETPROGRAMINFOLOGPROC)g_luna_platform.get_proc("glGetProgramInfoLog");
-    LOAD(LunaPFNGLUSEPROGRAMPROC,         glUseProgram);
-    glDeleteProgram_ = (LunaPFNGLDELETEPROGRAMPROC)g_luna_platform.get_proc("glDeleteProgram");
-    LOAD(LunaPFNGLGETUNIFORMLOCATIONPROC, glGetUniformLocation);
-    LOAD(LunaPFNGLUNIFORM4FPROC,          glUniform4f);
-    LOAD(LunaPFNGLUNIFORM2FPROC,          glUniform2f);
-    LOAD(LunaPFNGLUNIFORM1FPROC,          glUniform1f);
-    glUniform1i_ = (LunaPFNGLUNIFORM1IPROC)g_luna_platform.get_proc("glUniform1i");
-    glActiveTexture_ = (LunaPFNGLACTIVETEXTUREPROC)g_luna_platform.get_proc("glActiveTexture");
-    glGenFramebuffers_       = (LunaPFNGLGENFRAMEBUFFERSPROC)g_luna_platform.get_proc("glGenFramebuffers");
-    glBindFramebuffer_       = (LunaPFNGLBINDFRAMEBUFFERPROC)g_luna_platform.get_proc("glBindFramebuffer");
-    glFramebufferTexture2D_  = (LunaPFNGLFRAMEBUFFERTEXTURE2DPROC)g_luna_platform.get_proc("glFramebufferTexture2D");
-    glDeleteFramebuffers_    = (LunaPFNGLDELETEFRAMEBUFFERSPROC)g_luna_platform.get_proc("glDeleteFramebuffers");
-    glCheckFramebufferStatus_ = (LunaPFNGLCHECKFRAMEBUFFERSTATUSPROC)g_luna_platform.get_proc("glCheckFramebufferStatus");
+    LOAD(PFNGLDELETEVERTEXARRAYSPROC, glDeleteVertexArrays);
+    LOAD(PFNGLGENBUFFERSPROC,         glGenBuffers);
+    LOAD(PFNGLBINDBUFFERPROC,         glBindBuffer);
+    LOAD(PFNGLBUFFERDATAPROC,         glBufferData);
+    LOAD(PFNGLBUFFERSUBDATAPROC,      glBufferSubData);
+    LOAD(PFNGLVERTEXATTRIBPOINTERPROC,    glVertexAttribPointer);
+    LOAD(PFNGLENABLEVERTEXATTRIBARRAYPROC, glEnableVertexAttribArray);
+    LOAD(PFNGLDELETEBUFFERSPROC,      glDeleteBuffers);
+    LOAD(PFNGLBINDVERTEXARRAYPROC,    glBindVertexArray);
+    LOAD(PFNGLCREATESHADERPROC,       glCreateShader);
+    LOAD(PFNGLSHADERSOURCEPROC,       glShaderSource);
+    LOAD(PFNGLCOMPILESHADERPROC,      glCompileShader);
+    LOAD(PFNGLCREATEPROGRAMPROC,      glCreateProgram);
+    LOAD(PFNGLATTACHSHADERPROC,       glAttachShader);
+    LOAD(PFNGLLINKPROGRAMPROC,        glLinkProgram);
+    LOAD(PFNGLUSEPROGRAMPROC,         glUseProgram);
+    LOAD(PFNGLGETUNIFORMLOCATIONPROC, glGetUniformLocation);
+    LOAD(PFNGLUNIFORM4FPROC,          glUniform4f);
+    LOAD(PFNGLUNIFORM2FPROC,          glUniform2f);
+    LOAD(PFNGLUNIFORM1FPROC,          glUniform1f);
+    glUniform1i_ = (PFNGLUNIFORM1IPROC)g_luna_platform.get_proc("glUniform1i");
+    glActiveTexture_ = (PFNGLACTIVETEXTUREPROC)g_luna_platform.get_proc("glActiveTexture");
+    glGenFramebuffers_       = (PFNGLGENFRAMEBUFFERSPROC)g_luna_platform.get_proc("glGenFramebuffers");
+    glBindFramebuffer_       = (PFNGLBINDFRAMEBUFFERPROC)g_luna_platform.get_proc("glBindFramebuffer");
+    glFramebufferTexture2D_  = (PFNGLFRAMEBUFFERTEXTURE2DPROC)g_luna_platform.get_proc("glFramebufferTexture2D");
+    glDeleteFramebuffers_    = (PFNGLDELETEFRAMEBUFFERSPROC)g_luna_platform.get_proc("glDeleteFramebuffers");
+    glCheckFramebufferStatus_ = (PFNGLCHECKFRAMEBUFFERSTATUSPROC)g_luna_platform.get_proc("glCheckFramebufferStatus");
 
     /* GL 1.0/1.1 core entry points.  The macros above redirect each name to a
      * luna_p_* pointer, so `name` on the LHS resolves to the pointer while the
@@ -12656,20 +12159,13 @@ static int load_gl_functions() {
      * dispatch, fail loudly here instead of letting the first draw call jump
      * through a NULL pointer (or, worse, through libGL's un-current dispatch
      * and crash inside the driver with a confusing backtrace). */
-    if (!glCreateShader || !glShaderSource || !glCompileShader ||
-        !glGetShaderiv_ || !glGetShaderInfoLog_ || !glDeleteShader_ ||
-        !glCreateProgram || !glAttachShader || !glLinkProgram ||
-        !glGetProgramiv_ || !glGetProgramInfoLog_ || !glDeleteProgram_ || !glUseProgram ||
-        !glGenBuffers || !glBindBuffer || !glBufferData ||
-        !glCreateVertexArrays || !glBindVertexArray ||
-        !luna_p_glClear || !luna_p_glViewport || !luna_p_glTexImage2D ||
+    if (!luna_p_glClear || !luna_p_glViewport || !luna_p_glTexImage2D ||
         !luna_p_glGenTextures || !luna_p_glDrawArrays ||
         !luna_p_glBlendFuncSeparate) {
         fprintf(stderr, "[luna-ui] fatal: could not resolve core GL 1.x entry points "
                         "via get_proc(); the GL/EGL library stack is inconsistent\n");
-        return 0;
+        return;
     }
-    return 1;
 }
 
 /* ── Public wrappers ── */
@@ -12677,18 +12173,7 @@ int luna_element_count(void) { return elem_count; }
 LunaElement* luna_element_at(int i) { return (i >= 0 && i < elem_count) ? &elements[i] : NULL; }
 int luna_get_element_by_id(const char* id) { return get_element_by_id(id); }
 int luna_focused_element(void) { return g_focused_element_idx; }
-void luna_focus_element(int idx) { if (idx == -1 || (idx >= 0 && idx < elem_count)) focus_element(idx); }
-void luna_clipboard_set(const char* utf8) {
-    if (g_luna_platform.set_clipboard) g_luna_platform.set_clipboard(utf8 ? utf8 : "");
-}
-char* luna_clipboard_get(void) {
-    return g_luna_platform.get_clipboard ? g_luna_platform.get_clipboard() : NULL;
-}
-void luna_clipboard_free(char* utf8) { free(utf8); }
-float luna_platform_scale(void) {
-    float s = g_luna_platform.get_scale ? g_luna_platform.get_scale() : 1.0f;
-    return s > 0.0f ? s : 1.0f;
-}
+void luna_focus_element(int idx) { if (idx >= 0 && idx < elem_count) focus_element(idx); }
 int luna_element_visible(int idx) { return (idx >= 0 && idx < elem_count) ? is_visible(idx) : 0; }
 void luna_set_text(int i, const char* t) { g_probe_prepared = 0; set_text(i, t); }
 void luna_set_text_paint_only(int i, const char* t) {
@@ -13629,27 +13114,48 @@ static void cache_uniform_locations(void) {
 
 int luna_init(const LunaInitConfig* cfg) {
     if (!cfg || !cfg->get_proc) return 0;
+#ifdef LUNA_UI_GLFW
+    if (g_luna_glfw_window && cfg->frameless)
+        glfwSetWindowAttrib((GLFWwindow*)g_luna_glfw_window,
+                            GLFW_DECORATED, GLFW_FALSE);
+#endif
     if (!g_luna_platform.get_proc) g_luna_platform.get_proc = cfg->get_proc;
     luna_window_width = cfg->width;
     luna_window_height = cfg->height;
-    if (!load_gl_functions()) return 0;
-    bg_program = create_shader_program(bg_vs, bg_fs, "background");
-    text_program = create_shader_program(text_vs, text_fs, "text");
-    shadow_program = create_shader_program(bg_vs, shadow_fs, "shadow");
-    img_program = create_shader_program(bg_vs, img_fs, "image");
-    blur_program = create_shader_program(bg_vs, blur_fs, "blur");
-    backdrop_program = create_shader_program(bg_vs, backdrop_fs, "backdrop");
-    if (!bg_program || !text_program || !shadow_program || !img_program ||
-        !blur_program || !backdrop_program) {
-        if (bg_program) glDeleteProgram_(bg_program);
-        if (text_program) glDeleteProgram_(text_program);
-        if (shadow_program) glDeleteProgram_(shadow_program);
-        if (img_program) glDeleteProgram_(img_program);
-        if (blur_program) glDeleteProgram_(blur_program);
-        if (backdrop_program) glDeleteProgram_(backdrop_program);
-        bg_program = text_program = shadow_program = img_program = 0;
-        blur_program = backdrop_program = 0;
-        return 0;
+    load_gl_functions();
+    GLuint vs = compile_shader(bg_vs, GL_VERTEX_SHADER);
+    GLuint fs = compile_shader(bg_fs, GL_FRAGMENT_SHADER);
+    bg_program = glCreateProgram();
+    glAttachShader(bg_program, vs); glAttachShader(bg_program, fs);
+    glLinkProgram(bg_program);
+    GLuint tvs = compile_shader(text_vs, GL_VERTEX_SHADER);
+    GLuint tfs = compile_shader(text_fs, GL_FRAGMENT_SHADER);
+    text_program = glCreateProgram();
+    glAttachShader(text_program, tvs); glAttachShader(text_program, tfs);
+    glLinkProgram(text_program);
+    GLuint svs = compile_shader(bg_vs, GL_VERTEX_SHADER);
+    GLuint sfs = compile_shader(shadow_fs, GL_FRAGMENT_SHADER);
+    shadow_program = glCreateProgram();
+    glAttachShader(shadow_program, svs); glAttachShader(shadow_program, sfs);
+    glLinkProgram(shadow_program);
+    GLuint ivs = compile_shader(bg_vs, GL_VERTEX_SHADER);
+    GLuint ifs = compile_shader(img_fs, GL_FRAGMENT_SHADER);
+    img_program = glCreateProgram();
+    glAttachShader(img_program, ivs); glAttachShader(img_program, ifs);
+    glLinkProgram(img_program);
+    /* Blur shader programs */
+    {
+        GLuint bvs = compile_shader(bg_vs, GL_VERTEX_SHADER);
+        GLuint bfs = compile_shader(blur_fs, GL_FRAGMENT_SHADER);
+        blur_program = glCreateProgram();
+        glAttachShader(blur_program, bvs); glAttachShader(blur_program, bfs);
+        glLinkProgram(blur_program);
+
+        GLuint dvs = compile_shader(bg_vs, GL_VERTEX_SHADER);
+        GLuint dfs = compile_shader(backdrop_fs, GL_FRAGMENT_SHADER);
+        backdrop_program = glCreateProgram();
+        glAttachShader(backdrop_program, dvs); glAttachShader(backdrop_program, dfs);
+        glLinkProgram(backdrop_program);
     }
     cache_uniform_locations();
     glEnable(GL_BLEND);
@@ -13659,51 +13165,7 @@ int luna_init(const LunaInitConfig* cfg) {
     init_font();
     return 1;
 }
-void luna_shutdown(void) {
-    for (int i = 0; i < g_tex_count; ++i)
-        if (g_tex_cache[i].tex) glDeleteTextures(1, &g_tex_cache[i].tex);
-    g_tex_count = 0;
-    for (int i = 0; i < NUM_FONT_SIZES; ++i) {
-        if (font_regular[i].loaded && font_regular[i].tex)
-            glDeleteTextures(1, &font_regular[i].tex);
-        if (font_bold_atlas[i].loaded && font_bold_atlas[i].tex)
-            glDeleteTextures(1, &font_bold_atlas[i].tex);
-    }
-    if (g_dyn_tex) glDeleteTextures(1, &g_dyn_tex);
-    if (g_blur_tex[0]) glDeleteTextures(1, &g_blur_tex[0]);
-    if (g_blur_tex[1]) glDeleteTextures(1, &g_blur_tex[1]);
-    if (glDeleteFramebuffers_) {
-        if (g_blur_fbo[0]) glDeleteFramebuffers_(1, &g_blur_fbo[0]);
-        if (g_blur_fbo[1]) glDeleteFramebuffers_(1, &g_blur_fbo[1]);
-    }
-    if (g_rect_vbo) glDeleteBuffers(1, &g_rect_vbo);
-    if (text_vbo) glDeleteBuffers(1, &text_vbo);
-    if (g_rect_vao) glDeleteVertexArrays(1, &g_rect_vao);
-    if (text_vao) glDeleteVertexArrays(1, &text_vao);
-    if (glDeleteProgram_) {
-        if (bg_program) glDeleteProgram_(bg_program);
-        if (text_program) glDeleteProgram_(text_program);
-        if (shadow_program) glDeleteProgram_(shadow_program);
-        if (img_program) glDeleteProgram_(img_program);
-        if (blur_program) glDeleteProgram_(blur_program);
-        if (backdrop_program) glDeleteProgram_(backdrop_program);
-    }
-    free(g_font_ttf); g_font_ttf = NULL;
-    free(g_bold_font_ttf); g_bold_font_ttf = NULL;
-    free(g_cjk_font_ttf); g_cjk_font_ttf = NULL;
-    free(g_mono_font_ttf); g_mono_font_ttf = NULL;
-    free(g_icon_font_ttf); g_icon_font_ttf = NULL;
-    free(g_brand_font_ttf); g_brand_font_ttf = NULL;
-    memset(font_regular, 0, sizeof(font_regular));
-    memset(font_bold_atlas, 0, sizeof(font_bold_atlas));
-    bg_program = text_program = shadow_program = img_program = 0;
-    blur_program = backdrop_program = 0;
-    g_rect_vao = g_rect_vbo = text_vao = text_vbo = 0;
-    g_dyn_tex = 0; g_blur_tex[0] = g_blur_tex[1] = 0;
-    g_blur_fbo[0] = g_blur_fbo[1] = 0;
-    font_loaded = bold_font_loaded = 0;
-    memset(&g_luna_platform, 0, sizeof(g_luna_platform));
-}
+void luna_shutdown(void) {}
 
 void luna_render_region(int root_idx, int fbw, int fbh,
                         float origin_x, float origin_y,
@@ -13807,67 +13269,4 @@ void luna_context_scroll(LunaContext* ctx, double xoffset, double yoffset) {
 #ifdef __cplusplus
 }
 #endif
-
-/* Do not leak the core GL dispatch aliases into the selected native host or
- * into application code following this include. Native hosts use their API
- * headers directly for context/bootstrap calls. */
-#undef glCreateVertexArrays
-#undef glDeleteVertexArrays
-#undef glGenBuffers
-#undef glBindBuffer
-#undef glBufferData
-#undef glBufferSubData
-#undef glVertexAttribPointer
-#undef glEnableVertexAttribArray
-#undef glDeleteBuffers
-#undef glBindVertexArray
-#undef glCreateShader
-#undef glShaderSource
-#undef glCompileShader
-#undef glCreateProgram
-#undef glAttachShader
-#undef glLinkProgram
-#undef glUseProgram
-#undef glGetUniformLocation
-#undef glUniform4f
-#undef glUniform2f
-#undef glUniform1f
-#undef glViewport
-#undef glClear
-#undef glClearColor
-#undef glEnable
-#undef glDisable
-#undef glBlendFunc
-#undef glBlendFuncSeparate
-#undef glScissor
-#undef glDrawArrays
-#undef glGenTextures
-#undef glDeleteTextures
-#undef glBindTexture
-#undef glTexParameteri
-#undef glTexImage2D
-#undef glTexSubImage2D
-#undef glCopyTexSubImage2D
-#undef glReadPixels
-
-#if !defined(LUNA_UI_NO_PLATFORM) && defined(LUNA_UI_IMPLEMENTATION)
-#  define LUNA_UI_PLATFORM_BODY 1
-#  if defined(__EMSCRIPTEN__)
-#    include "luna_web.h"
-#  elif defined(__ANDROID__)
-#    include "luna_android.h"
-#  elif defined(__APPLE__)
-#    if TARGET_OS_IPHONE
-#      include "luna_ios.h"
-#    else
-#      include "luna_macos.h"
-#    endif
-#  elif defined(_WIN32)
-#    include "luna_windows.h"
-#  elif defined(__linux__)
-#    include "luna_linux.h"
-#  endif
-#  undef LUNA_UI_PLATFORM_BODY
-#endif
-
 #endif /* LUNA_UI_H */
