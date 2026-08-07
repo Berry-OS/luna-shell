@@ -86,8 +86,8 @@ $(LAYER_SHELL_SRC): $(LAYER_SHELL_XML)
 
 luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
-            $(UI_DIR)/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
-            $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h \
+            $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
+            $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \
             $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
 	@echo "→ Building luna-shell (Luna Desktop shell)"
 	# luna-shell's layout, animation and draw-list walks are hot on every KMS \
@@ -106,17 +106,20 @@ luna-tray-notify: tray/luna-tray-notify.c
 	@echo "→ Building luna-tray-notify (XEmbed tray notification service)"
 	gcc -Os -Wall -Wextra $$(pkg-config --cflags dbus-1) -o luna-tray-notify tray/luna-tray-notify.c -lX11 $$(pkg-config --libs dbus-1)
 
-opengl_gui: $(UI_DIR)/opengl_gui.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h
+# luna-ui lives in ui/luna-ui/ (submodule); demos still #include "luna-ui.h".
+UI_INCLUDES := -I$(UI_DIR) -I$(UI_DIR)/luna-ui
+
+opengl_gui: $(UI_DIR)/opengl_gui.c $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h
 	@echo "→ Building Luna UI demo host (opengl_gui)"
-	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/opengl_gui.c -o opengl_gui -lm -lGL $(GLFW_LIBS)
+	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) $(UI_INCLUDES) $(UI_DIR)/opengl_gui.c -o opengl_gui -lm -lGL $(GLFW_LIBS)
 
-luna-ui: $(UI_DIR)/luna-ui.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h
+luna-ui: $(UI_DIR)/luna-ui.c $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h
 	@echo "→ Building Aurora Noir demo (luna-ui)"
-	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/luna-ui.c -o luna-ui -lm -lGL $(GLFW_LIBS)
+	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) $(UI_INCLUDES) $(UI_DIR)/luna-ui.c -o luna-ui -lm -lGL $(GLFW_LIBS)
 
-sample: $(UI_DIR)/sample_02.c $(UI_DIR)/luna-ui.h $(UI_DIR)/stb_truetype.h $(UI_DIR)/stb_image_write.h
+sample: $(UI_DIR)/sample_02.c $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h
 	@echo "→ Building Luna UI sample"
-	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) -I$(UI_DIR) $(UI_DIR)/sample_02.c -o $(UI_DIR)/sample -lm -lGL $(GLFW_LIBS)
+	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) $(UI_INCLUDES) $(UI_DIR)/sample_02.c -o $(UI_DIR)/sample -lm -lGL $(GLFW_LIBS)
 
 # Run app with Rust libwayland-client preloaded
 run: build symlinks
@@ -221,7 +224,7 @@ install: build-desktop
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so.0
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
-	install -m 644 ui/luna-ui.h ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
+	install -m 644 ui/luna-ui/luna-ui.h ui/luna-ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 skins/fonts/LunaSymbols-Solid.otf skins/fonts/LunaSymbols-Regular.otf \
 	               skins/fonts/LunaSymbols-Brands.otf $(FONTDIR)/
 	-fc-cache -f $(FONTDIR) 2>/dev/null || true
@@ -257,7 +260,7 @@ install-system: build-desktop-system
 	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
 	install -D -m 644 tray/luna-tray-notify.desktop $(PREFIX)/share/applications/luna-tray-notify.desktop
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
-	install -m 644 ui/luna-ui.h ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
+	install -m 644 ui/luna-ui/luna-ui.h ui/luna-ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 skins/fonts/LunaSymbols-Solid.otf skins/fonts/LunaSymbols-Regular.otf \
 	               skins/fonts/LunaSymbols-Brands.otf $(FONTDIR)/
 	-fc-cache -f $(FONTDIR) 2>/dev/null || true

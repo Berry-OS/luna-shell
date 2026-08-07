@@ -53,9 +53,7 @@
  * GLFW used to. */
 #include <GL/gl.h>
 #include <GL/glext.h>
-#include "luna-ui/luna-ui.h"
-#define LUNA_WINDOW_IMPLEMENTATION
-#include "luna-ui/luna-window.h"
+#include "luna-ui.h"
 
 #define LUNA_CUR_IMPLEMENTATION
 #include "luna-cur.h"
@@ -142,16 +140,6 @@ static LunaXdgPaths g_xdg;
 
 static int path_is_absolute(const char* path) {
     return path && path[0] == '/';
-}
-
-static int str_has_prefix(const char* text, const char* prefix) {
-    if (!text || !prefix) return 0;
-    while (*prefix) {
-        if (*text == 0 || *text != *prefix) return 0;
-        text++;
-        prefix++;
-    }
-    return 1;
 }
 
 static int path_join2(char* out, size_t n, const char* base, const char* leaf) {
@@ -427,6 +415,7 @@ static unsigned char* plat_load_font(int role, size_t* out_size) {
         static const char* const xdg[] = {
             "luna-shell/skins/fonts/web/Inter-Regular.ttf",
             "luna-shell/fonts/Inter-Regular.ttf",
+            "luna-shell/fonts/Inter-Regular.ttf",
             "vespera/fonts/Inter-Regular.ttf"
         };
         unsigned char* data = shell_try_font_candidates(
@@ -444,6 +433,7 @@ static unsigned char* plat_load_font(int role, size_t* out_size) {
         };
         static const char* const xdg[] = {
             "luna-shell/skins/fonts/web/Inter-Bold.ttf",
+            "luna-shell/fonts/Inter-Bold.ttf",
             "luna-shell/fonts/Inter-Bold.ttf",
             "vespera/fonts/Inter-Bold.ttf"
         };
@@ -476,10 +466,12 @@ static unsigned char* plat_load_font(int role, size_t* out_size) {
         static const char* const solid_xdg[] = {
             "luna-shell/skins/fonts/LunaSymbols-Solid.otf",
             "luna-shell/fonts/LunaSymbols-Solid.otf",
+            "luna-shell/fonts/LunaSymbols-Solid.otf",
             "vespera/fonts/LunaSymbols-Solid.otf"
         };
         static const char* const brands_xdg[] = {
             "luna-shell/skins/fonts/LunaSymbols-Brands.otf",
+            "luna-shell/fonts/LunaSymbols-Brands.otf",
             "luna-shell/fonts/LunaSymbols-Brands.otf",
             "vespera/fonts/LunaSymbols-Brands.otf"
         };
@@ -567,7 +559,6 @@ typedef struct {
     int  super_shortcuts;
     int  dock_magnification;
     int  session_restore;
-    int  wifi_enabled;     /* desired Wi-Fi radio state, persisted across boots */
     char weather_city[64]; /* Open-Meteo city name, default Tokyo */
 } LunaSettings;
 
@@ -608,7 +599,6 @@ static void settings_defaults(void) {
     g_settings.super_shortcuts = 1;
     g_settings.dock_magnification = 1;
     g_settings.session_restore = 1;
-    g_settings.wifi_enabled = 1;
     snprintf(g_settings.weather_city, sizeof(g_settings.weather_city), "Tokyo");
     /* Prefer env / locale-aware default already applied by apply_xkb_session_env. */
     {
@@ -671,8 +661,6 @@ static void settings_load(void) {
                 g_settings.dock_magnification = atoi(val) != 0;
             else if (!strcmp(key, "session_restore"))
                 g_settings.session_restore = atoi(val) != 0;
-            else if (!strcmp(key, "wifi_enabled"))
-                g_settings.wifi_enabled = atoi(val) != 0;
             else if (!strcmp(key, "weather_city"))
                 snprintf(g_settings.weather_city, sizeof(g_settings.weather_city), "%s", val);
         }
@@ -713,7 +701,6 @@ static void settings_save(void) {
     fprintf(f, "super_shortcuts=%d\n", g_settings.super_shortcuts);
     fprintf(f, "dock_magnification=%d\n", g_settings.dock_magnification);
     fprintf(f, "session_restore=%d\n", g_settings.session_restore);
-    fprintf(f, "wifi_enabled=%d\n", g_settings.wifi_enabled);
     fprintf(f, "weather_city=%s\n", g_settings.weather_city);
     fclose(f);
 }
@@ -759,8 +746,6 @@ typedef struct {
     unsigned int titlebar_inactive;
     unsigned int titlebar_frame;
     int  prefer_ssd;      /* recommend server decorations when client unset */
-    int  window_theme;    /* -1 auto | 0 light | 1 dark for Luna UI clients */
-    int  controls_on_left;/* client-side control placement */
 } LunaSkin;
 
 static LunaSkin g_skins[MAX_SKINS];
@@ -773,7 +758,6 @@ static int g_chrome_dock_hidden = 0;
 static void skin_apply_chrome(int skin_idx);
 static void skin_apply_toolkit(int skin_idx);
 static int  skin_apply_wm_decoration(int skin_idx);
-static void skin_export_window_theme(int skin_idx);
 static void skin_chrome_defaults(LunaSkin* skin);
 static unsigned int skin_parse_color(const char* val);
 
@@ -785,11 +769,15 @@ static int path_is_regular(const char* path) {
 static int skin_join(char* out, size_t n, const char* dir, const char* leaf) {
     if (!out || n == 0) return 0;
     if (!leaf || !*leaf) { out[0] = 0; return 1; }
-    if (path_is_absolute(leaf)) {
-        int written = snprintf(out, n, "%s", leaf);
-        return written >= 0 && (size_t)written < n;
+    size_t dl = leaf[0] == '/' ? 0 : strlen(dir);
+    size_t ll = strlen(leaf);
+    if (dl + (dl ? 1 : 0) + ll + 1 > n) { out[0] = 0; return 0; }
+    if (dl) {
+        memcpy(out, dir, dl);
+        out[dl++] = '/';
     }
-    return path_join2(out, n, dir, leaf);
+    memcpy(out + dl, leaf, ll + 1);
+    return 1;
 }
 
 static int skin_find(const char* id) {
@@ -812,8 +800,6 @@ static void skin_chrome_defaults(LunaSkin* skin) {
     skin->titlebar_inactive = 0;
     skin->titlebar_frame = 0;
     skin->prefer_ssd = 0;
-    skin->window_theme = -1;
-    skin->controls_on_left = 1;
 }
 
 /* Accept #RRGGBB, #AARRGGBB, 0xRRGGBB, or 0xAARRGGBB. Missing alpha → opaque. */
@@ -916,12 +902,6 @@ static void skin_add_dir(const char* root, const char* id) {
             skin.titlebar_frame = skin_parse_color(val);
         } else if (!strcmp(key, "prefer_ssd")) {
             skin.prefer_ssd = atoi(val) != 0;
-        } else if (!strcmp(key, "window_theme")) {
-            if (!strcasecmp(val, "dark")) skin.window_theme = 1;
-            else if (!strcasecmp(val, "light")) skin.window_theme = 0;
-            else skin.window_theme = -1;
-        } else if (!strcmp(key, "titlebar_controls")) {
-            skin.controls_on_left = strcasecmp(val, "right") != 0;
         }
     }
     fclose(f);
@@ -955,9 +935,8 @@ static void skin_add_dir(const char* root, const char* id) {
                         if (n + 12 < sizeof(idx)) {
                             snprintf(idx + n, sizeof(idx) - n, "/index.theme");
                             if (path_is_regular(idx)) {
-                                size_t theme_len = strlen(ge->d_name);
-                                if (theme_len >= sizeof(skin.gtk_theme)) continue;
-                                memcpy(skin.gtk_theme, ge->d_name, theme_len + 1);
+                                snprintf(skin.gtk_theme, sizeof(skin.gtk_theme),
+                                         "%s", ge->d_name);
                                 break;
                             }
                         }
@@ -1116,35 +1095,6 @@ static int g_sw_app_idx[MAX_SWITCHER_SLOTS];        /* span.sw_app child of sw_N
 static int g_wm_maximize_label_idx  = -1;           /* mi_label child of wm_maximize */
 static int g_wm_fullscreen_label_idx = -1;          /* mi_label child of wm_fullscreen */
 
-/* IDs touched by recurring status/switcher/filter updates.  Resolve once at
- * bind time instead of scanning the DOM hash/table on every worker sample. */
-enum {
-    UI_MB_CLOCK = 0,
-    UI_MB_BAT,
-    UI_CC_CPU_FILL,
-    UI_CC_MEM_FILL,
-    UI_WG_TIME,
-    UI_WG_DATE,
-    UI_ST_CPU_VAL,
-    UI_ST_CPU_FILL,
-    UI_ST_MEM_VAL,
-    UI_ST_MEM_FILL,
-    UI_ST_DISK_VAL,
-    UI_ST_DISK_FILL,
-    UI_WIN_MENU_TITLE,
-    UI_SWITCHER,
-    UI_CACHE_COUNT
-};
-static const char* const g_ui_cache_ids[UI_CACHE_COUNT] = {
-    "mb_clock", "mb_bat", "cc_cpu_fill", "cc_mem_fill",
-    "wg_time", "wg_date", "st_cpu_val", "st_cpu_fill",
-    "st_mem_val", "st_mem_fill", "st_disk_val", "st_disk_fill",
-    "win_menu_title", "switcher"
-};
-static int g_ui_idx[UI_CACHE_COUNT];
-static int g_lp_app_idx[APP_COUNT];
-static int g_sw_slot_idx[MAX_SWITCHER_SLOTS];
-
 typedef LunaWifiBackend WifiBackend;
 typedef LunaWifiNetwork WifiNetwork;
 #define WIFI_NONE    LUNA_WIFI_NONE
@@ -1209,7 +1159,6 @@ typedef struct {
  * are open.  A fixed array keeps this bounded and allocation-free. */
 static LunaWinEntry  g_wins[MAX_WINDOWS];
 static int           g_win_count = 0;
-static int           g_visible_window_count = 0;
 static LunaTrayEntry g_tray[MAX_TRAY_SLOTS];
 static int           g_tray_count = 0;
 static char          g_shell_state_path[512];
@@ -1233,6 +1182,8 @@ static int g_about_sheet_max = 0;
 static int g_settings_sheet_max = 0;
 
 static void app_set_dot(LunaApp* app, int running);
+static int read_battery_percent(void);
+static const char* read_net_status(void);
 static void set_hidden(int idx, int hidden);
 static int elem_idx_of(LunaElement* e);
 static void toast_show(const char* title, const char* msg, double secs);
@@ -1455,7 +1406,7 @@ static int    g_shell_watch_wd = -1;
 static int    g_shell_state_pending = 1;
 static double g_shell_watch_retry_at = 0.0;
 static char   g_shell_state_dir[512];
-static char   g_shell_state_name[512];
+static char   g_shell_state_name[128];
 
 /* A compositor commonly rewrites state.json for every pointer sample while a
  * client is moved.  Read the first sample promptly, then debounce the rest
@@ -1758,9 +1709,6 @@ static void apply_shell_state_stream(FILE* f) {
     if (geometry_changed) g_window_motion_busy_until = g_now + 0.20;
     g_win_count = wc;
     memcpy(g_wins, wins, (size_t)wc * sizeof(LunaWinEntry));
-    g_visible_window_count = 0;
-    for (int i = 0; i < wc; i++)
-        g_visible_window_count += !wins[i].minimized;
 
     if (state_changed) {
         g_shell_state_hash = h;
@@ -1814,10 +1762,12 @@ static void load_shell_state(void) {
 }
 
 static void win_slot_style(int slot, LunaWinEntry* w) {
-    if (slot < 0 || !w) return;
-    const char* add = w->focused
-        ? (w->minimized ? "active minimized" : "active")
-        : (w->minimized ? "minimized" : NULL);
+    if (slot < 0) return;
+    char add[24] = "";
+    if (w->focused) snprintf(add, sizeof(add), "active");
+    if (w->minimized)
+        snprintf(add + strlen(add), sizeof(add) - strlen(add),
+                 "%sminimized", add[0] ? " " : "");
     luna_update_classes(slot, "active minimized", add);
 }
 
@@ -1830,9 +1780,8 @@ static void tray_slot_style(int slot, LunaTrayEntry* t) {
     snprintf(cls, sizeof(cls), "icon_%s", t->icon);
     /* strip _active suffix for CSS class */
     char* suf = strstr(cls, "_active");
-    int active = suf != NULL;
     if (suf) *suf = 0;
-    if (active)
+    if (strstr(t->icon, "_active"))
         snprintf(cls + strlen(cls), sizeof(cls) - strlen(cls), " active");
     luna_update_classes(slot, remove_icons, cls);
 }
@@ -1895,15 +1844,18 @@ static void update_window_list_ui(void) {
     shell_request_repaint(1); /* LUNA_SURF_MENUBAR */
 }
 
-static int str_contains_ci(const char* hay, const char* needle) {
-    if (!hay || !needle) return 0;
-    if (!*needle) return 1;
+static int str_has_ci(const char* hay, const char* needle) {
+    if (!hay || !needle || !*needle) return 0;
     size_t n = strlen(needle);
     for (const char* p = hay; *p; p++) {
         size_t i = 0;
-        while (i < n && p[i] &&
-               tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i]))
+        while (i < n) {
+            char a = p[i], b = needle[i];
+            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            if (!a || a != b) break;
             i++;
+        }
         if (i == n) return 1;
     }
     return 0;
@@ -1911,7 +1863,7 @@ static int str_contains_ci(const char* hay, const char* needle) {
 
 static int is_browser_cmd(const LunaApp* app, const char* cmd) {
     if (app && !strcmp(app->key, "browser")) return 1;
-    return cmd && (str_contains_ci(cmd, "firefox") || str_contains_ci(cmd, "chrom"));
+    return cmd && (str_has_ci(cmd, "firefox") || str_has_ci(cmd, "chrom"));
 }
 
 /* Remove one exact path entry from LD_LIBRARY_PATH. */
@@ -1956,29 +1908,29 @@ static void sanitize_browser_ld_library_path(void) {
 
 static int app_id_matches_key(const char* app_id, const char* key) {
     if (!app_id || !*app_id || !key || !*key) return 0;
-    if (str_contains_ci(app_id, key)) return 1;
+    if (str_has_ci(app_id, key)) return 1;
     if (!strcmp(key, "files"))
-        return str_contains_ci(app_id, "pcmanfm") || str_contains_ci(app_id, "thunar") ||
-               str_contains_ci(app_id, "nautilus") || str_contains_ci(app_id, "nemo") ||
-               str_contains_ci(app_id, "caja") || str_contains_ci(app_id, "org.gnome.Nautilus");
+        return str_has_ci(app_id, "pcmanfm") || str_has_ci(app_id, "thunar") ||
+               str_has_ci(app_id, "nautilus") || str_has_ci(app_id, "nemo") ||
+               str_has_ci(app_id, "caja") || str_has_ci(app_id, "org.gnome.Nautilus");
     if (!strcmp(key, "terminal"))
-        return str_contains_ci(app_id, "sakura") || str_contains_ci(app_id, "terminal") ||
-               str_contains_ci(app_id, "kitty") || str_contains_ci(app_id, "alacritty") ||
-               str_contains_ci(app_id, "xterm") || str_contains_ci(app_id, "foot");
+        return str_has_ci(app_id, "sakura") || str_has_ci(app_id, "terminal") ||
+               str_has_ci(app_id, "kitty") || str_has_ci(app_id, "alacritty") ||
+               str_has_ci(app_id, "xterm") || str_has_ci(app_id, "foot");
     if (!strcmp(key, "browser"))
-        return str_contains_ci(app_id, "firefox") || str_contains_ci(app_id, "chrome") ||
-               str_contains_ci(app_id, "chromium") || str_contains_ci(app_id, "brave") ||
-               str_contains_ci(app_id, "epiphany") || str_contains_ci(app_id, "org.mozilla");
+        return str_has_ci(app_id, "firefox") || str_has_ci(app_id, "chrome") ||
+               str_has_ci(app_id, "chromium") || str_has_ci(app_id, "brave") ||
+               str_has_ci(app_id, "epiphany") || str_has_ci(app_id, "org.mozilla");
     if (!strcmp(key, "editor"))
-        return str_contains_ci(app_id, "gedit") || str_contains_ci(app_id, "mousepad") ||
-               str_contains_ci(app_id, "leafpad") || str_contains_ci(app_id, "TextEditor") ||
-               str_contains_ci(app_id, "code") || str_contains_ci(app_id, "kate");
+        return str_has_ci(app_id, "gedit") || str_has_ci(app_id, "mousepad") ||
+               str_has_ci(app_id, "leafpad") || str_has_ci(app_id, "TextEditor") ||
+               str_has_ci(app_id, "code") || str_has_ci(app_id, "kate");
     if (!strcmp(key, "music"))
-        return str_contains_ci(app_id, "music") || str_contains_ci(app_id, "rhythmbox") ||
-               str_contains_ci(app_id, "spotify");
+        return str_has_ci(app_id, "music") || str_has_ci(app_id, "rhythmbox") ||
+               str_has_ci(app_id, "spotify");
     if (!strcmp(key, "settings"))
-        return str_contains_ci(app_id, "control-center") || str_contains_ci(app_id, "Settings") ||
-               str_contains_ci(app_id, "gnome-control");
+        return str_has_ci(app_id, "control-center") || str_has_ci(app_id, "Settings") ||
+               str_has_ci(app_id, "gnome-control");
     return 0;
 }
 
@@ -2027,7 +1979,7 @@ static void update_dock_dots(void) {
 }
 
 static void update_switcher_ui(void) {
-    int root = g_ui_idx[UI_SWITCHER];
+    int root = luna_get_element_by_id("switcher");
     if (root < 0) return;
     if (!g_switcher_visible || g_switcher_count <= 0) {
         set_hidden(root, 1);
@@ -2035,7 +1987,9 @@ static void update_switcher_ui(void) {
     }
     set_hidden(root, 0);
     for (int s = 0; s < MAX_SWITCHER_SLOTS; s++) {
-        int idx = g_sw_slot_idx[s];
+        char id[16];
+        snprintf(id, sizeof(id), "sw_%d", s);
+        int idx = luna_get_element_by_id(id);
         if (idx < 0) continue;
         if (s >= g_switcher_count) {
             set_hidden(idx, 1);
@@ -2164,6 +2118,17 @@ static int elem_idx_of(LunaElement* e) {
     return -1;
 }
 
+static int ci_contains(const char* hay, const char* needle) {
+    if (!needle[0]) return 1;
+    size_t nl = strlen(needle);
+    for (const char* p = hay; *p; p++) {
+        size_t i = 0;
+        while (i < nl && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) i++;
+        if (i == nl) return 1;
+    }
+    return 0;
+}
+
 /* Toggle visibility via the "hidden" class so display_mode is recomputed. */
 static void set_hidden(int idx, int hidden) {
     if (idx < 0) return;
@@ -2215,12 +2180,6 @@ static int wifi_request_connect(const char* id, const char* passphrase) {
 
 static int wifi_request_disconnect(const char* id) {
     int ok = luna_wifi_request_disconnect(id);
-    if (ok) { g_wifi_busy = 1; g_last_wifi_request = g_now; }
-    return ok;
-}
-
-static int wifi_request_powered(int powered) {
-    int ok = luna_wifi_request_set_powered(powered != 0);
     if (ok) { g_wifi_busy = 1; g_last_wifi_request = g_now; }
     return ok;
 }
@@ -2278,10 +2237,6 @@ static void wifi_update_ui(void) {
     int p = luna_get_element_by_id("wifi_power");
     if (p >= 0) {
         luna_update_classes(p, "on", g_wifi_powered ? "on" : NULL);
-    }
-    int cc = luna_get_element_by_id("cc_wifi");
-    if (cc >= 0) {
-        luna_update_classes(cc, "on", g_wifi_powered ? "on" : NULL);
     }
     int st = luna_get_element_by_id("wifi_status");
     if (st >= 0) luna_set_text(st,
@@ -2659,8 +2614,7 @@ static void skin_apply_toolkit(int skin_idx) {
             if (!path_join2(themes, sizeof(themes), g_xdg.data_home, "themes") ||
                 !mkdir_p_mode(themes, 0700))
                 return;
-            if (!path_join2(theme_dst, sizeof(theme_dst), themes, skin->gtk_theme))
-                return;
+            snprintf(theme_dst, sizeof(theme_dst), "%s/%s", themes, skin->gtk_theme);
             unlink(theme_dst);
             symlink(theme_src, theme_dst);
             setenv("GTK_THEME", skin->gtk_theme, 1);
@@ -2739,70 +2693,6 @@ static int skin_apply_wm_decoration(int skin_idx) {
     snprintf(cmd, sizeof(cmd), "wm_config prefer_ssd %d", skin->prefer_ssd ? 1 : 0);
     ok &= shell_send_cmd(cmd);
     return ok;
-}
-
-
-static int skin_color_is_dark(unsigned int argb) {
-    if (!argb) return 1;
-    unsigned r = (argb >> 16) & 255u;
-    unsigned g = (argb >> 8) & 255u;
-    unsigned b = argb & 255u;
-    return (r * 299u + g * 587u + b * 114u) < 128000u;
-}
-
-static void skin_export_window_theme(int skin_idx) {
-    if (skin_idx < 0 || skin_idx >= g_skin_count) skin_idx = 0;
-    const LunaSkin* skin = &g_skins[skin_idx];
-    int dark = skin->window_theme >= 0 ? skin->window_theme :
-               skin_color_is_dark(skin->titlebar_active);
-    LunaWindowTheme theme;
-    luna_window_theme_default(&theme, dark ? LUNA_WINDOW_THEME_DARK : LUNA_WINDOW_THEME_LIGHT);
-    int style = skin->titlebar_style >= 0 ? skin->titlebar_style : g_settings.classic_titlebar;
-    if (style < 0) style = 0;
-    if (style > 2) style = 2;
-    theme.titlebar_style = style;
-    theme.controls_on_left = skin->controls_on_left;
-    if (skin->titlebar_active) theme.titlebar_active = skin->titlebar_active;
-    if (skin->titlebar_inactive) theme.titlebar_inactive = skin->titlebar_inactive;
-    if (skin->titlebar_frame) theme.titlebar_frame = skin->titlebar_frame;
-    if (dark && skin_idx == 0) {
-        theme.accent = 0xff8d7bffu;
-        theme.accent_hover = 0xff6a52e0u;
-    }
-
-    char dir[PATH_MAX], path[PATH_MAX], tmp[PATH_MAX];
-    if (!g_xdg.runtime_dir[0] ||
-        !xdg_app_dir(dir, sizeof(dir), g_xdg.runtime_dir, "luna-shell", 1) ||
-        !path_join2(path, sizeof(path), dir, "window-theme.conf")) return;
-    int z = snprintf(tmp, sizeof(tmp), "%s.tmp-%lu", path, (unsigned long)getpid());
-    if (z < 0 || (size_t)z >= sizeof(tmp)) return;
-    FILE* f = fopen(tmp, "w");
-    if (!f) return;
-    fprintf(f, "# Luna Shell runtime window theme — auto-generated\n");
-    fprintf(f, "mode=%s\n", dark ? "dark" : "light");
-    fprintf(f, "window_background=0x%08x\n", theme.window_background);
-    fprintf(f, "surface=0x%08x\n", theme.surface);
-    fprintf(f, "surface_secondary=0x%08x\n", theme.surface_secondary);
-    fprintf(f, "border=0x%08x\n", theme.border);
-    fprintf(f, "text=0x%08x\n", theme.text);
-    fprintf(f, "text_secondary=0x%08x\n", theme.text_secondary);
-    fprintf(f, "accent=0x%08x\n", theme.accent);
-    fprintf(f, "accent_hover=0x%08x\n", theme.accent_hover);
-    fprintf(f, "danger=0x%08x\n", theme.danger);
-    fprintf(f, "titlebar_active=0x%08x\n", theme.titlebar_active);
-    fprintf(f, "titlebar_inactive=0x%08x\n", theme.titlebar_inactive);
-    fprintf(f, "titlebar_frame=0x%08x\n", theme.titlebar_frame);
-    fprintf(f, "titlebar_height=%.1f\n", theme.titlebar_height);
-    fprintf(f, "corner_radius=%.1f\n", theme.corner_radius);
-    fprintf(f, "dialog_radius=%.1f\n", theme.dialog_radius);
-    fprintf(f, "control_size=%.1f\n", theme.control_size);
-    fprintf(f, "titlebar_style=%d\n", theme.titlebar_style);
-    fprintf(f, "controls_on_left=%d\n", theme.controls_on_left ? 1 : 0);
-    if (fclose(f) != 0) { unlink(tmp); return; }
-    chmod(tmp, 0600);
-    if (rename(tmp, path) != 0) { unlink(tmp); return; }
-    setenv("LUNA_WINDOW_THEME_FILE", path, 1);
-    setenv("LUNA_WINDOW_THEME", dark ? "dark" : "light", 1);
 }
 
 static void settings_mark_kb(const char* layout) {
@@ -3881,21 +3771,19 @@ static void on_wifi_menu(LunaElement* e) {
 
 static void on_wifi_power(LunaElement* e) {
     (void)e;
-    int desired = !g_wifi_powered;
-    if (!wifi_request_powered(desired)) {
+    if (!luna_wifi_request_toggle()) {
         toast_show("Wi-Fi", "Wi-Fi worker is unavailable", 2.5);
         return;
     }
-    g_settings.wifi_enabled = desired;
-    g_wifi_powered = desired; /* optimistic UI; next worker snapshot verifies it */
-    settings_save();
+    g_wifi_busy = 1;
+    g_last_wifi_request = g_now;
     wifi_update_ui();
 }
 
 static int wifi_row_number(LunaElement* e) {
     for (int idx = elem_idx_of(e); idx != -1; idx = luna_element_at(idx)->parent_idx) {
         const char* id = luna_element_at(idx)->id;
-        if (str_has_prefix(id, "wifi_") && isdigit((unsigned char)id[5])) return atoi(id + 5);
+        if (!strncmp(id, "wifi_", 5) && isdigit((unsigned char)id[5])) return atoi(id + 5);
     }
     return -1;
 }
@@ -4347,7 +4235,7 @@ static void on_wm_toggle(LunaElement* e) {
     const char* id = NULL;
     for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
         const char* cand = luna_element_at(i)->id;
-        if (str_has_prefix(cand, "wm_")) { id = cand; break; }
+        if (cand && !strncmp(cand, "wm_", 3)) { id = cand; break; }
     }
     if (!id) return;
     int* value = NULL;
@@ -4370,7 +4258,7 @@ static void on_wm_gap(LunaElement* e) {
     const char* id = NULL;
     for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
         const char* cand = luna_element_at(i)->id;
-        if (str_has_prefix(cand, "wm_gap_")) { id = cand; break; }
+        if (cand && !strncmp(cand, "wm_gap_", 7)) { id = cand; break; }
     }
     if (!id) return;
     int gap = atoi(id + 7);
@@ -4536,15 +4424,15 @@ static void on_cc_toggle(LunaElement* e) {
     if (idx == -1) return;
     LunaElement* t = luna_element_at(idx);
     int now_on = strstr(t->class_name, "on") == NULL;
-    if (!strcmp(t->id, "cc_wifi")) {
-        on_wifi_power(e);
-        return;
-    }
     luna_update_classes(idx, "on", now_on ? "on" : NULL);
     /* Keep the knob's layout position stable and let the .on CSS transform
      * provide the entire animation.  Overriding rel_x here used to add a
      * second 18 px movement on top of translateX(), and made the transformed
      * child jump out from under the pointer during release hit-testing. */
+    if (!strcmp(t->id, "cc_wifi")) {
+        wifi_refresh();
+        on_wifi_power(e);
+    }
 }
 
 /* Slider geometry is re-clamped every frame, but the three element ids never
@@ -4675,7 +4563,6 @@ static void dock_magnify_tick(void) {
 
     const float peak = 1.32f;
     const float sigma = 66.0f;
-    const float cutoff = sigma * 3.0f; /* <0.4% scale contribution beyond this */
     int changed = 0;
     for (int i = 0; i < g_dock_icon_count; i++) {
         LunaElement* e = luna_element_at(g_dock_icon_idx[i]);
@@ -4684,10 +4571,8 @@ static void dock_magnify_tick(void) {
         if (active) {
             float cx = e->x + e->w * 0.5f;
             float dx = (float)g_luna_mx - cx;
-            if (fabsf(dx) < cutoff) {
-                float g = expf(-(dx * dx) / (2.0f * sigma * sigma));
-                scale = 1.0f + (peak - 1.0f) * g;
-            }
+            float g = expf(-(dx * dx) / (2.0f * sigma * sigma));
+            scale = 1.0f + (peak - 1.0f) * g;
         }
         float ty = -(scale - 1.0f) * e->h * 0.18f;
         if (fabsf(e->transform_scale - scale) > 0.001f ||
@@ -4774,7 +4659,7 @@ static void poll_shell_state(void) {
         }
         g_win_menu_target = wid;
         win_menu_set_maximize_label(w);
-        int t = g_ui_idx[UI_WIN_MENU_TITLE];
+        int t = luna_get_element_by_id("win_menu_title");
         if (t >= 0) luna_set_text(t, title);
         dismiss_luna_menu(g_luna_menu_idx);
         dismiss_cc(g_cc_idx);
@@ -5303,8 +5188,9 @@ static void on_tray_click(LunaElement* e) {
  * render thread and showed up as a regular hitch.  Keep the resolved width in
  * sync directly; the next unrelated layout pass will preserve it through the
  * matching css_width value. */
-static int set_bar_fill(int fi, float pct) {
-    if (fi < 0) return 0;
+static int set_bar_fill(const char* fill_id, float pct) {
+    int fi = luna_get_element_by_id(fill_id);
+    if (fi == -1) return 0;
     LunaElement* fill = luna_element_at(fi);
     float bar_w = 176.0f;
     int p = fill->parent_idx;
@@ -5339,7 +5225,9 @@ static int text_would_change(int idx, const char* buf) {
  * mutations; all procfs, sysfs, filesystem and time-zone work happened on the
  * poller thread before the eventfd woke this loop. */
 static int shell_desktop_busy(void) {
-    return g_visible_window_count > 0;
+    for (int i = 0; i < g_win_count; i++)
+        if (!g_wins[i].minimized) return 1;
+    return 0;
 }
 
 static void update_async_status(void) {
@@ -5359,7 +5247,7 @@ static void update_async_status(void) {
         pending_bg = fresh;
         pending_bg_valid = 1;
 
-        int idx = g_ui_idx[UI_MB_CLOCK];
+        int idx = luna_get_element_by_id("mb_clock");
         if (fresh.mb_clock[0] && text_would_change(idx, fresh.mb_clock)) {
             luna_set_text_paint_only(idx, fresh.mb_clock);
             dirty_mb |= repaint_matters(idx);
@@ -5368,12 +5256,12 @@ static void update_async_status(void) {
         /* Control Center is a small independent surface, so its live meters do
          * not force a wallpaper-layer repaint. */
         if (is_shown(g_cc_idx)) {
-            if (set_bar_fill(g_ui_idx[UI_CC_CPU_FILL], fresh.cpu)) dirty_cc = 1;
-            if (set_bar_fill(g_ui_idx[UI_CC_MEM_FILL], (float)fresh.memory)) dirty_cc = 1;
+            if (set_bar_fill("cc_cpu_fill", fresh.cpu)) dirty_cc = 1;
+            if (set_bar_fill("cc_mem_fill", (float)fresh.memory)) dirty_cc = 1;
         }
 
         g_cached_bat = fresh.battery;
-        idx = g_ui_idx[UI_MB_BAT];
+        idx = luna_get_element_by_id("mb_bat");
         const char* bat_icon = g_cached_bat >= 0 ? "\uf240" : "\uf1e6";
         if (g_cached_bat >= 0) snprintf(buf, sizeof(buf), "%d%%", g_cached_bat);
         else snprintf(buf, sizeof(buf), "AC");
@@ -5388,7 +5276,7 @@ static void update_async_status(void) {
         }
 
         snprintf(g_cached_net, sizeof(g_cached_net), "%s", fresh.network);
-        idx = g_mb_wifi_idx;
+        idx = luna_get_element_by_id("mb_wifi");
         if (g_mb_wifi_icon_idx >= 0 &&
             text_would_change(g_mb_wifi_icon_idx, "\uf1eb")) {
             luna_set_text_paint_only(g_mb_wifi_icon_idx, "\uf1eb");
@@ -5405,9 +5293,9 @@ static void update_async_status(void) {
 
     if (!pending_bg_valid) return;
 
-    int wg_time_idx = g_ui_idx[UI_WG_TIME];
-    int wg_date_idx = g_ui_idx[UI_WG_DATE];
-    int stats_live = repaint_matters(g_ui_idx[UI_ST_CPU_VAL]);
+    int wg_time_idx = luna_get_element_by_id("wg_time");
+    int wg_date_idx = luna_get_element_by_id("wg_date");
+    int stats_live = repaint_matters(luna_get_element_by_id("st_cpu_val"));
     int clock_widget_live = repaint_matters(wg_time_idx) || repaint_matters(wg_date_idx);
     int bg_widgets_live = stats_live || clock_widget_live;
     if (!bg_widgets_live) {
@@ -5438,34 +5326,34 @@ static void update_async_status(void) {
     }
 
     if (stats_live) {
-        idx = g_ui_idx[UI_ST_CPU_VAL];
+        idx = luna_get_element_by_id("st_cpu_val");
         snprintf(buf, sizeof(buf), "%d%%", (int)snap.cpu);
         if (text_would_change(idx, buf)) {
             luna_set_text_paint_only(idx, buf);
             dirty_bg |= repaint_matters(idx);
         }
-        if (set_bar_fill(g_ui_idx[UI_ST_CPU_FILL], snap.cpu))
-            dirty_bg |= repaint_matters(g_ui_idx[UI_ST_CPU_FILL]);
+        if (set_bar_fill("st_cpu_fill", snap.cpu))
+            dirty_bg |= repaint_matters(luna_get_element_by_id("st_cpu_fill"));
 
-        idx = g_ui_idx[UI_ST_MEM_VAL];
+        idx = luna_get_element_by_id("st_mem_val");
         snprintf(buf, sizeof(buf), "%d%%", snap.memory);
         if (text_would_change(idx, buf)) {
             luna_set_text_paint_only(idx, buf);
             dirty_bg |= repaint_matters(idx);
         }
-        if (set_bar_fill(g_ui_idx[UI_ST_MEM_FILL], (float)snap.memory))
-            dirty_bg |= repaint_matters(g_ui_idx[UI_ST_MEM_FILL]);
+        if (set_bar_fill("st_mem_fill", (float)snap.memory))
+            dirty_bg |= repaint_matters(luna_get_element_by_id("st_mem_fill"));
 
         if (snap.disk_valid &&
-            repaint_matters(g_ui_idx[UI_ST_DISK_VAL])) {
-            idx = g_ui_idx[UI_ST_DISK_VAL];
+            repaint_matters(luna_get_element_by_id("st_disk_val"))) {
+            idx = luna_get_element_by_id("st_disk_val");
             snprintf(buf, sizeof(buf), "%.0fG free", snap.disk_free_gb);
             if (text_would_change(idx, buf)) {
                 luna_set_text_paint_only(idx, buf);
                 dirty_bg |= repaint_matters(idx);
             }
-            if (set_bar_fill(g_ui_idx[UI_ST_DISK_FILL], snap.disk_used))
-                dirty_bg |= repaint_matters(g_ui_idx[UI_ST_DISK_FILL]);
+            if (set_bar_fill("st_disk_fill", snap.disk_used))
+                dirty_bg |= repaint_matters(luna_get_element_by_id("st_disk_fill"));
         }
     }
 
@@ -5532,9 +5420,11 @@ static void update_launchpad_filter(void) {
     if (!strcmp(q, g_lp_query)) return;
     snprintf(g_lp_query, sizeof(g_lp_query), "%s", q);
     for (int i = 0; i < APP_COUNT; i++) {
-        int idx = g_lp_app_idx[i];
-        if (idx >= 0)
-            luna_element_at(idx)->display_none = !str_contains_ci(g_apps[i].name, q);
+        char tile_id[64];
+        snprintf(tile_id, sizeof(tile_id), "lp_%s", g_apps[i].key);
+        int idx = luna_get_element_by_id(tile_id);
+        if (idx != -1)
+            luna_element_at(idx)->display_none = !ci_contains(g_apps[i].name, q);
     }
     luna_mark_layout_dirty();
 }
@@ -5624,11 +5514,6 @@ static void bind_indices(void) {
     g_mb_weather_idx    = luna_get_element_by_id("mb_weather");
     g_weather_menu_idx  = luna_get_element_by_id("weather_menu");
 
-    for (int i = 0; i < UI_CACHE_COUNT; i++)
-        g_ui_idx[i] = luna_get_element_by_id(g_ui_cache_ids[i]);
-    for (int i = 0; i < APP_COUNT; i++) g_lp_app_idx[i] = -1;
-    for (int i = 0; i < MAX_SWITCHER_SLOTS; i++) g_sw_slot_idx[i] = -1;
-
     /* The redesigned markup keeps the about box's visual class but no longer
      * includes sheet_box.  The shared class supplies its absolute positioning,
      * stacking and clipping, all of which the C-side centering code relies on. */
@@ -5662,8 +5547,7 @@ static void bind_indices(void) {
         snprintf(id, sizeof(id), "dock_%s", g_apps[i].key);
         wire_subtree(luna_get_element_by_id(id), on_dock_click);
         snprintf(id, sizeof(id), "lp_%s", g_apps[i].key);
-        g_lp_app_idx[i] = luna_get_element_by_id(id);
-        wire_subtree(g_lp_app_idx[i], on_launch_app);
+        wire_subtree(luna_get_element_by_id(id), on_launch_app);
         app_set_dot(&g_apps[i], 0);
     }
     wire_subtree(luna_get_element_by_id("mb_logo"),       on_luna_menu);
@@ -5807,11 +5691,11 @@ static void bind_indices(void) {
     int wm_max_parent  = luna_get_element_by_id("wm_maximize");
     int wm_fs_parent   = luna_get_element_by_id("wm_fullscreen");
 
-    /* Collect sw_N parent indices once for both binding and runtime updates. */
+    /* Collect sw_N parent indices once to avoid repeated ID lookups inside loop */
+    int sw_parent[MAX_SWITCHER_SLOTS];
     for (int s = 0; s < MAX_SWITCHER_SLOTS; s++) {
-        char id[16];
-        snprintf(id, sizeof(id), "sw_%d", s);
-        g_sw_slot_idx[s] = luna_get_element_by_id(id);
+        char id[16]; snprintf(id, sizeof(id), "sw_%d", s);
+        sw_parent[s] = luna_get_element_by_id(id);
     }
 
     int n = luna_element_count();
@@ -5834,12 +5718,12 @@ static void bind_indices(void) {
         /* switcher title / app labels */
         if (strstr(e->class_name, "sw_title")) {
             for (int s = 0; s < MAX_SWITCHER_SLOTS; s++)
-                if (g_sw_slot_idx[s] == p) { g_sw_title_idx[s] = i; break; }
+                if (sw_parent[s] == p) { g_sw_title_idx[s] = i; break; }
             continue;
         }
         if (strstr(e->class_name, "sw_app")) {
             for (int s = 0; s < MAX_SWITCHER_SLOTS; s++)
-                if (g_sw_slot_idx[s] == p) { g_sw_app_idx[s] = i; break; }
+                if (sw_parent[s] == p) { g_sw_app_idx[s] = i; break; }
             continue;
         }
         /* mb_bat / mb_wifi icons and wm_* mi_labels */
@@ -5853,15 +5737,9 @@ static void bind_indices(void) {
         }
     }
 
-    /* Initial Control Center state uses the persisted Wi-Fi preference. */
-    int cc_wifi = luna_get_element_by_id("cc_wifi");
-    if (cc_wifi != -1)
-        luna_update_classes(cc_wifi, "on", g_settings.wifi_enabled ? "on" : NULL);
+    /* Initial Control Center knob positions (wifi & bt start "on") */
     int k = luna_get_element_by_id("cc_wifi_knob");
-    if (k != -1) {
-        luna_element_at(k)->rel_x = g_settings.wifi_enabled ? 21.0f : 3.0f;
-        luna_element_at(k)->pos_overridden_x = 1;
-    }
+    if (k != -1) { luna_element_at(k)->rel_x = 21.0f; luna_element_at(k)->pos_overridden_x = 1; }
     k = luna_get_element_by_id("cc_bt_knob");
     if (k != -1) { luna_element_at(k)->rel_x = 21.0f; luna_element_at(k)->pos_overridden_x = 1; }
 }
@@ -5877,6 +5755,8 @@ static void bind_indices(void) {
  *                                       compositor.
  * Selection is automatic at runtime, based on WAYLAND_DISPLAY.
  * ──────────────────────────────────────────────────────────────────── */
+
+#include <sys/mman.h>
 
 typedef struct {
     int  (*start)(void);
@@ -5935,12 +5815,6 @@ static void* plat_proc(const char* n) {
 static void  plat_close(void)         { g_should_close = 1; }
 static void  plat_iconify(void)       { /* no window-manager chrome in either backend */ }
 static void  plat_maximize(void)      { /* both backends already run fullscreen */ }
-static void  plat_begin_move(void)      { /* shell root is not a movable toplevel */ }
-static void  plat_begin_resize(int edge){ (void)edge; }
-static void  plat_set_title(const char* title) { (void)title; }
-static int   plat_system_notify(const char* app, int kind, const char* title, const char* message) {
-    (void)app; (void)kind; toast_show(title ? title : "Luna", message ? message : "", 4.0); return 1;
-}
 static void  plat_cursor(int type) {
     if (g_backend && g_backend->set_cursor) g_backend->set_cursor(type);
 }
@@ -6987,13 +6861,6 @@ static void shell_request_repaint(int surf_idx) {
         g_surf_dirty |= (1u << surf_idx);
 }
 
-/* luna-window.h (and other LUNA_UI_NO_PLATFORM hosts) call this instead of a
- * GLFW/native platform backend. Mark every layer dirty so dialogs/toasts
- * appear on the next frame. */
-void luna_app_request_redraw(void) {
-    shell_request_repaint(-1);
-}
-
 /* True only when applying wallpaper-widget data will not introduce an extra
  * full-screen frame.  On Wayland, a dirty background layer or an already-live
  * wallpaper animation supplies that frame.  KMS/X11 use one framebuffer, so
@@ -7753,7 +7620,6 @@ static void skin_apply_chrome(int skin_idx) {
         if (g_wl.display) wl_display_flush(g_wl.display);
     }
     skin_apply_wm_decoration(skin_idx);
-    skin_export_window_theme(skin_idx);
 }
 
 static void surf_update_input_region(LunaSurface* s) {
@@ -8822,10 +8688,6 @@ int main(int argc, char** argv) {
         .request_close   = plat_close,
         .iconify         = plat_iconify,
         .maximize_toggle = plat_maximize,
-        .begin_move      = plat_begin_move,
-        .begin_resize    = plat_begin_resize,
-        .set_title       = plat_set_title,
-        .system_notify   = plat_system_notify,
         .load_font       = plat_load_font,
         .struct_size     = sizeof(LunaPlatform),
         .api_version     = LUNA_UI_API_VERSION,
@@ -8952,8 +8814,6 @@ int main(int argc, char** argv) {
         g_wifi_service_available = 1;
         g_wifi_busy = 1;
         g_last_wifi_request = plat_time();
-        if (!luna_wifi_request_set_powered(g_settings.wifi_enabled))
-            fprintf(stderr, "[luna-shell] warning: cannot restore saved Wi-Fi state\n");
     }
 
     g_now = plat_time();
@@ -8961,7 +8821,7 @@ int main(int argc, char** argv) {
     session_restore_schedule();
     weather_request(g_settings.weather_city);
 
-    double last    = g_now;
+    double last    = plat_time();
     int    prev_ww = 0, prev_wh = 0;
     LunaSliderIds bright_slider = { .thumb = -1, .fill = -1, .track = -1 };
     LunaSliderIds vol_slider    = { .thumb = -1, .fill = -1, .track = -1 };

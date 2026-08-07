@@ -63,6 +63,7 @@ int  luna_wifi_init(const LunaWifiConfig* config);
 void luna_wifi_shutdown(void);
 int  luna_wifi_request_refresh(void);
 int  luna_wifi_request_toggle(void);
+int  luna_wifi_request_set_powered(int powered);
 int  luna_wifi_request_scan(void);
 int  luna_wifi_request_connect(const char* id, const char* passphrase);
 int  luna_wifi_request_disconnect(const char* id);
@@ -105,6 +106,7 @@ extern char** environ;
 typedef enum LunaWifiCommandType {
     LUNA_WIFI_CMD_REFRESH = 1,
     LUNA_WIFI_CMD_TOGGLE,
+    LUNA_WIFI_CMD_SET_POWERED,
     LUNA_WIFI_CMD_SCAN,
     LUNA_WIFI_CMD_CONNECT,
     LUNA_WIFI_CMD_DISCONNECT
@@ -112,6 +114,7 @@ typedef enum LunaWifiCommandType {
 
 typedef struct LunaWifiCommand {
     LunaWifiCommandType type;
+    int powered;
     char id[192];
     char passphrase[128];
 } LunaWifiCommand;
@@ -488,13 +491,18 @@ static int luna_wifi_do_command(const LunaWifiCommand* command, const LunaWifiSn
     LunaWifiBackend backend = before ? before->backend : LUNA_WIFI_NONE;
     int powered = before ? before->powered : 0;
     if (command->type == LUNA_WIFI_CMD_REFRESH) return 1;
-    if (command->type == LUNA_WIFI_CMD_TOGGLE) {
+    if (command->type == LUNA_WIFI_CMD_TOGGLE ||
+        command->type == LUNA_WIFI_CMD_SET_POWERED) {
+        int target = command->type == LUNA_WIFI_CMD_SET_POWERED
+            ? (command->powered != 0) : !powered;
+        if (command->type == LUNA_WIFI_CMD_SET_POWERED && target == powered)
+            return 1;
         if (backend == LUNA_WIFI_CONNMAN) {
-            const char* const argv[] = { "connmanctl", powered ? "disable" : "enable", "wifi", NULL };
+            const char* const argv[] = { "connmanctl", target ? "enable" : "disable", "wifi", NULL };
             return luna_wifi_run_wait(argv);
         }
         if (backend == LUNA_WIFI_NMCLI) {
-            const char* const argv[] = { "nmcli", "radio", "wifi", powered ? "off" : "on", NULL };
+            const char* const argv[] = { "nmcli", "radio", "wifi", target ? "on" : "off", NULL };
             return luna_wifi_run_wait(argv);
         }
         return 0;
@@ -589,11 +597,12 @@ static void* luna_wifi_thread_main(void* unused) {
     return NULL;
 }
 
-static int luna_wifi_enqueue(LunaWifiCommandType type, const char* id, const char* passphrase) {
+static int luna_wifi_enqueue(LunaWifiCommandType type, int powered, const char* id, const char* passphrase) {
     if (!g_luna_wifi.initialized) return 0;
     LunaWifiCommand command;
     memset(&command, 0, sizeof(command));
     command.type = type;
+    command.powered = powered != 0;
     if (id) snprintf(command.id, sizeof(command.id), "%s", id);
     if (passphrase) snprintf(command.passphrase, sizeof(command.passphrase), "%s", passphrase);
 
@@ -665,16 +674,19 @@ void luna_wifi_shutdown(void) {
     memset(&g_luna_wifi, 0, sizeof(g_luna_wifi));
 }
 
-int luna_wifi_request_refresh(void) { return luna_wifi_enqueue(LUNA_WIFI_CMD_REFRESH, NULL, NULL); }
-int luna_wifi_request_toggle(void) { return luna_wifi_enqueue(LUNA_WIFI_CMD_TOGGLE, NULL, NULL); }
-int luna_wifi_request_scan(void) { return luna_wifi_enqueue(LUNA_WIFI_CMD_SCAN, NULL, NULL); }
+int luna_wifi_request_refresh(void) { return luna_wifi_enqueue(LUNA_WIFI_CMD_REFRESH, 0, NULL, NULL); }
+int luna_wifi_request_toggle(void) { return luna_wifi_enqueue(LUNA_WIFI_CMD_TOGGLE, 0, NULL, NULL); }
+int luna_wifi_request_set_powered(int powered) {
+    return luna_wifi_enqueue(LUNA_WIFI_CMD_SET_POWERED, powered != 0, NULL, NULL);
+}
+int luna_wifi_request_scan(void) { return luna_wifi_enqueue(LUNA_WIFI_CMD_SCAN, 0, NULL, NULL); }
 int luna_wifi_request_connect(const char* id, const char* passphrase) {
     if (!id || !*id) return 0;
-    return luna_wifi_enqueue(LUNA_WIFI_CMD_CONNECT, id, passphrase ? passphrase : "");
+    return luna_wifi_enqueue(LUNA_WIFI_CMD_CONNECT, 0, id, passphrase ? passphrase : "");
 }
 int luna_wifi_request_disconnect(const char* id) {
     if (!id || !*id) return 0;
-    return luna_wifi_enqueue(LUNA_WIFI_CMD_DISCONNECT, id, NULL);
+    return luna_wifi_enqueue(LUNA_WIFI_CMD_DISCONNECT, 0, id, NULL);
 }
 
 int luna_wifi_consume(LunaWifiSnapshot* out, unsigned long long* last_generation) {
