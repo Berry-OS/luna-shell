@@ -512,6 +512,12 @@ impl Server {
       // display instead of letting them queue work that is thrown away, and it
       // keeps frame callbacks aligned with vblank.
       if !self.backend.present_busy() {
+        // Interactive resize stores only the newest size while a flip is in
+        // flight.  Flush it here, at display cadence.  Previously it was
+        // flushed only as a side effect of receiving another client request,
+        // so a quiet GLFW/GTK window could move its server frame while its
+        // content never received a matching configure.
+        self.flush_wm_actions();
         if self.dirty {
           self.composite_and_present();
           self.dirty = false;
@@ -1313,27 +1319,29 @@ impl Server {
       // First map of a toplevel — raise, place in usable area, activate.
       if mapped && attach && !was_mapped {
         let cascade = (self.window_stack.len().saturating_sub(1) as i32) * 28;
-        let (buf_w, buf_h) = match client.objects.get(&id) {
-          Some(Object {
-            role: Role::Surface(s),
-            ..
-          }) => s
-            .current_buffer
-            .as_ref()
-            .map(|b| (b.width, b.height))
-            .unwrap_or((640, 480)),
-          _ => (640, 480),
-        };
+        let child_geom = Self::surface_geometry_in(client, id).unwrap_or((0, 0, 640, 480));
+        let parent_geom = Self::toplevel_parent_surface_in(client, id)
+          .and_then(|parent| Self::surface_geometry_in(client, parent));
         let (ux, uy, uw, uh) = self.usable_area();
         if let Some(Object {
           role: Role::Surface(s),
           ..
         }) = client.objects.get_mut(&id)
         {
-          // Absolute coords: centre in usable area, cascade so stacks don't overlap.
+          // Transient dialogs are centered over their parent and kept inside
+          // the usable output. Ordinary windows retain the desktop cascade.
           if s.x == 0 && s.y == 0 {
-            s.x = ux + ((uw - buf_w) / 2).max(0) + cascade;
-            s.y = uy + ((uh - buf_h) / 2).max(0) + cascade;
+            if let Some((px, py, pw, ph)) = parent_geom {
+              let (_, _, cw, ch) = child_geom;
+              let visible_x = (px + (pw - cw) / 2).clamp(ux, ux + (uw - cw).max(0));
+              let visible_y = (py + (ph - ch) / 2).clamp(uy, uy + (uh - ch).max(0));
+              // window_geometry may start inside a shadow-padded buffer.
+              s.x = visible_x - child_geom.0;
+              s.y = visible_y - child_geom.1;
+            } else {
+              s.x = ux + ((uw - child_geom.2) / 2).max(0) + cascade;
+              s.y = uy + ((uh - child_geom.3) / 2).max(0) + cascade;
+            }
           }
         }
         self.raise_surface(fd, id);
@@ -1449,7 +1457,16 @@ impl Server {
     }
 
     if visual_change {
-      self.dirty = true;
+      // A cursor surface is not part of the ordinary scene graph.  Treating
+      // its animated buffer commits as scene damage forced a whole-desktop
+      // composition at every cursor frame (typically every 100--125 ms).
+      // The cursor fast path restores its old backdrop and presents only the
+      // union of the old/new glyph rectangles.
+      if self.cursor_client_fd == fd && self.cursor_surface_id == id {
+        self.cursor_dirty = true;
+      } else {
+        self.dirty = true;
+      }
     }
     // Do NOT mark shell_state_dirty on every buffer commit — VTE/sakura
     // blinks the cursor ~2 Hz and that was rewriting state.json + menubar
@@ -2295,6 +2312,13 @@ impl Server {
 
   fn surface_geometry(&self, fd: RawFd, surface_id: u32) -> Option<(i32, i32, i32, i32)> {
     let client = self.clients.get(&fd)?;
+    Self::surface_geometry_in(client, surface_id)
+  }
+
+  /// Resolve geometry from an explicitly borrowed client.  Request dispatch
+  /// temporarily removes that client from `self.clients`, so handlers such as
+  /// xdg_toplevel.set_parent must not try to find it through the server map.
+  fn surface_geometry_in(client: &Client, surface_id: u32) -> Option<(i32, i32, i32, i32)> {
     let Object { role: Role::Surface(s), .. } = client.objects.get(&surface_id)? else { return None };
     if let Some((gx, gy, gw, gh)) = s.window_geom {
       if gw > 0 && gh > 0 {
@@ -2307,6 +2331,21 @@ impl Server {
     // Buffer-less toplevel with subsurface content (Firefox).
     let (w, h) = Self::surface_tree_size(client, surface_id)?;
     Some((s.x, s.y, w, h))
+  }
+
+  fn toplevel_parent_surface_in(client: &Client, surface_id: u32) -> Option<u32> {
+    let xdg_id = match client.objects.get(&surface_id) {
+      Some(Object { role: Role::Surface(s), .. }) => s.xdg_surface_id?,
+      _ => return None,
+    };
+    client.objects.values().find_map(|obj| match &obj.role {
+      Role::XdgToplevel {
+        xdg_surface_id,
+        parent_surface_id,
+        ..
+      } if *xdg_surface_id == xdg_id => *parent_surface_id,
+      _ => None,
+    })
   }
 
   /// Full client buffer rect in absolute screen coordinates (includes CSD shadows).
@@ -3131,6 +3170,13 @@ impl Server {
         let surf = args.get(1).map(|a| a.as_object()).unwrap_or(0);
         let hx = args.get(2).map(|a| a.as_int()).unwrap_or(0);
         let hy = args.get(3).map(|a| a.as_int()).unwrap_or(0);
+        let old_cursor = (
+          self.cursor_client_fd,
+          self.cursor_surface_id,
+          self.cursor_hot_x,
+          self.cursor_hot_y,
+          self.pending_cursor,
+        );
         if surf == 0 {
           // Client released the cursor role — keep the pointer visible via
           // the compositor's default arrow (never go permanently blank).
@@ -3160,7 +3206,19 @@ impl Server {
             self.pending_cursor = Some((client.conn.fd, surf));
           }
         }
-        self.dirty = true;
+        let new_cursor = (
+          self.cursor_client_fd,
+          self.cursor_surface_id,
+          self.cursor_hot_x,
+          self.cursor_hot_y,
+          self.pending_cursor,
+        );
+        // Repeating set_cursor with the same surface/hotspot is a no-op.  An
+        // actual cursor-buffer change is classified by surface_commit(); a
+        // role/hotspot change needs only cursor damage, never scene damage.
+        if new_cursor != old_cursor {
+          self.cursor_dirty = true;
+        }
       }
       Some("wl_pointer") if opcode == 1 => {
         client.objects.remove(&id);
@@ -5162,12 +5220,18 @@ impl Server {
         if let (Some(child), Some(parent)) = (self.toplevel_surface_id(client, id), parent_surf) {
           let fd = client.conn.fd;
           if let (Some(pg), Some((_, _, cw, ch))) =
-            (self.surface_geometry(fd, parent), self.surface_geometry(fd, child))
+            (Self::surface_geometry_in(client, parent), Self::surface_geometry_in(client, child))
           {
             let (px, py, pw, ph) = pg;
             let nx = px + (pw - cw) / 2;
             let ny = py + (ph - ch) / 2;
-            self.set_surface_screen_pos(fd, child, nx, ny, cw, ch);
+            if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get_mut(&child) {
+              // Preserve the window_geometry offset inside CSD shadow padding.
+              let old_geom_x = s.x + s.window_geom.map(|g| g.0).unwrap_or(0);
+              let old_geom_y = s.y + s.window_geom.map(|g| g.1).unwrap_or(0);
+              s.x += nx - old_geom_x;
+              s.y += ny - old_geom_y;
+            }
             self.raise_surface(fd, parent);
             self.raise_surface(fd, child);
             self.dirty = true;

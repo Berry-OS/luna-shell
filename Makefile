@@ -19,8 +19,8 @@ GLFW_LIBS   := $(shell pkg-config --libs glfw3 2>/dev/null)
 
 .PHONY: all build build-dri build-webgl build-desktop build-desktop-system build-shell \
         symlinks symlinks-system run server demo webgl run-gtk desktop desktop-system \
-        luna-session install install-system stop clean opengl_gui luna-shell luna-ui \
-        luna-clipboard luna-tray-notify sample
+        luna-session install install-system stop clean luna-shell \
+        luna-clipboard luna-tray-notify
 
 all: build symlinks
 
@@ -38,7 +38,7 @@ build-desktop: build build-dri build-shell symlinks
 # Compositor + shell only; GTK/GLFW use system libwayland-client
 build-desktop-system: build-dri build-shell symlinks-system
 
-build-shell: luna-shell luna-clipboard luna-tray-notify opengl_gui luna-ui
+build-shell: luna-shell luna-clipboard luna-tray-notify
 
 # Symlink libwayland-client.so.0 (SONAME expected by GTK4)
 symlinks:
@@ -57,12 +57,6 @@ symlinks-system:
 	@echo "✓ Done"
 
 UI_DIR = ui
-
-$(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h: $(UI_DIR)/demo.css $(UI_DIR)/demo.html $(UI_DIR)/gen_include.sh
-	cd $(UI_DIR) && ./gen_include.sh demo.css demo.html
-
-$(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h: $(UI_DIR)/luna-ui.css $(UI_DIR)/luna-ui.html $(UI_DIR)/gen_include.sh
-	cd $(UI_DIR) && ./gen_include.sh luna-ui.css luna-ui.html
 
 $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h: $(UI_DIR)/luna-shell.css $(UI_DIR)/luna-shell.html $(UI_DIR)/gen_include.sh
 	cd $(UI_DIR) && ./gen_include.sh luna-shell.css luna-shell.html
@@ -106,21 +100,6 @@ luna-clipboard: clipboard/luna-clipboard.c
 luna-tray-notify: tray/luna-tray-notify.c
 	@echo "→ Building luna-tray-notify (XEmbed tray notification service)"
 	gcc -Os -Wall -Wextra $$(pkg-config --cflags dbus-1) -o luna-tray-notify tray/luna-tray-notify.c -lX11 $$(pkg-config --libs dbus-1)
-
-# luna-ui lives in ui/luna-ui/ (submodule); demos still #include "luna-ui.h".
-UI_INCLUDES := -I$(UI_DIR) -I$(UI_DIR)/luna-ui
-
-opengl_gui: $(UI_DIR)/opengl_gui.c $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h
-	@echo "→ Building Luna UI demo host (opengl_gui)"
-	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) $(UI_INCLUDES) $(UI_DIR)/opengl_gui.c -o opengl_gui -lm -lGL $(GLFW_LIBS)
-
-luna-ui: $(UI_DIR)/luna-ui.c $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h
-	@echo "→ Building Aurora Noir demo (luna-ui)"
-	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) $(UI_INCLUDES) $(UI_DIR)/luna-ui.c -o luna-ui -lm -lGL $(GLFW_LIBS)
-
-sample: $(UI_DIR)/sample_02.c $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h
-	@echo "→ Building Luna UI sample"
-	gcc -Os -Wall -Wextra $(GLFW_CFLAGS) $(UI_INCLUDES) $(UI_DIR)/sample_02.c -o $(UI_DIR)/sample -lm -lGL $(GLFW_LIBS)
 
 # Run app with Rust libwayland-client preloaded
 run: build symlinks
@@ -293,7 +272,5 @@ stop:
 
 clean:
 	cargo clean
-	rm -f opengl_gui luna-shell luna-clipboard luna-tray-notify luna-ui $(UI_DIR)/sample \
-	  $(UI_DIR)/demo.css.h $(UI_DIR)/demo.html.h \
-	  $(UI_DIR)/luna-ui.css.h $(UI_DIR)/luna-ui.html.h \
+	rm -f luna-shell luna-clipboard luna-tray-notify \
 	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h

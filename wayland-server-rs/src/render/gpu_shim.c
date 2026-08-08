@@ -120,6 +120,13 @@ void *luna_gpu_create(int fd, uint32_t w, uint32_t h) {
   g->egl_surface=eglCreateWindowSurface(g->display,cfg,(EGLNativeWindowType)g->surface,NULL);
   if (g->context==EGL_NO_CONTEXT||g->egl_surface==EGL_NO_SURFACE||
       !eglMakeCurrent(g->display,g->egl_surface,g->egl_surface,g->context)) goto fail;
+  /* DRM page flips are the compositor's one and only vblank throttle. Leaving
+   * the GBM EGL surface at its default swap interval can wait for one vblank
+   * in eglSwapBuffers(), then wait for another when the returned BO is queued
+   * on the CRTC. The two independent clocks periodically miss each other and
+   * show up as a regular console hitch (and, on some drivers, steady 30 Hz).
+   * Render immediately and let asynchronous page-flip completion pace us. */
+  if (!eglSwapInterval(g->display,0)) goto fail;
   g->create_image=(void*)eglGetProcAddress("eglCreateImageKHR");
   g->destroy_image=(void*)eglGetProcAddress("eglDestroyImageKHR");
   g->image_texture=(void*)eglGetProcAddress("glEGLImageTargetTexture2DOES");

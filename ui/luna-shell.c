@@ -574,6 +574,10 @@ typedef struct {
 static LunaSettings g_settings;
 static LunaCurTheme g_cur_theme;
 static int g_cursor_reload_pending = 0;
+/* luna_cur_theme_tick() advances a frame without changing the cursor role.
+ * Backends normally skip an identical role, so carry the frame change
+ * explicitly through set_cursor(). */
+static int g_cursor_frame_changed = 0;
 
 static void cursor_theme_reload(const char* name);
 static void cursor_theme_tick_and_refresh(void);
@@ -653,7 +657,10 @@ static void settings_load(void) {
                 snprintf(g_settings.hostname, sizeof(g_settings.hostname), "%s", val);
             else if (!strcmp(key, "cursor_theme"))
                 snprintf(g_settings.cursor_theme, sizeof(g_settings.cursor_theme), "%s", val);
-            else if (!strcmp(key, "kb_layout"))
+            else if (!strcmp(key, "kb_layout") && val[0])
+                /* Older settings files could contain an empty value.  Keep the
+                 * environment/locale-derived default instead of silently
+                 * reverting the entire Wayland session to a US keymap. */
                 snprintf(g_settings.kb_layout, sizeof(g_settings.kb_layout), "%s", val);
             else if (!strcmp(key, "window_gap"))
                 g_settings.window_gap = atoi(val);
@@ -1085,9 +1092,11 @@ static int g_settings_idx          = -1;
 static int g_settings_sheet_idx    = -1;
 static int g_settings_panel_apps   = -1;
 static int g_settings_panel_disp   = -1;
+static int g_settings_panel_kb     = -1;
 static int g_settings_panel_wm     = -1;
 static int g_stab_apps_idx         = -1;
 static int g_stab_disp_idx         = -1;
+static int g_stab_kb_idx           = -1;
 static int g_stab_wm_idx           = -1;
 static int g_win_menu_idx  = -1;
 static int g_clip_menu_idx = -1;
@@ -2818,6 +2827,19 @@ static void settings_mark_kb(const char* layout) {
         luna_update_classes(idx, "selected",
             (vals[i] && layout && !strcmp(vals[i], layout)) ? "selected" : NULL);
     }
+    int current = luna_get_element_by_id("kb_current");
+    if (current >= 0) {
+        const char* name = layout ? layout : "";
+        if (!strcmp(name, "jp")) name = "日本語 (JIS)";
+        else if (!strcmp(name, "jp,us")) name = "日本語 (JIS) + English (US)";
+        else if (!strcmp(name, "us")) name = "English (US)";
+        else if (!strcmp(name, "de,us")) name = "Deutsch + English (US)";
+        else if (!strcmp(name, "fr,us")) name = "Français + English (US)";
+        else if (!strcmp(name, "kr,us")) name = "한국어 + English (US)";
+        char text[128];
+        snprintf(text, sizeof(text), "Current: %s", *name ? name : "System default");
+        luna_set_text(current, text);
+    }
 }
 
 static void on_kb_select(LunaElement* e) {
@@ -2840,6 +2862,55 @@ static void on_kb_select(LunaElement* e) {
     settings_mark_kb(layout);
     settings_save();
     toast_show("Keyboard", layout, 2.0);
+}
+
+/* GLFW uses libdecor for Wayland client-side decorations.  Its GTK plugin
+ * requests symbolic desktop-theme icons that are often absent on a bare VT;
+ * repeated NULL icon results have caused small GL clients (including
+ * luna-editor) to terminate during their first mapped frame.  Prefer the
+ * dependency-light Cairo plugin, keeping it isolated so libdecor cannot pick
+ * the GTK plugin from the same system directory.  luna-session sets this too,
+ * but doing it here also covers a shell launched directly from a console. */
+static void prefer_libdecor_cairo(void) {
+    if (getenv("LIBDECOR_PLUGIN_DIR")) return;
+    const char* enabled = getenv("LUNA_LIBDECOR_CAIRO");
+    if (enabled && (!strcmp(enabled, "0") || !strcasecmp(enabled, "no") ||
+                    !strcasecmp(enabled, "false") || !strcasecmp(enabled, "off")))
+        return;
+
+    static const char* const candidates[] = {
+        "/usr/lib64/libdecor/plugins-1/libdecor-cairo.so",
+        "/usr/lib/x86_64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so",
+        "/usr/lib/aarch64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so",
+        "/usr/lib/libdecor/plugins-1/libdecor-cairo.so",
+        "/usr/local/lib64/libdecor/plugins-1/libdecor-cairo.so",
+        "/usr/local/lib/libdecor/plugins-1/libdecor-cairo.so",
+        NULL
+    };
+    const char* plugin = NULL;
+    for (int i = 0; candidates[i]; i++) {
+        if (access(candidates[i], R_OK) == 0) { plugin = candidates[i]; break; }
+    }
+    if (!plugin) return;
+
+    const char* runtime = getenv("XDG_RUNTIME_DIR");
+    if (!runtime || !*runtime) runtime = g_xdg.runtime_dir;
+    char dir[PATH_MAX], link_path[PATH_MAX];
+    if (!runtime || !*runtime ||
+        !path_join2(dir, sizeof(dir), runtime, "luna-libdecor-cairo") ||
+        !mkdir_p_mode(dir, 0700) ||
+        !path_join2(link_path, sizeof(link_path), dir, "libdecor-cairo.so"))
+        return;
+
+    if (access(link_path, R_OK) != 0) {
+        struct stat st;
+        /* Replace only our own stale symlink; never overwrite a regular file. */
+        if (lstat(link_path, &st) == 0 && S_ISLNK(st.st_mode))
+            unlink(link_path);
+        if (symlink(plugin, link_path) != 0 && errno != EEXIST) return;
+    }
+    if (access(link_path, R_OK) == 0)
+        setenv("LIBDECOR_PLUGIN_DIR", dir, 0);
 }
 
 static void apply_toolkit_session_env(void) {
@@ -2865,6 +2936,7 @@ static void apply_toolkit_session_env(void) {
         setenv("MOZ_LAYERS_ALLOW_SOFTWARE_GL", "1", 0);
     if (!getenv("QT_QPA_PLATFORM"))
         setenv("QT_QPA_PLATFORM", "wayland", 0);
+    prefer_libdecor_cairo();
     /* Do not inherit scale hints from the Xorg login which started Luna.
      * GDK_SCALE=2 is especially harmful here: GTK submits a 2x buffer and our
      * scale-1 output then displays it at twice the intended logical size.
@@ -2947,20 +3019,19 @@ static void child_session_env(void) {
     apply_toolkit_session_env();
 
     /* Compositor holds DRM master — client GBM/EGL sees fd=-1 and Firefox
-     * stalls in WaitFlushedEvent.  Force llvmpipe for child processes only
-     * (luna-shell itself is started without this via luna-session). */
+     * stalls in WaitFlushedEvent.  Select Mesa's software path for ordinary
+     * children, but let Mesa choose its matching loader/Gallium driver. */
     if (!getenv("LIBGL_ALWAYS_SOFTWARE"))
         setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
-    if (!getenv("MESA_LOADER_DRIVER_OVERRIDE"))
-        setenv("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe", 0);
+    /* llvmpipe otherwise creates close to one worker per online CPU for every
+     * application.  Four workers keep 2D Luna apps responsive without starving
+     * the compositor; LP_NUM_THREADS remains user-overridable. */
+    if (!getenv("LP_NUM_THREADS"))
+        setenv("LP_NUM_THREADS", "4", 0);
     if (!getenv("MOZ_WEBRENDER"))
         setenv("MOZ_WEBRENDER", "0", 0);
     if (!getenv("MOZ_ACCELERATED"))
         setenv("MOZ_ACCELERATED", "0", 0);
-    /* Belt-and-suspenders for Mesa software path (Firefox WaitFlushedEvent). */
-    if (!getenv("GALLIUM_DRIVER"))
-        setenv("GALLIUM_DRIVER", "llvmpipe", 0);
-
     if (libpath && *libpath) {
         const char* existing = getenv("LD_LIBRARY_PATH");
         char buf[1024];
@@ -4259,9 +4330,11 @@ static void settings_populate_ui(void) {
     /* Show apps tab by default */
     set_hidden(g_settings_panel_apps, 0);
     set_hidden(g_settings_panel_disp, 1);
+    set_hidden(g_settings_panel_kb, 1);
     set_hidden(g_settings_panel_wm, 1);
     if (g_stab_apps_idx >= 0) luna_update_classes(g_stab_apps_idx, "active", "active");
     if (g_stab_disp_idx  >= 0) luna_update_classes(g_stab_disp_idx,  "active", NULL);
+    if (g_stab_kb_idx    >= 0) luna_update_classes(g_stab_kb_idx,    "active", NULL);
     if (g_stab_wm_idx    >= 0) luna_update_classes(g_stab_wm_idx,    "active", NULL);
 }
 
@@ -4330,16 +4403,20 @@ static void on_settings_tab(LunaElement* e) {
     const char* id = luna_element_at(tab_idx)->id;
     int is_apps = !strcmp(id, "stab_apps");
     int is_disp = !strcmp(id, "stab_disp");
+    int is_kb = !strcmp(id, "stab_keyboard");
     int is_wm = !strcmp(id, "stab_wm");
 
     if (g_stab_apps_idx >= 0)
         luna_update_classes(g_stab_apps_idx, "active", is_apps ? "active" : NULL);
     if (g_stab_disp_idx >= 0)
         luna_update_classes(g_stab_disp_idx, "active", is_disp ? "active" : NULL);
+    if (g_stab_kb_idx >= 0)
+        luna_update_classes(g_stab_kb_idx, "active", is_kb ? "active" : NULL);
     if (g_stab_wm_idx >= 0)
         luna_update_classes(g_stab_wm_idx, "active", is_wm ? "active" : NULL);
     set_hidden(g_settings_panel_apps, !is_apps);
     set_hidden(g_settings_panel_disp, !is_disp);
+    set_hidden(g_settings_panel_kb, !is_kb);
     set_hidden(g_settings_panel_wm, !is_wm);
 }
 
@@ -5611,9 +5688,11 @@ static void bind_indices(void) {
     g_settings_sheet_idx = luna_get_element_by_id("settings_sheet");
     g_settings_panel_apps = luna_get_element_by_id("settings_panel_apps");
     g_settings_panel_disp = luna_get_element_by_id("settings_panel_disp");
+    g_settings_panel_kb   = luna_get_element_by_id("settings_panel_keyboard");
     g_settings_panel_wm   = luna_get_element_by_id("settings_panel_wm");
     g_stab_apps_idx     = luna_get_element_by_id("stab_apps");
     g_stab_disp_idx     = luna_get_element_by_id("stab_disp");
+    g_stab_kb_idx       = luna_get_element_by_id("stab_keyboard");
     g_stab_wm_idx       = luna_get_element_by_id("stab_wm");
     g_win_menu_idx      = luna_get_element_by_id("win_menu");
     g_clip_menu_idx     = luna_get_element_by_id("clip_menu");
@@ -5737,6 +5816,7 @@ static void bind_indices(void) {
     /* Wire settings tab buttons */
     wire_subtree(g_stab_apps_idx, on_settings_tab);
     wire_subtree(g_stab_disp_idx, on_settings_tab);
+    wire_subtree(g_stab_kb_idx, on_settings_tab);
     wire_subtree(g_stab_wm_idx, on_settings_tab);
     {
         const char* toggle_ids[] = {
@@ -6294,13 +6374,17 @@ static void cursor_theme_reload(const char* name) {
 static void cursor_theme_tick_and_refresh(void) {
     if (g_cursor_reload_pending) {
         g_cursor_reload_pending = 0;
+        g_cursor_frame_changed = 1;
         if (g_backend && g_backend->set_cursor)
             g_backend->set_cursor(g_cur_theme.active_role);
+        g_cursor_frame_changed = 0;
     }
     if (!luna_cur_theme_tick(&g_cur_theme, g_now)) return;
     /* Re-push the current role so animated .ani frames advance. */
+    g_cursor_frame_changed = 1;
     if (g_backend && g_backend->set_cursor)
         g_backend->set_cursor(g_cur_theme.active_role);
+    g_cursor_frame_changed = 0;
 }
 
 /* Paint a simple ARGB cursor glyph into the dumb buffer.
@@ -6838,7 +6922,8 @@ static void kms_backend_poll_events(void) {
 }
 static void kms_backend_set_cursor(int cursor_type) {
     if (!g_kms.cursor_ok) return;
-    if (cursor_type == g_kms.cursor_type && g_kms.cursor_shown) return;
+    if (!g_cursor_frame_changed &&
+        cursor_type == g_kms.cursor_type && g_kms.cursor_shown) return;
     kms_cursor_paint(cursor_type);
 }
 
@@ -7215,7 +7300,10 @@ static void wlp_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surfa
     g_wl.pointer_x = wl_fixed_to_double(x);
     g_wl.pointer_y = wl_fixed_to_double(y);
     wl_refresh_pointer_doc_pos();
-    wl_cursor_apply();
+    /* Commit the latest animation frame before assigning the cursor role.
+     * While the pointer is outside Luna we deliberately keep animation
+     * updates local, avoiding invisible cursor-surface commits. */
+    wl_cursor_paint(g_cur_theme.active_role);
     shell_note_user_activity();
     luna_mouse_move(g_wl.mouse_x, g_wl.mouse_y);
 }
@@ -8103,12 +8191,15 @@ static void wl_cursor_paint(int cursor_type) {
 
     if (cursor_blit_theme(px, WL_CURSOR_SIZE, WL_CURSOR_SIZE, WL_CURSOR_SIZE,
                           cursor_type, &g_wl.cursor_hot_x, &g_wl.cursor_hot_y)) {
-        if (g_wl.cursor_surf && g_wl.cursor_buf) {
+        if (g_wl.pointer_entered && g_wl.cursor_surf && g_wl.cursor_buf) {
+            /* Assign first, then commit.  On first enter the compositor can
+             * remember this as a pending cursor and classify the following
+             * buffer commit as cursor-only damage. */
+            wl_cursor_apply();
             wl_surface_attach(g_wl.cursor_surf, g_wl.cursor_buf, 0, 0);
             wl_surface_damage(g_wl.cursor_surf, 0, 0, WL_CURSOR_SIZE, WL_CURSOR_SIZE);
             wl_surface_commit(g_wl.cursor_surf);
         }
-        wl_cursor_apply();
         return;
     }
 
@@ -8196,9 +8287,10 @@ static void wl_cursor_fini(void) {
 
 static void wl_backend_set_cursor(int cursor_type) {
     if (!g_wl.cursor_pixels) return;
-    if (cursor_type != g_wl.cursor_type)
+    if (g_cursor_frame_changed || cursor_type != g_wl.cursor_type)
         wl_cursor_paint(cursor_type);
-    wl_cursor_apply();
+    else
+        wl_cursor_apply();
 }
 
 static void wl_backend_terminate(void) {
@@ -8765,6 +8857,7 @@ static void setup_wayland_egl_env(void) {
     if (env_is_true("LUNA_EGL_SOFTWARE")) {
         setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
         setenv("GALLIUM_DRIVER", "llvmpipe", 0);
+        setenv("LP_NUM_THREADS", "4", 0);
     }
 }
 

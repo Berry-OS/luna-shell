@@ -263,19 +263,53 @@ export LC_CTYPE="${LC_CTYPE:-$LANG}"
 # Multilingual: comma-separated layouts (e.g. jp,us) with Alt+Shift to toggle.
 # Override anytime with XKB_DEFAULT_LAYOUT / VARIANT / OPTIONS.
 if [ -z "${XKB_DEFAULT_LAYOUT:-}" ]; then
-    case "${LANG}" in
-        ja*|JA*) export XKB_DEFAULT_LAYOUT=jp,us ;;
-        ko*|KO*) export XKB_DEFAULT_LAYOUT=kr,us ;;
-        zh_CN*|zh_SG*) export XKB_DEFAULT_LAYOUT=cn,us ;;
-        zh_TW*|zh_HK*) export XKB_DEFAULT_LAYOUT=tw,us ;;
-        de*|DE*) export XKB_DEFAULT_LAYOUT=de,us ;;
-        fr*|FR*) export XKB_DEFAULT_LAYOUT=fr,us ;;
-        es*|ES*) export XKB_DEFAULT_LAYOUT=es,us ;;
-        pt_BR*) export XKB_DEFAULT_LAYOUT=br,us ;;
-        ru*|RU*) export XKB_DEFAULT_LAYOUT=us,ru ;;
-        ar*|AR*) export XKB_DEFAULT_LAYOUT=us,ara ;;
-        *)       export XKB_DEFAULT_LAYOUT=us ;;
-    esac
+    # Keyboard hardware and message locale are independent.  Berry images use
+    # LANG=C.UTF-8 but record the actual console/XKB layout in vconsole.conf;
+    # relying on LANG alone consequently turned a configured JIS keyboard into
+    # US at every Luna login.  Read the system keyboard setting without
+    # sourcing either config file as shell code.
+    _system_xkb_layout=""
+    for _keyboard_conf in /etc/vconsole.conf /etc/default/keyboard; do
+        [ -r "$_keyboard_conf" ] || continue
+        while IFS='=' read -r _keyboard_key _keyboard_value; do
+            case "$_keyboard_key" in
+                XKBLAYOUT|XKBLAYOUT\ |KEYMAP|KEYMAP\ ) ;;
+                *) continue ;;
+            esac
+            _keyboard_value="${_keyboard_value#\"}"
+            _keyboard_value="${_keyboard_value%\"}"
+            _keyboard_value="${_keyboard_value#\'}"
+            _keyboard_value="${_keyboard_value%\'}"
+            case "$_keyboard_value" in
+                jp|jp106|jp*) _system_xkb_layout=jp,us ;;
+                us|us*)       _system_xkb_layout=us ;;
+                de|de*)       _system_xkb_layout=de,us ;;
+                fr|fr*)       _system_xkb_layout=fr,us ;;
+                kr|kr*)       _system_xkb_layout=kr,us ;;
+                ?*[,]*|??)    _system_xkb_layout="$_keyboard_value" ;;
+            esac
+            [ -z "$_system_xkb_layout" ] || break
+        done < "$_keyboard_conf"
+        [ -z "$_system_xkb_layout" ] || break
+    done
+    if [ -n "$_system_xkb_layout" ]; then
+        export XKB_DEFAULT_LAYOUT="$_system_xkb_layout"
+    else
+        case "${LANG}" in
+            ja*|JA*) export XKB_DEFAULT_LAYOUT=jp,us ;;
+            ko*|KO*) export XKB_DEFAULT_LAYOUT=kr,us ;;
+            zh_CN*|zh_SG*) export XKB_DEFAULT_LAYOUT=cn,us ;;
+            zh_TW*|zh_HK*) export XKB_DEFAULT_LAYOUT=tw,us ;;
+            de*|DE*) export XKB_DEFAULT_LAYOUT=de,us ;;
+            fr*|FR*) export XKB_DEFAULT_LAYOUT=fr,us ;;
+            es*|ES*) export XKB_DEFAULT_LAYOUT=es,us ;;
+            pt_BR*) export XKB_DEFAULT_LAYOUT=br,us ;;
+            ru*|RU*) export XKB_DEFAULT_LAYOUT=us,ru ;;
+            ar*|AR*) export XKB_DEFAULT_LAYOUT=us,ara ;;
+            *)       export XKB_DEFAULT_LAYOUT=us ;;
+        esac
+    fi
+    unset _system_xkb_layout _keyboard_conf _keyboard_key _keyboard_value
 fi
 if [ -z "${XKB_DEFAULT_OPTIONS:-}" ] && echo "$XKB_DEFAULT_LAYOUT" | grep -q ','; then
     export XKB_DEFAULT_OPTIONS=grp:alt_shift_toggle
@@ -324,11 +358,15 @@ export GDK_BACKEND="${GDK_BACKEND:-wayland}"
 export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
 export MOZ_LAYERS_ALLOW_SOFTWARE_GL="${MOZ_LAYERS_ALLOW_SOFTWARE_GL:-1}"
 # Compositor holds DRM master; hardware EGL in clients yields fd=-1 and Firefox
-# hangs in WaitFlushedEvent.  Forced for session children; stripped for luna-shell
-# (see env -u below) so the shell keeps hardware EGL on the dri path.
+# hangs in WaitFlushedEvent.  Force the generic Mesa software path for session
+# children, but do not pin both the loader and Gallium driver: that combination
+# is not portable across Mesa builds and has caused client startup crashes.
+# Browser launchers below keep their stricter, known-good overrides.
 export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
-export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-llvmpipe}"
-export GALLIUM_DRIVER="${GALLIUM_DRIVER:-llvmpipe}"
+# On many-core machines llvmpipe otherwise creates roughly one worker per CPU
+# for every application.  Luna's mostly-2D clients are smoother with a small,
+# bounded pool and no longer starve the compositor.  Explicit user values win.
+export LP_NUM_THREADS="${LP_NUM_THREADS:-${LUNA_SOFTWARE_THREADS:-4}}"
 export MOZ_WEBRENDER="${MOZ_WEBRENDER:-0}"
 export MOZ_ACCELERATED="${MOZ_ACCELERATED:-0}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
@@ -344,6 +382,36 @@ export QT_AUTO_SCREEN_SCALE_FACTOR="${QT_AUTO_SCREEN_SCALE_FACTOR:-0}"
 # (dmabuf off → wl_shm), so GTK4/Firefox dialogs stall.  Prefer Cairo.
 case "${GSK_RENDERER:-}" in
     ""|vulkan|Vulkan|VULKAN) export GSK_RENDERER=cairo ;;
+esac
+
+# GLFW's default libdecor choice prefers the GTK plugin.  On a bare VT it
+# repeatedly asks GTK for unavailable symbolic titlebar icons, which produces
+# critical warnings and can terminate small Luna GL applications.  The Cairo
+# plugin provides the same client-side decorations without the GTK dependency.
+# Explicit LIBDECOR_PLUGIN_DIR wins; LUNA_LIBDECOR_CAIRO=0 restores auto mode.
+case "${LUNA_LIBDECOR_CAIRO:-1}" in
+    0|no|false|off) ;;
+    *)
+        if [ -z "${LIBDECOR_PLUGIN_DIR:-}" ]; then
+            for _decor_plugin in \
+                /usr/lib64/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/lib/x86_64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/lib/aarch64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/lib/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/local/lib64/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/local/lib/libdecor/plugins-1/libdecor-cairo.so
+            do
+                [ -f "$_decor_plugin" ] || continue
+                _decor_dir="$XDG_RUNTIME_DIR/luna-libdecor-cairo"
+                mkdir -p "$_decor_dir"
+                ln -sf "$_decor_plugin" "$_decor_dir/libdecor-cairo.so"
+                export LIBDECOR_PLUGIN_DIR="$_decor_dir"
+                echo "→ GLFW decorations: libdecor-cairo"
+                break
+            done
+            unset _decor_plugin _decor_dir
+        fi
+        ;;
 esac
 # wl_output physical size uses this (compositor); 96 ≈ typical Xorg look.
 # MUST be exported before the compositor forks so wl_output.geometry is correct.
@@ -410,16 +478,12 @@ setup_egl_env() {
     case "${LUNA_EGL_SOFTWARE:-auto}" in
         1|yes|true|on)
             export LIBGL_ALWAYS_SOFTWARE=1
-            export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
-            export GALLIUM_DRIVER=llvmpipe
             ;;
         0|no|false|off)
             ;;
         auto|*)
             if [ "$BACKEND" = "software" ]; then
                 export LIBGL_ALWAYS_SOFTWARE=1
-                export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
-                export GALLIUM_DRIVER=llvmpipe
             fi
             ;;
     esac

@@ -4,7 +4,7 @@ use std::ffi::CString;
 use std::mem::size_of;
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -63,7 +63,17 @@ impl EvdevInput {
       return Err(std::io::Error::last_os_error());
     }
 
-    let (tx, rx) = mpsc::sync_channel(512);
+    /* Input edges are state transitions, not optional samples.  The old
+     * bounded channel used try_send() and silently discarded BTN_LEFT release
+     * (and key release) whenever a render stall let motion fill its 512 slots.
+     * That left the compositor's implicit/WM grab active indefinitely: Luna
+     * dialogs kept following the pointer and every later click, including in
+     * Firefox, was routed to the stale grab owner.
+     *
+     * Keep the producer non-blocking at shutdown without making events lossy:
+     * an unbounded std channel disconnects cleanly and the compositor already
+     * coalesces all consecutive motion in each received batch. */
+    let (tx, rx) = mpsc::channel();
     let requested = Arc::new(AtomicU8::new(1));
     let applied = Arc::new(AtomicU8::new(1));
     let thread_requested = Arc::clone(&requested);
@@ -118,7 +128,7 @@ impl Drop for EvdevInput {
   }
 }
 
-fn input_loop(tx: SyncSender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested: Arc<AtomicU8>, applied: Arc<AtomicU8>) {
+fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested: Arc<AtomicU8>, applied: Arc<AtomicU8>) {
   let mut devices: HashMap<String, Device> = HashMap::new();
   let mut pressed = HashMap::<u16, u32>::new();
   let mut consumed_fn = HashSet::<u16>::new();
@@ -275,7 +285,7 @@ fn input_loop(tx: SyncSender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, reques
   }
 }
 
-fn handle_key(code: u16, value: i32, pressed: &mut HashMap<u16, u32>, consumed_fn: &mut HashSet<u16>, tx: &SyncSender<InputEvent>, wake_fd: RawFd) {
+fn handle_key(code: u16, value: i32, pressed: &mut HashMap<u16, u32>, consumed_fn: &mut HashSet<u16>, tx: &Sender<InputEvent>, wake_fd: RawFd) {
   if value == 2 {
     // Kernel auto-repeat.  Clients synthesize repeats from wl_keyboard.repeat_info.
     return;
@@ -325,8 +335,8 @@ fn vt_number(code: u16) -> Option<u8> {
   }
 }
 
-fn emit(tx: &SyncSender<InputEvent>, wake_fd: RawFd, event: InputEvent) {
-  if tx.try_send(event).is_ok() {
+fn emit(tx: &Sender<InputEvent>, wake_fd: RawFd, event: InputEvent) {
+  if tx.send(event).is_ok() {
     let one: u64 = 1;
     unsafe {
       libc::write(wake_fd, &one as *const u64 as *const libc::c_void, size_of::<u64>());
@@ -413,7 +423,7 @@ mod tests {
 
   #[test]
   fn ctrl_alt_function_key_is_consumed_as_vt_switch() {
-    let (tx, rx) = mpsc::sync_channel(16);
+    let (tx, rx) = mpsc::channel();
     let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
     let mut pressed = HashMap::new();
     let mut consumed = HashSet::new();
@@ -438,6 +448,35 @@ mod tests {
     ));
     assert!(matches!(rx.recv().unwrap(), InputEvent::VtSwitch(3)));
     assert!(rx.try_recv().is_err());
+    unsafe { libc::close(wake_fd) };
+  }
+
+  #[test]
+  fn input_burst_never_drops_button_release() {
+    let (tx, rx) = mpsc::channel();
+    let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+    for _ in 0..1024 {
+      emit(&tx, wake_fd, InputEvent::PointerRelative { dx: 1.0, dy: 0.0 });
+    }
+    emit(
+      &tx,
+      wake_fd,
+      InputEvent::PointerButton {
+        button: BTN_LEFT as u32,
+        pressed: false,
+      },
+    );
+
+    for _ in 0..1024 {
+      assert!(matches!(rx.recv().unwrap(), InputEvent::PointerRelative { .. }));
+    }
+    assert!(matches!(
+      rx.recv().unwrap(),
+      InputEvent::PointerButton {
+        button: 0x110,
+        pressed: false
+      }
+    ));
     unsafe { libc::close(wake_fd) };
   }
 }
