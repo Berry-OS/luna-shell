@@ -28,6 +28,9 @@ const DMA_BUF_IOCTL_SYNC: u64 =
     (1 << 30) | (0x62u64 << 8) | 0 | ((std::mem::size_of::<DmaBufSync>() as u64) << 16);
 
 pub struct ShmPool {
+    /// CPU mapping. A dma-buf may legitimately be GPU-only and therefore not
+    /// mmap-able; in that case this stays NULL while `fd` remains valid for
+    /// direct scanout / EGLImage import by the GPU compositor.
     ptr: *mut c_void,
     size: usize,
     fd: RawFd,
@@ -52,11 +55,19 @@ impl ShmPool {
         if size == 0 {
             return None;
         }
-        let ptr = unsafe { mmap(std::ptr::null_mut(), size, PROT_READ, MAP_SHARED, fd, 0) };
-        if ptr == MAP_FAILED {
-            unsafe { libc::close(fd) };
-            return None;
-        }
+        let mapped = unsafe { mmap(std::ptr::null_mut(), size, PROT_READ, MAP_SHARED, fd, 0) };
+        let ptr = if mapped == MAP_FAILED {
+            if !is_dmabuf {
+                unsafe { libc::close(fd) };
+                return None;
+            }
+            /* GPU-local dma-bufs often cannot be CPU-mapped. Keep ownership
+             * of the fd: the DRI backend can still import it through PRIME or
+             * EGL_EXT_image_dma_buf_import without ever touching its pixels. */
+            std::ptr::null_mut()
+        } else {
+            mapped
+        };
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         let have_identity = unsafe { libc::fstat(fd, &mut stat) } == 0;
         Some(Rc::new(ShmPool {
@@ -71,7 +82,7 @@ impl ShmPool {
 
     /// Notify dmabuf CPU read boundaries; no-op for SHM.
     fn dma_sync(&self, start: bool) {
-        if !self.is_dmabuf {
+        if !self.is_dmabuf || self.ptr.is_null() {
             return;
         }
         let phase = if start {
@@ -117,7 +128,7 @@ impl ShmPool {
     }
 
     pub fn slice(&self, offset: usize, len: usize) -> Option<&[u8]> {
-        if offset.checked_add(len)? > self.size {
+        if self.ptr.is_null() || offset.checked_add(len)? > self.size {
             return None;
         }
         Some(unsafe { std::slice::from_raw_parts((self.ptr as *const u8).add(offset), len) })
@@ -127,7 +138,9 @@ impl ShmPool {
 impl Drop for ShmPool {
     fn drop(&mut self) {
         unsafe {
-            munmap(self.ptr, self.size);
+            if !self.ptr.is_null() {
+                munmap(self.ptr, self.size);
+            }
             libc::close(self.fd);
         }
     }

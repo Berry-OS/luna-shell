@@ -86,6 +86,7 @@ $(LAYER_SHELL_SRC): $(LAYER_SHELL_XML)
 
 luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
+            $(UI_DIR)/luna-client-env-policy.h \
             $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
             $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \
             $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
@@ -93,7 +94,7 @@ luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
 	# luna-shell's layout, animation and draw-list walks are hot on every KMS \
 	# frame.  Prefer runtime optimization over the size-oriented global default.
 	# Wi-Fi backend (luna-wifi.h) and the status poller both use pthreads.
-	gcc -O2 -Wall -Wextra -DLUNA_BACKEND_X11 $(SHELL_CFLAGS) -I$(UI_DIR) \
+	gcc -O2 -Wall -Wextra -DLUNA_BACKEND_X11 -include $(UI_DIR)/luna-client-env-policy.h $(SHELL_CFLAGS) -I$(UI_DIR) \
 	    $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c $(LAYER_SHELL_SRC) \
 	    -o luna-shell $(SHELL_LIBS) -lX11
 
