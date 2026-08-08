@@ -369,7 +369,7 @@ impl Server {
       wm_titlebar_active: 0,
       wm_titlebar_inactive: 0,
       wm_titlebar_frame: 0,
-      wm_prefer_ssd: false,
+      wm_prefer_ssd: true,
       wm_super_shortcuts: true,
       compose_layers: Default::default(),
       compose_toplevels: Vec::new(),
@@ -624,7 +624,8 @@ impl Server {
         self.active_text_input = None;
         self.deactivate_input_methods(None);
       }
-      if self.focused_client_fd == fd {
+      let refocus = self.focused_client_fd == fd;
+      if refocus {
         self.focused_client_fd = -1;
         self.focused_surface_id = 0;
       }
@@ -643,6 +644,9 @@ impl Server {
       }
       self.shell_state_dirty = true;
       drop(client);
+      if refocus {
+        self.focus_topmost_visible((fd, 0));
+      }
       self.flush_selection_broadcast();
       self.flush_primary_broadcast();
     } else {
@@ -691,9 +695,9 @@ impl Server {
       "wl_buffer" => self.req_simple_destroy(client, id, msg.opcode, 0),
       "wl_surface" => self.req_surface(client, id, msg.opcode, &args),
       "wl_region" => self.req_region(client, id, msg.opcode, &args),
-      "wl_seat" => self.req_seat(client, msg.opcode, &args),
+      "wl_seat" => self.req_seat(client, id, msg.opcode, &args),
       "wl_pointer" | "wl_keyboard" => self.req_input_device(client, id, msg.opcode, &args),
-      "wl_output" => {}
+      "wl_output" => self.req_simple_destroy(client, id, msg.opcode, 0),
       "wl_data_device_manager" => self.req_ddm(client, msg.opcode, &args),
       "wl_data_source" => self.req_data_source(client, id, msg.opcode, &args),
       "wl_data_device" => self.req_data_device(client, id, msg.opcode, &args),
@@ -768,16 +772,21 @@ impl Server {
     if new_id == 0 {
       return;
     }
-    let global = self.globals.iter().find(|g| g.name == name);
-    let iface = match (global, protocol::by_name(iface_name)) {
-      (Some(g), _) => g.interface,
-      (None, Some(i)) => i,
-      _ => {
-        client.post_error(1, 0, "bind: unknown global");
-        return;
-      }
+    // A registry name is an opaque handle for exactly one advertised global.
+    // Accepting an interface merely because protocol.rs knew its name allowed
+    // clients to bind disabled/private protocols (notably dmabuf) and also to
+    // bind a valid name using the wrong interface.  Besides violating the core
+    // protocol this bypassed runtime capability checks.
+    let Some(global) = self.globals.iter().find(|g| g.name == name) else {
+      client.post_error(1, 0, "bind: unknown global");
+      return;
     };
-    let version = req_ver.min(iface.version);
+    if global.interface.name != iface_name {
+      client.post_error(1, 0, "bind: interface does not match global");
+      return;
+    }
+    let iface = global.interface;
+    let version = req_ver.min(global.version).min(iface.version);
     let role = role_for(iface.name);
     client.objects.insert(new_id, Object::new(iface, version, role));
 
@@ -1089,6 +1098,7 @@ impl Server {
   fn req_surface(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
       0 => {
+        let refocus = self.focused_client_fd == client.conn.fd && self.focused_surface_id == id;
         let current_buffer_id = match client.objects.get(&id) {
           Some(Object { role: Role::Surface(s), .. }) => s.current_buffer_id,
           _ => None,
@@ -1100,7 +1110,7 @@ impl Server {
           self.active_text_input = None;
           self.deactivate_input_methods(None);
         }
-        if self.focused_client_fd == client.conn.fd && self.focused_surface_id == id {
+        if refocus {
           self.focused_client_fd = -1;
           self.focused_surface_id = 0;
         }
@@ -1132,6 +1142,9 @@ impl Server {
         self.track_mapped_toplevel(client.conn.fd, id, false);
         client.objects.remove(&id);
         self.dirty = true;
+        if refocus {
+          self.focus_topmost_visible((client.conn.fd, id));
+        }
       }
       1 => {
         let buf = args.get(0).map(|a| a.as_object()).unwrap_or(0);
@@ -1750,10 +1763,7 @@ impl Server {
                       self.wm_titlebar_style = value.clamp(0, 2);
                       self.dirty = true;
                     }
-                    "prefer_ssd" => {
-                      self.wm_prefer_ssd = value != 0;
-                      self.dirty = true;
-                    }
+                    "prefer_ssd" => self.set_prefer_ssd(value != 0),
                     "super_shortcuts" => self.wm_super_shortcuts = value != 0,
                     _ => {}
                   }
@@ -1985,12 +1995,37 @@ impl Server {
     if ids.is_empty() {
       return;
     }
+    // Mark the batch before minimizing.  This suppresses the normal
+    // focus-next policy for each individual window, avoiding O(n²) restacks
+    // and configure traffic while Show Desktop is hiding the whole set.
+    self.show_desktop_ids = ids.clone();
     for &(fd, sid) in &ids {
       self.minimize_surface_for(fd, sid);
     }
-    self.show_desktop_ids = ids;
     self.shell_state_dirty = true;
     self.dirty = true;
+  }
+
+  /// Focus the highest visible application window after the current one goes
+  /// away.  This is a single reverse stack scan and allocates nothing on the
+  /// common minimize path.
+  fn focus_topmost_visible(&mut self, exclude: (RawFd, u32)) {
+    let target = self.window_stack.iter().rev().copied().find(|&(fd, sid)| {
+      if (fd, sid) == exclude {
+        return false;
+      }
+      let Some(client) = self.clients.get(&fd) else { return false };
+      if !Self::surface_is_xdg_toplevel_in(client, sid) || self.surface_is_minimized(client, sid) {
+        return false;
+      }
+      let Some(Object { role: Role::Surface(surface), .. }) = client.objects.get(&sid) else { return false };
+      let Some(xdg) = surface.xdg_surface_id else { return false };
+      let (title, app_id, _, _, _) = crate::shell_ipc::toplevel_meta(client, xdg);
+      !crate::shell_ipc::is_shell_surface(&title, &app_id)
+    });
+    if let Some((fd, sid)) = target {
+      self.activate_surface_for(fd, sid);
+    }
   }
 
   fn activate_surface(&mut self, surface_id: u32) {
@@ -2879,7 +2914,20 @@ impl Server {
         }
       }
     }
-    if self.focused_client_fd == fd && self.focused_surface_id == surface_id {
+    let was_focused = self.focused_client_fd == fd && self.focused_surface_id == surface_id;
+    if was_focused {
+      // Explicitly end keyboard focus.  Merely clearing compositor bookkeeping
+      // leaves toolkits believing the minimized surface is still active.
+      let keyboard_id = self.clients.get(&fd).and_then(|client| {
+        client.objects.iter().find_map(|(&id, obj)| matches!(obj.role, Role::Keyboard).then_some(id))
+      });
+      if let Some(keyboard_id) = keyboard_id {
+        let serial = self.next_serial();
+        if let Some(client) = self.clients.get_mut(&fd) {
+          client.send(keyboard_id, 2, &[Arg::Uint(serial), Arg::Object(surface_id)]);
+          client.conn.flush();
+        }
+      }
       self.focused_client_fd = -1;
       self.focused_surface_id = 0;
       self.ptr_entered = false;
@@ -2888,6 +2936,9 @@ impl Server {
     }
     self.dirty = true;
     self.shell_state_dirty = true;
+    if was_focused && self.show_desktop_ids.is_empty() {
+      self.focus_topmost_visible((fd, surface_id));
+    }
   }
 
   fn maximize_surface(&mut self, surface_id: u32, maximize: bool) {
@@ -3065,7 +3116,11 @@ impl Server {
     self.shell_state_dirty = true;
   }
 
-  fn req_seat(&mut self, client: &mut Client, opcode: u16, args: &[Arg]) {
+  fn req_seat(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
+    if opcode == 3 {
+      client.objects.remove(&id);
+      return;
+    }
     let iface = match opcode {
       0 => &protocol::WL_POINTER,
       1 => &protocol::WL_KEYBOARD,
@@ -4202,12 +4257,13 @@ impl Server {
             1,
             Role::ToplevelDecoration {
               toplevel_id: toplevel,
-              mode: if self.wm_prefer_ssd { 2 } else { 1 },
+              // This is the client's request, not the effective mode.  Zero
+              // means it follows the compositor preference.
+              mode: 0,
             },
           ),
         );
-        // Default preference is CSD (GTK HeaderBar).  Retro skins can ask for
-        // SSD via prefer_ssd; clients that later call set_mode(1) still keep CSD.
+        // SSD is the compositor default; an explicit set_mode(1) still wins.
         let pref = if self.wm_prefer_ssd { 2u32 } else { 1u32 };
         client.send(nid, 0, &[Arg::Uint(pref)]);
         if let Some(Object {
@@ -4274,7 +4330,7 @@ impl Server {
           ..
         }) = client.objects.get_mut(&id)
         {
-          *m = pref;
+          *m = 0;
         }
         if let Some(Object {
           role: Role::XdgToplevel {
@@ -4290,6 +4346,52 @@ impl Server {
       }
       _ => {}
     }
+  }
+
+  /// Change the compositor decoration preference and renegotiate only the
+  /// toplevels whose client left the mode unset.  This is a settings event,
+  /// so the scan never touches the frame/input hot paths.
+  fn set_prefer_ssd(&mut self, prefer: bool) {
+    if self.wm_prefer_ssd == prefer {
+      return;
+    }
+    self.wm_prefer_ssd = prefer;
+    let effective = if prefer { 2 } else { 1 };
+
+    for client in self.clients.values_mut() {
+      let explicit: HashSet<u32> = client.objects.values().filter_map(|obj| match obj.role {
+        Role::ToplevelDecoration { toplevel_id, mode } if mode != 0 => Some(toplevel_id),
+        _ => None,
+      }).collect();
+      for (&object_id, obj) in client.objects.iter_mut() {
+        if explicit.contains(&object_id) {
+          continue;
+        }
+        if let Role::XdgToplevel { decoration_mode, .. } = &mut obj.role {
+          *decoration_mode = effective;
+        }
+      }
+      let following: Vec<(u32, u32)> = client.objects.iter().filter_map(|(&decoration_id, obj)| {
+        match obj.role {
+          Role::ToplevelDecoration { toplevel_id, mode: 0 } => Some((decoration_id, toplevel_id)),
+          _ => None,
+        }
+      }).collect();
+      if following.is_empty() {
+        continue;
+      }
+      for (decoration_id, toplevel_id) in following {
+        if let Some(Object {
+          role: Role::XdgToplevel { decoration_mode, .. }, ..
+        }) = client.objects.get_mut(&toplevel_id) {
+          *decoration_mode = effective;
+        }
+        client.send(decoration_id, 0, &[Arg::Uint(effective)]);
+      }
+      client.conn.flush();
+    }
+    self.dirty = true;
+    self.shell_state_dirty = true;
   }
 
   fn req_text_input_manager(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
@@ -5005,7 +5107,9 @@ impl Server {
                 parent_surface_id: None,
                 saved_geom: None,
                 tiled: 0,
-                decoration_mode: 0, // unset — no SSD until client requests it
+                // SSD is the default even when a client does not implement
+                // xdg-decoration; explicit CSD negotiation changes this to 1.
+                decoration_mode: if self.wm_prefer_ssd { 2 } else { 1 },
                 min_w: 0,
                 min_h: 0,
                 max_w: 0,

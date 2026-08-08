@@ -818,7 +818,7 @@ static void skin_chrome_defaults(LunaSkin* skin) {
     skin->titlebar_active = 0;
     skin->titlebar_inactive = 0;
     skin->titlebar_frame = 0;
-    skin->prefer_ssd = 0;
+    skin->prefer_ssd = 1;
     skin->window_theme = -1;
     skin->controls_on_left = 1;
 }

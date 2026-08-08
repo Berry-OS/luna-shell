@@ -6,7 +6,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-#![feature(naked_functions)]
 #![allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 
 pub mod display;

@@ -218,7 +218,7 @@ pub static ZWP_PRIMARY_SELECTION_OFFER_V1: Interface = Interface {
   events: &[m!("offer", "s")],
 };
 
-/// xdg-decoration: prefer client CSD; optional compositor SSD strip.
+/// xdg-decoration: compositor SSD by default; explicit client CSD is honored.
 pub static ZXDG_DECORATION_MANAGER_V1: Interface = Interface {
   name: "zxdg_decoration_manager_v1",
   version: 1,
