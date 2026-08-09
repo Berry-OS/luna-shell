@@ -75,6 +75,35 @@ pub static wl_registry_interface: WlInterface = WlInterface {
     events: WL_REGISTRY_EVENTS.as_ptr(),
 };
 
+/* Added to the core protocol in Wayland 1.23.  Mesa's Wayland EGL platform
+ * links against this descriptor even when the compositor does not advertise
+ * the wl_fixes global, so omitting the symbol prevents libEGL_mesa itself from
+ * loading (GLVND reports that downstream as EGL_BAD_PARAMETER). */
+static WL_FIXES_DESTROY_REGISTRY_TYPES: Spa<1> =
+    Spa([&wl_registry_interface as *const _]);
+static WL_FIXES_REQUESTS: [wl_message; 2] = [
+    wl_message {
+        name: c_str!("destroy"),
+        signature: c_str!(""),
+        types: std::ptr::null(),
+    },
+    wl_message {
+        name: c_str!("destroy_registry"),
+        signature: c_str!("o"),
+        types: WL_FIXES_DESTROY_REGISTRY_TYPES.ptr(),
+    },
+];
+
+#[no_mangle]
+pub static wl_fixes_interface: WlInterface = WlInterface {
+    name: c_str!("wl_fixes"),
+    version: 1,
+    method_count: 2,
+    methods: WL_FIXES_REQUESTS.as_ptr(),
+    event_count: 0,
+    events: std::ptr::null(),
+};
+
 
 pub static WL_DISPLAY_SYNC_TYPES: Spa<1> = Spa([&wl_callback_interface as *const _]);
 pub static WL_DISPLAY_GET_REGISTRY_TYPES: Spa<1> = Spa([&wl_registry_interface as *const _]);

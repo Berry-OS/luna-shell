@@ -399,10 +399,11 @@
       <div id="settings_title">System Settings</div>
       <div id="settings_body">
         <div id="settings_sidebar">
-          <div class="stab active" id="stab_apps"><span class="stab_icon luna_icon">&#xf013;</span> Applications</div>
-          <div class="stab" id="stab_disp"><span class="stab_icon luna_icon">&#xf108;</span> Appearance</div>
-          <div class="stab" id="stab_keyboard"><span class="stab_icon luna_icon">&#xf11c;</span> Keyboard</div>
-          <div class="stab" id="stab_wm"><span class="stab_icon luna_icon">&#xf2d0;</span> Windows</div>
+          <div class="stab active" id="stab_apps" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf013;</span> Applications</div>
+          <div class="stab" id="stab_disp" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf108;</span> Appearance</div>
+          <div class="stab" id="stab_language" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf1ab;</span> Language</div>
+          <div class="stab" id="stab_keyboard" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf11c;</span> Keyboard</div>
+          <div class="stab" id="stab_wm" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf2d0;</span> Windows</div>
         </div>
         <div id="settings_content">
           <!-- Apps Panel -->
@@ -472,6 +473,30 @@
                 <span class="cur_desc">Vibrant glow</span>
               </div>
             </div>
+          </div>
+
+          <!-- Language & region panel. Locale applies to apps launched after the change. -->
+          <div id="settings_panel_language" class="hidden">
+            <span class="panel_heading">Language &amp; Region</span>
+            <span class="pref_hint">Choose the session language and regional format. New applications use it immediately; sign in again so every application inherits it.</span>
+            <span class="pref_section">Application language and formats</span>
+            <div id="locale_cards" class="option_card_grid" role="radiogroup" aria-label="Display language">
+              <div class="option_card" id="locale_ja" role="radio" tabindex="0">
+                <span class="option_card_name">日本語</span><span class="option_card_desc">日本 · ja_JP.UTF-8</span>
+              </div>
+              <div class="option_card" id="locale_en" role="radio" tabindex="0">
+                <span class="option_card_name">English</span><span class="option_card_desc">United States · en_US.UTF-8</span>
+              </div>
+              <div class="option_card" id="locale_c" role="radio" tabindex="0">
+                <span class="option_card_name">English (portable)</span><span class="option_card_desc">C.UTF-8 · always available</span>
+              </div>
+            </div>
+            <span class="pref_section">Keyboard locks</span>
+            <div class="wm_pref system_pref" id="sys_numlock" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">NumLock at sign-in</span><span class="wm_pref_desc">Enable the numeric keypad now and restore it at the next Luna session.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <span class="settings_notice">The physical NumLock key remains usable. CapsLock and ScrollLock are also synchronized with Wayland applications.</span>
           </div>
 
           <!-- Keyboard panel: selecting a card applies and saves immediately. -->

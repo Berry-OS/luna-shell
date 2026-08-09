@@ -70,6 +70,9 @@
   --skin-preview-e:   #171814;
   --skin-preview-f:   #a58a5c;
   --skin-error:       #ff756f;
+  --color-settings-selected: rgba(141, 123, 255, 0.14);
+  --ease-out:         cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast:         150ms;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -715,9 +718,16 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   padding: 0 12px; border-radius: var(--radius-sm); cursor: pointer;
   background-color: transparent; border: 1px solid transparent;
   display: flex; align-items: center;
-  transition: all 0.15s ease;
+  white-space: nowrap;
+  transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
 .stab:hover { color: #ffffff; background-color: rgba(255, 255, 255, 0.08); }
+.stab:focus-visible { outline: 3px solid var(--luna-accent); outline-offset: 2px; }
+.stab:active { transform: translateY(1px); }
+.stab.disabled { opacity: 0.45; cursor: not-allowed; }
+.stab.loading { opacity: 0.72; }
+.stab.error { border-color: var(--skin-error); }
+.stab.success { border-color: var(--luna-accent); }
 .stab.active {
   background: linear-gradient(120deg, rgba(var(--luna-accent-rgb), 0.35), rgba(var(--luna-gold-rgb), 0.18));
   color: #ffffff; font-weight: 600;
@@ -734,16 +744,17 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   background-color: rgba(0, 0, 0, 0.25);
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: var(--radius-sm); color: #ffffff; font-size: 12.5px; padding: 0 12px;
-  transition: all 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
 .pref_input:hover { border-color: rgba(255, 255, 255, 0.28); }
 .pref_input:focus { outline: none; border-color: var(--luna-accent); box-shadow: 0 0 0 3px rgba(var(--luna-accent-rgb), 0.25); }
 
 /* Display panel elements */
 #settings_panel_disp { flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
+#settings_panel_language { flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; }
 #settings_panel_keyboard { flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; }
 #settings_panel_wm { flex: 1 1 auto; display: flex; flex-direction: column; gap: 6px; }
-.pref_section { color: var(--luna-text-dim); font-size: 11.5px; font-weight: 600; margin: 14px 0 8px 0; }
+.pref_section { color: var(--luna-text-dim); font-size: 11.5px; font-weight: 600; margin: 16px 0 8px 0; }
 
 /* Hallmark · macrostructure: Catalogue · tone: quiet-utilitarian · anchor hue: violet
  * component: skin picker · states: default · hover · focus · active · disabled · loading · error · success
@@ -758,7 +769,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   padding: 6px 8px; border: 1px solid var(--dialog-divider);
   border-radius: var(--radius-sm); background-color: var(--skin-card);
   color: var(--luna-text); cursor: pointer;
-  transition: background-color 150ms cubic-bezier(0.16, 1, 0.3, 1), transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
 }
 .skin_card:hover { background-color: var(--skin-card-hover); }
 .skin_card:focus-visible { outline: 3px solid var(--luna-accent); outline-offset: 2px; }
@@ -782,7 +793,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .skin_desc { color: var(--luna-text-muted); font-size: 9.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 #wp_thumbs_row { display: flex; flex-direction: row; gap: 12px; height: 60px; margin-bottom: 4px; }
-.wp_thumb { width: 92px; height: 56px; border-radius: 10px; cursor: pointer; border: 2px solid rgba(255, 255, 255, 0.10); transition: all 0.15s ease; }
+.wp_thumb { width: 92px; height: 56px; border-radius: 10px; cursor: pointer; border: 2px solid rgba(255, 255, 255, 0.10); transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
 .wp_thumb.selected { border-color: var(--luna-accent); box-shadow: 0 0 16px rgba(var(--luna-accent-rgb), 0.40); transform: translateY(-2px); }
 .wp_thumb:hover { border-color: rgba(255, 255, 255, 0.35); }
 .wp_t_night  { background: linear-gradient(135deg, #06071a 0%, #2e2472 55%, #833a94 100%); }
@@ -800,7 +811,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   background-color: rgba(255, 255, 255, 0.04);
   border: 1.5px solid rgba(255, 255, 255, 0.10);
   border-radius: var(--radius-md); padding: 8px;
-  transition: all 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
 }
 .cur_card:hover { border-color: rgba(255, 255, 255, 0.30); background-color: rgba(255, 255, 255, 0.08); }
 .cur_card.selected { border-color: var(--luna-accent); box-shadow: 0 0 16px rgba(var(--luna-accent-rgb), 0.35); background-color: rgba(var(--luna-accent-rgb), 0.12); }
@@ -824,7 +835,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   background-color: rgba(255, 255, 255, 0.04);
   border: 1.5px solid rgba(255, 255, 255, 0.10);
   border-radius: var(--radius-md); padding: 8px 12px;
-  transition: all 0.15s ease;
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
 }
 .kb_card:hover { border-color: rgba(255, 255, 255, 0.30); background-color: rgba(255, 255, 255, 0.08); }
 .kb_card:focus-visible { outline: 3px solid rgba(var(--luna-accent-rgb), 0.58); outline-offset: 2px; }
@@ -833,6 +844,40 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .kb_name { color: #ffffff; font-size: 12px; font-weight: 600; }
 .kb_desc { color: var(--luna-text-muted); font-size: 10px; }
 .kb_help { color: var(--luna-text-muted); font-size: 10.5px; line-height: 1.5; margin-top: 2px; }
+
+/* Hallmark · component: settings dialog · genre: modern-minimal · theme: Luna Moonlight
+ * states: default · hover · focus · active · disabled · loading · error · success
+ * contrast: pass (40–41) · responsive: desktop-session scope
+ */
+.option_card_grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px; width: 100%; margin-bottom: 8px;
+}
+.option_card {
+  min-width: 0; min-height: 64px;
+  display: flex; flex-direction: column; justify-content: center; gap: 4px;
+  padding: 8px 12px; cursor: pointer;
+  border: 1px solid var(--dialog-divider); border-radius: var(--radius-sm);
+  background-color: var(--skin-card); color: var(--luna-text);
+  transition: background-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+}
+.option_card:hover { background-color: var(--skin-card-hover); }
+.option_card:focus-visible { outline: 3px solid var(--luna-accent); outline-offset: 2px; }
+.option_card:active { transform: translateY(1px); }
+.option_card.disabled { opacity: 0.45; cursor: not-allowed; }
+.option_card.loading { opacity: 0.72; }
+.option_card.error { border-color: var(--skin-error); }
+.option_card.success, .option_card.selected {
+  border-color: var(--luna-accent);
+  background-color: var(--color-settings-selected);
+}
+.option_card_name { font-size: 12.5px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.option_card_desc { color: var(--luna-text-dim); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.settings_notice {
+  margin-top: 8px; padding: 8px 12px;
+  border-left: 2px solid var(--luna-gold);
+  color: var(--luna-text-dim); font-size: 10.5px; line-height: 1.45;
+}
 
 .pref_hint { color: var(--luna-text-muted); font-size: 11px; margin-bottom: 12px; }
 .pref_row_full { display: flex; flex-direction: row; margin-top: 4px; height: 36px; }
@@ -846,6 +891,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   background-color: rgba(255, 255, 255, 0.035);
 }
 .wm_pref:hover { background-color: rgba(255, 255, 255, 0.07); }
+.wm_pref.system_pref { min-height: 56px; gap: 12px; padding: 8px 12px; }
 .wm_pref_text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .wm_pref_name { color: var(--luna-text); font-size: 12.5px; font-weight: 600; }
 .wm_pref_desc { color: var(--luna-text-dim); font-size: 10.5px; line-height: 1.3; }
@@ -857,12 +903,15 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .wm_switch_knob {
   width: 16px; height: 16px; border-radius: 8px;
   background-color: var(--luna-text-dim);
-  transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
 }
 .wm_pref.on .wm_switch { background-color: var(--luna-accent-dark); border-color: var(--luna-accent-2); }
 .wm_pref.on .wm_switch_knob { transform: translateX(16px); background-color: var(--luna-text); }
 .wm_pref:active { background-color: rgba(var(--luna-accent-rgb), 0.10); }
-.wm_pref.disabled, .wm_choice.disabled { opacity: 0.45; cursor: default; }
+.wm_pref.disabled, .wm_choice.disabled { opacity: 0.45; cursor: not-allowed; }
+.wm_pref.loading, .wm_choice.loading { opacity: 0.72; }
+.wm_pref.error, .wm_choice.error { border-color: var(--skin-error); }
+.wm_pref.success, .wm_choice.success { border-color: var(--luna-accent); }
 .wm_pref:focus-visible, .wm_choice:focus-visible { outline: 3px solid rgba(var(--luna-accent-rgb), 0.58); outline-offset: 2px; }
 .wm_choice_row { display: flex; flex-direction: row; gap: 8px; margin-bottom: 4px; }
 .wm_choice {

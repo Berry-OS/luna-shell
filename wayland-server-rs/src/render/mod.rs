@@ -97,6 +97,18 @@ impl Rect {
         }
     }
 
+    /// Translate a protocol-supplied rectangle without wrapping at the i32
+    /// boundary. Wayland clients commonly use INT32_MAX damage extents to mean
+    /// "the whole surface", so adding a positive window origin must saturate.
+    pub fn translated(&self, dx: i32, dy: i32) -> Rect {
+        Rect {
+            x0: self.x0.saturating_add(dx),
+            y0: self.y0.saturating_add(dy),
+            x1: self.x1.saturating_add(dx),
+            y1: self.y1.saturating_add(dy),
+        }
+    }
+
     pub fn area(&self) -> i64 {
         if self.is_empty() {
             0
@@ -333,6 +345,15 @@ mod tests {
     }
 
     #[test]
+    fn rect_translation_saturates_full_surface_damage() {
+        let damage = Rect::new(0, 0, i32::MAX, i32::MAX);
+        assert_eq!(
+            damage.translated(120, 80),
+            Rect::new(120, 80, i32::MAX, i32::MAX)
+        );
+    }
+
+    #[test]
     fn clear_only_touches_the_clip() {
         let mut fb = Framebuffer::new(4, 4);
         fb.clear(0);
@@ -416,6 +437,10 @@ pub trait Backend {
     ) -> Option<(std::sync::mpsc::Receiver<InputEvent>, std::os::unix::io::RawFd)> {
         None
     }
+
+    /// Synchronize physical keyboard indicators: Num, Caps, Scroll in bits 0..2.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_keyboard_leds(&self, _leds: u8) {}
 
     /// Descriptor the event loop must watch for presentation completions
     /// (DRM page-flip events).  `None` means presentation is synchronous.

@@ -44,6 +44,15 @@ Dock / Launchpad のアプリは環境変数 `LUNA_APP_<NAME>`（例: `LUNA_APP_
 へ保存される。`skins/` には **Windows XP**、**Windows 95**、**BeOS**、
 **Classic Mac OS**、**Amiga Workbench**、**Nocturne Atelier** を収録している。
 
+### 言語・キーボードロック
+
+**System Settings → Language & Region** ではセッションの言語・地域ロケールと
+ログイン時の NumLock を変更できる。言語は変更後に起動したアプリへ即時反映し、
+すべてのアプリには次回ログイン時に反映する。NumLock / CapsLock / ScrollLock は
+Wayland の locked modifier と実キーボードのLEDへ同期されるため、テンキーと各ロックキーを
+通常どおり使用できる。キーボード配列は **Keyboard** で変更でき、複数配列では
+Alt+Shift で切り替える。
+
 スキンは次の外部ファイルで構成する:
 
 ```text

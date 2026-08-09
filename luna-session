@@ -255,13 +255,48 @@ if [ -n "$FBDEV" ]; then
     COMPOSITOR_ARGS+=(--fbdev "$FBDEV")
 fi
 
+# Read the small set of session-wide preferences without sourcing the file as
+# shell code.  This happens before luna-compositor starts, so its first keymap
+# and NumLock state already match the Settings dialog (no login-time flicker).
+_luna_settings="${XDG_CONFIG_HOME:-$HOME/.config}/luna-shell/settings.conf"
+_saved_language=""
+_saved_kb_layout=""
+_saved_numlock=""
+if [ -r "$_luna_settings" ]; then
+    while IFS='=' read -r _setting_key _setting_value; do
+        case "$_setting_key" in
+            ui_language) _saved_language="$_setting_value" ;;
+            kb_layout)   _saved_kb_layout="$_setting_value" ;;
+            numlock_on)  _saved_numlock="$_setting_value" ;;
+        esac
+    done < "$_luna_settings"
+fi
+
 # Locale: Xorg sessions get this from berryos-xsession / PAM; a raw VT does not.
-export LANG="${LANG:-ja_JP.UTF-8}"
-export LC_CTYPE="${LC_CTYPE:-$LANG}"
+case "$_saved_language" in
+    ja_JP.UTF-8|en_US.UTF-8|C.UTF-8)
+        export LANG="$_saved_language"
+        export LC_ALL="$_saved_language"
+        export LC_CTYPE="$_saved_language"
+        ;;
+    *)
+        export LANG="${LANG:-ja_JP.UTF-8}"
+        export LC_CTYPE="${LC_CTYPE:-$LANG}"
+        ;;
+esac
+case "$_saved_numlock" in
+    0) export LUNA_NUMLOCK=0 ;;
+    1) export LUNA_NUMLOCK=1 ;;
+esac
 
 # Keyboard layout (XKB). Compositor embeds this into wl_keyboard.keymap.
 # Multilingual: comma-separated layouts (e.g. jp,us) with Alt+Shift to toggle.
 # Override anytime with XKB_DEFAULT_LAYOUT / VARIANT / OPTIONS.
+if [ -z "${XKB_DEFAULT_LAYOUT:-}" ]; then
+    if [ -n "$_saved_kb_layout" ]; then
+        export XKB_DEFAULT_LAYOUT="$_saved_kb_layout"
+    fi
+fi
 if [ -z "${XKB_DEFAULT_LAYOUT:-}" ]; then
     # Keyboard hardware and message locale are independent.  Berry images use
     # LANG=C.UTF-8 but record the actual console/XKB layout in vconsole.conf;
@@ -315,6 +350,7 @@ if [ -z "${XKB_DEFAULT_OPTIONS:-}" ] && echo "$XKB_DEFAULT_LAYOUT" | grep -q ','
     export XKB_DEFAULT_OPTIONS=grp:alt_shift_toggle
 fi
 echo "→ Keyboard: XKB_DEFAULT_LAYOUT=$XKB_DEFAULT_LAYOUT${XKB_DEFAULT_OPTIONS:+ options=$XKB_DEFAULT_OPTIONS}"
+unset _luna_settings _saved_language _saved_kb_layout _saved_numlock _setting_key _setting_value
 
 # Session bus (portal / some GTK apps expect it; X sessions start it via xinitrc.d).
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-launch >/dev/null 2>&1; then
@@ -357,6 +393,10 @@ unset _gtk_ver _gtk_dir _gtk_ini
 export GDK_BACKEND="${GDK_BACKEND:-wayland}"
 export MOZ_ENABLE_WAYLAND="${MOZ_ENABLE_WAYLAND:-1}"
 export MOZ_LAYERS_ALLOW_SOFTWARE_GL="${MOZ_LAYERS_ALLOW_SOFTWARE_GL:-1}"
+# Firefox must keep its own titlebar in Luna.  Skins may prefer compositor
+# decorations for traditional applications, but Firefox's Wayland window and
+# input geometry are built around its integrated tab/title bar.
+export MOZ_GTK_TITLEBAR_DECORATION="${MOZ_GTK_TITLEBAR_DECORATION:-client}"
 # Compositor holds DRM master; hardware EGL in clients yields fd=-1 and Firefox
 # hangs in WaitFlushedEvent.  Force the generic Mesa software path for session
 # children, but do not pin both the loader and Gallium driver: that combination

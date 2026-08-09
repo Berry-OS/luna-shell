@@ -36,6 +36,12 @@ const TOPLEVEL_STATE_RESIZING: u32 = 3;
 const TOPLEVEL_STATE_ACTIVATED: u32 = 4;
 const TOPLEVEL_STATE_TILED_LEFT: u32 = 5;
 const TOPLEVEL_STATE_TILED_RIGHT: u32 = 6;
+// Standard pc keymaps expose CapsLock as Lock, NumLock as Mod2 and
+// ScrollLock as Mod3.  These are the modifier masks clients compile from the
+// same keymap text below.
+const XKB_LOCK_CAPS: u32 = 1 << 1;
+const XKB_LOCK_NUM: u32 = 1 << 4;
+const XKB_LOCK_SCROLL: u32 = 1 << 5;
 
 /// xdg_toplevel.resize_edge bits
 const RESIZE_EDGE_TOP: u32 = 1;
@@ -179,10 +185,21 @@ pub struct Server {
   cursor_surface_id: u32,
   cursor_hot_x: i32,
   cursor_hot_y: i32,
+  /// Visibility is a property of cursor buffer contents, not pointer position.
+  /// Cache it so a high-polling-rate mouse does not rescan the GTK cursor on
+  /// every motion event.
+  cursor_visibility_key: Option<(u64, u64, usize, u64, i32, i32)>,
+  cursor_visible: bool,
   kbd_entered: bool,
   kbd_client_fd: RawFd,
   kbd_surface_id: u32,
   kbd_mods: u32,
+  /// XKB locked modifiers and active layout group.  Wayland clients do not
+  /// derive lock state from wl_keyboard.key events; the compositor must send
+  /// it in wl_keyboard.modifiers (NumLock is Mod2 in the standard keymap).
+  kbd_locked: u32,
+  kbd_group: u32,
+  kbd_group_count: u32,
   pressed_keys: HashSet<u32>,
   active_text_input: Option<(RawFd, u32, u32)>,
 
@@ -329,10 +346,18 @@ impl Server {
       cursor_surface_id: 0,
       cursor_hot_x: 1,
       cursor_hot_y: 1,
+      cursor_visibility_key: None,
+      cursor_visible: false,
       kbd_entered: false,
       kbd_client_fd: -1,
       kbd_surface_id: 0,
       kbd_mods: 0,
+      kbd_locked: if std::env::var("LUNA_NUMLOCK")
+        .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off"))
+        .unwrap_or(true)
+      { XKB_LOCK_NUM } else { 0 },
+      kbd_group: 0,
+      kbd_group_count: xkb_layout_group_count(None),
       pressed_keys: HashSet::new(),
       active_text_input: None,
 
@@ -369,7 +394,7 @@ impl Server {
       wm_titlebar_active: 0,
       wm_titlebar_inactive: 0,
       wm_titlebar_frame: 0,
-      wm_prefer_ssd: true,
+      wm_prefer_ssd: false,
       wm_super_shortcuts: true,
       compose_layers: Default::default(),
       compose_toplevels: Vec::new(),
@@ -395,6 +420,8 @@ impl Server {
       server.present_event_fd = fd;
       server.epoll_add(fd);
     }
+
+    server.sync_keyboard_leds();
 
     server.epoll_add(server.listener.fd);
     server.epoll_add(server.signal_fd);
@@ -801,7 +828,10 @@ impl Server {
       }
       "wl_seat" => {
         client.send(id, 0, &[Arg::Uint(0x3)]);
-        client.send(id, 1, &[Arg::Str(Some("seat0".into()))]);
+        // wl_seat.name was added in version 2.
+        if version >= 2 {
+          client.send(id, 1, &[Arg::Str(Some("seat0".into()))]);
+        }
       }
       "wl_output" => {
         let (w, h) = self.backend.size();
@@ -1302,6 +1332,38 @@ impl Server {
       s.pending_buffer = None;
     }
 
+    // GTK unmaps menus by attaching a NULL buffer before it destroys the
+    // xdg_popup objects.  The popup protocol object can therefore outlive its
+    // visible surface.  Keeping either grab across that transition redirects
+    // all pointer input from unrelated clients (for example luna-editor) to
+    // the now-invisible GTK popup until GTK eventually reuses or destroys it.
+    let popup_unmapped = was_mapped
+      && matches!(
+        client.objects.get(&id),
+        Some(Object { role: Role::Surface(s), .. }) if s.popup && !s.mapped
+      );
+    if popup_unmapped {
+      self.popup_stack.retain(|&(popup_fd, sid)| popup_fd != fd || sid != id);
+      if self.popup_grab.map(|g| (g.0, g.2)) == Some((fd, id)) {
+        self.popup_grab = None;
+      }
+      if self.pointer_grab.map(|g| (g.0, g.1)) == Some((fd, id)) {
+        self.pointer_grab = None;
+        self.last_button_pressed = false;
+      }
+      if self.ptr_client_fd == fd && self.ptr_surface_id == id {
+        self.ptr_entered = false;
+        self.ptr_client_fd = -1;
+        self.ptr_surface_id = 0;
+      }
+      if self.cursor_client_fd == fd && self.cursor_surface_id == id {
+        self.cursor_client_fd = -1;
+        self.cursor_surface_id = 0;
+        self.pending_cursor = None;
+        self.cursor_dirty = true;
+      }
+    }
+
     // wl_output.scale only applies to a surface after wl_surface.enter.  This
     // was previously never emitted, leaving GTK to use fallback monitor state.
     let needs_output_enter = matches!(
@@ -1777,6 +1839,20 @@ impl Server {
           let variant = parts.next().map(|s| s.to_string());
           let options = parts.next().map(|s| s.to_string());
           self.reload_keymap(layout.as_deref(), variant.as_deref(), options.as_deref());
+        }
+        (Some("keyboard_lock"), Some(name)) => {
+          let enabled = parts.next().map(|v| v != "0" && v != "off" && v != "false").unwrap_or(true);
+          let mask = match name {
+            "numlock" => XKB_LOCK_NUM,
+            "capslock" => XKB_LOCK_CAPS,
+            "scrolllock" => XKB_LOCK_SCROLL,
+            _ => 0,
+          };
+          if mask != 0 {
+            set_locked_modifier(&mut self.kbd_locked, mask, enabled);
+            self.sync_keyboard_leds();
+            self.send_focused_keyboard_modifiers();
+          }
         }
         _ => {}
       }
@@ -3129,7 +3205,11 @@ impl Server {
     let nid = args.get(0).map(|a| a.as_object()).unwrap_or(0);
     if nid != 0 {
       let role = if opcode == 0 { Role::Pointer } else { Role::Keyboard };
-      client.objects.insert(nid, Object::new(iface, iface.version, role));
+      // Objects created by wl_seat inherit the negotiated wl_seat version.
+      // Recording the interface maximum here made us send wl_pointer.frame
+      // (since v5) to GLFW's v4 pointer, whose frame listener is NULL.
+      let seat_version = client.objects.get(&id).map(|o| o.version).unwrap_or(1);
+      client.objects.insert(nid, Object::new(iface, seat_version.min(iface.version), role));
 
       // GTK4 crashes without a wl_keyboard keymap event.
       if opcode == 1 {
@@ -3176,11 +3256,20 @@ impl Server {
       .and_then(|s| s.parse::<i32>().ok())
       .filter(|d| *d >= 0 && *d <= 5000)
       .unwrap_or(600);
-    client.send(keyboard_id, repeat_opcode, &[Arg::Int(rate), Arg::Int(delay)]);
+    let can_send_repeat = match client.objects.get(&keyboard_id) {
+      Some(Object { role: Role::InputMethodKeyboardGrab { .. }, .. }) => true,
+      Some(object) => object.version >= 4, // wl_keyboard.repeat_info since v4
+      None => false,
+    };
+    if can_send_repeat {
+      client.send(keyboard_id, repeat_opcode, &[Arg::Int(rate), Arg::Int(delay)]);
+    }
   }
 
   fn reload_keymap(&mut self, layout: Option<&str>, variant: Option<&str>, options: Option<&str>) {
     self.keymap_bytes = build_xkb_keymap(layout, variant, options);
+    self.kbd_group_count = xkb_layout_group_count(layout);
+    self.kbd_group = 0;
     let data = self.keymap_bytes.clone();
     let targets: Vec<(RawFd, u32)> = self
       .clients
@@ -3200,6 +3289,7 @@ impl Server {
         client.conn.flush();
       }
     }
+    self.send_focused_keyboard_modifiers();
     eprintln!(
       "[luna-compositor] keymap reloaded ({} bytes)",
       data.len()
@@ -4805,6 +4895,9 @@ impl Server {
       return;
     }
     self.kbd_mods = depressed;
+    self.kbd_locked = locked;
+    self.kbd_group = group.min(self.kbd_group_count.saturating_sub(1));
+    self.sync_keyboard_leds();
     let serial = self.next_serial();
     if target_fd == virtual_client.conn.fd {
       if let Some(keyboard_id) = Self::keyboard_id(virtual_client) {
@@ -5107,9 +5200,12 @@ impl Server {
                 parent_surface_id: None,
                 saved_geom: None,
                 tiled: 0,
-                // SSD is the default even when a client does not implement
-                // xdg-decoration; explicit CSD negotiation changes this to 1.
-                decoration_mode: if self.wm_prefer_ssd { 2 } else { 1 },
+                // Absence of an xdg-decoration object means the compositor
+                // cannot know that client pixels exclude decorations.  Treat
+                // such clients as CSD (notably GTK HeaderBar windows); the
+                // decoration manager switches this to the configured mode as
+                // soon as the client opts into negotiation.
+                decoration_mode: 1,
                 min_w: 0,
                 min_h: 0,
                 max_w: 0,
@@ -5378,10 +5474,15 @@ impl Server {
           self.window_stack.push((fd, sid));
           self.focused_client_fd = fd;
           self.focused_surface_id = sid;
-          let (sx, sy) = self
-            .surface_geometry(fd, sid)
-            .map(|(ox, oy, _, _)| (ox + x, oy + y))
-            .unwrap_or((x, y));
+          // Request dispatch temporarily removes `client` from self.clients,
+          // so looking the surface up through `surface_geometry(fd, sid)`
+          // always failed here.  x/y are wl_surface-local (not
+          // window_geometry-local); add the actual buffer origin directly.
+          let (ox, oy) = match client.objects.get(&sid) {
+            Some(Object { role: Role::Surface(s), .. }) => (s.x, s.y),
+            _ => (0, 0),
+          };
+          let (sx, sy) = (ox.saturating_add(x), oy.saturating_add(y));
           self.pending_shell_menu = Some((fd, sid, sx, sy));
           self.dirty = true;
           self.shell_state_dirty = true;
@@ -6209,8 +6310,16 @@ impl Server {
     // GTK can hand us a cursor surface whose buffer is still empty / fully
     // transparent (theme load race).  Fall back so the pointer never vanishes
     // until the next set_cursor (often triggered by typing).
-    let client_buf = client_cursor.filter(|buf| {
-      buf.width > 0 && buf.height > 0 && shm_buffer_has_visible_pixel(buf)
+    let client_buf = client_cursor.and_then(|buf| {
+      let (dev, ino) = buf.storage_id();
+      let key = (dev, ino, buf.offset, buf.serial(), buf.width, buf.height);
+      if self.cursor_visibility_key != Some(key) {
+        self.cursor_visible = buf.width > 0
+          && buf.height > 0
+          && shm_buffer_has_visible_pixel(&buf);
+        self.cursor_visibility_key = Some(key);
+      }
+      self.cursor_visible.then_some(buf)
     });
 
     if let Some(buf) = client_buf {
@@ -6285,13 +6394,22 @@ impl Server {
     if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get_mut(&sid) {
       let d = std::mem::replace(&mut s.damage, Rect::EMPTY);
       if !d.is_empty() {
-        *out = out.union(&Rect::new(d.x0 + ox, d.y0 + oy, d.x1 + ox, d.y1 + oy));
+        *out = out.union(&d.translated(ox, oy));
       }
     }
     // subsurface_children borrows `subs`, not the client, so walking it while
     // holding a mutable client borrow needs no temporary list.
     for &(_, _, _, child, x, y) in Self::subsurface_children(subs, fd, sid) {
-      Self::take_damage_tree(client, subs, fd, child, ox + x, oy + y, depth + 1, out);
+      Self::take_damage_tree(
+        client,
+        subs,
+        fd,
+        child,
+        ox.saturating_add(x),
+        oy.saturating_add(y),
+        depth + 1,
+        out,
+      );
     }
   }
 
@@ -6972,8 +7090,12 @@ impl Server {
       let mut kbd_id = 0u32;
       for (&oid, obj) in &client.objects {
         match &obj.role {
-          Role::Pointer => ptr_id = oid,
-          Role::Keyboard => kbd_id = oid,
+          // Toolkits may bind another seat pointer for CSD/libdecor after the
+          // application's pointer. HashMap iteration order is deliberately
+          // unstable, so select the oldest resource deterministically instead
+          // of sometimes routing all input to the decoration helper.
+          Role::Pointer if ptr_id == 0 || oid < ptr_id => ptr_id = oid,
+          Role::Keyboard if kbd_id == 0 || oid < kbd_id => kbd_id = oid,
           _ => {}
         }
       }
@@ -7018,7 +7140,8 @@ impl Server {
           }
         } else if s.popup {
           if let Some(buf) = &s.current_buffer {
-            if px >= s.x && py >= s.y && px < s.x + buf.width && py < s.y + buf.height
+            if s.mapped
+              && px >= s.x && py >= s.y && px < s.x + buf.width && py < s.y + buf.height
               && Self::surface_input_hit(s, px - s.x, py - s.y)
             {
               candidates.push((45, fd, surf_id, ptr_id, kbd_id, buf.width, buf.height, s.x, s.y));
@@ -7067,9 +7190,11 @@ impl Server {
         return best;
       }
       if let Some(client) = self.clients.get(&grab_fd) {
-        let ptr_id = client.objects.iter().find_map(|(&oid, o)|
-          matches!(o.role, Role::Pointer).then_some(oid)).unwrap_or(0);
-        if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&grab_sid) {
+        let ptr_id = client.objects.iter().filter_map(|(&oid, o)|
+          matches!(o.role, Role::Pointer).then_some(oid)).min().unwrap_or(0);
+        if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&grab_sid)
+          .filter(|Object { role, .. }| matches!(role, Role::Surface(s) if s.mapped && s.popup))
+        {
           let (sw, sh) = Self::surface_tree_size(client, grab_sid).unwrap_or((1, 1));
           return Some((grab_fd, grab_sid, ptr_id, 0, sw, sh, s.x, s.y));
         }
@@ -7083,6 +7208,15 @@ impl Server {
     let sx = (nx * bw as f32) as i32 - origin_x;
     let sy = (ny * bh as f32) as i32 - origin_y;
     (sx * 256, sy * 256)
+  }
+
+  #[inline]
+  fn send_pointer_frame(client: &mut Client, pointer_id: u32) {
+    // wl_pointer.frame was added in version 5.  Older GLFW clients leave the
+    // corresponding listener slot NULL and libwayland aborts if it is sent.
+    if client.objects.get(&pointer_id).is_some_and(|o| o.version >= 5) {
+      client.send(pointer_id, 5, &[]);
+    }
   }
 
   fn inject_ptr_motion(&mut self, nx: f32, ny: f32) {
@@ -7099,7 +7233,7 @@ impl Server {
         let ts = now_ms();
         if let Some(client) = self.clients.get_mut(&fd) {
           client.send(ptr_id, 2, &[Arg::Uint(ts), Arg::Fixed(fx), Arg::Fixed(fy)]);
-          client.send(ptr_id, 5, &[]);
+          Self::send_pointer_frame(client, ptr_id);
           client.conn.flush();
         }
         return;
@@ -7146,7 +7280,7 @@ impl Server {
       let serial = self.next_serial();
       if let Some(client) = self.clients.get_mut(&fd) {
         client.send(ptr_id, 0, &[Arg::Uint(serial), Arg::Object(surf_id), Arg::Fixed(fx), Arg::Fixed(fy)]);
-        client.send(ptr_id, 5, &[]);
+        Self::send_pointer_frame(client, ptr_id);
         client.conn.flush();
       }
       self.ptr_entered = true;
@@ -7163,7 +7297,7 @@ impl Server {
     }
     if let Some(client) = self.clients.get_mut(&fd) {
       client.send(ptr_id, 2, &[Arg::Uint(ts), Arg::Fixed(fx), Arg::Fixed(fy)]);
-      client.send(ptr_id, 5, &[]);
+      Self::send_pointer_frame(client, ptr_id);
       client.conn.flush();
     }
     // Do NOT move keyboard / text-input focus on motion.  Pointer-follows
@@ -7179,14 +7313,14 @@ impl Server {
     let fd = self.ptr_client_fd;
     let surf = self.ptr_surface_id;
     let ptr_id = self.clients.get(&fd).and_then(|c| {
-      c.objects.iter().find_map(|(&id, o)| matches!(o.role, Role::Pointer).then_some(id))
+      c.objects.iter().filter_map(|(&id, o)| matches!(o.role, Role::Pointer).then_some(id)).min()
     }).unwrap_or(0);
     if ptr_id != 0 {
       let serial = self.next_serial();
       if let Some(client) = self.clients.get_mut(&fd) {
         // wl_pointer.leave = opcode 1
         client.send(ptr_id, 1, &[Arg::Uint(serial), Arg::Object(surf)]);
-        client.send(ptr_id, 5, &[]);
+        Self::send_pointer_frame(client, ptr_id);
         client.conn.flush();
       }
     }
@@ -7370,7 +7504,7 @@ impl Server {
       {
         let client = self.clients.get_mut(&fd).unwrap();
         client.send(ptr_id, 0, &[Arg::Uint(serial), Arg::Object(surf_id), Arg::Fixed(fx), Arg::Fixed(fy)]);
-        client.send(ptr_id, 5, &[]);
+        Self::send_pointer_frame(client, ptr_id);
         client.conn.flush();
       }
       self.ptr_entered = true;
@@ -7423,7 +7557,7 @@ impl Server {
     let state: u32 = if pressed { 1 } else { 0 };
     let client = self.clients.get_mut(&fd).unwrap();
     client.send(ptr_id, 3, &[Arg::Uint(serial), Arg::Uint(ts), Arg::Uint(button), Arg::Uint(state)]);
-    client.send(ptr_id, 5, &[]);
+    Self::send_pointer_frame(client, ptr_id);
     client.conn.flush();
     if !pressed {
       self.pointer_grab = None;
@@ -7439,17 +7573,19 @@ impl Server {
     let fv = (value * 256.0) as i32;
     let client = self.clients.get_mut(&fd).unwrap();
     client.send(ptr_id, 4, &[Arg::Uint(ts), Arg::Uint(axis), Arg::Fixed(fv)]);
-    client.send(ptr_id, 5, &[]);
+    Self::send_pointer_frame(client, ptr_id);
     client.conn.flush();
   }
 
   fn inject_key(&mut self, keycode: u32, pressed: bool) {
+    let was_pressed = self.pressed_keys.contains(&keycode);
     if pressed {
       self.pressed_keys.insert(keycode);
     } else {
       self.pressed_keys.remove(&keycode);
     }
     // xkb mod bits for the stock pc+us keymap: Shift=1, Control=4, Mod1/Alt=8, Mod4/Super=64
+    let previous_mods = self.kbd_mods;
     let mod_bit: u32 = match keycode {
       42 | 54 => 1,          // ShiftLeft / ShiftRight
       29 | 97 => 4,          // ControlLeft / ControlRight
@@ -7462,6 +7598,32 @@ impl Server {
         self.kbd_mods |= mod_bit;
       } else {
         self.kbd_mods &= !mod_bit;
+      }
+    }
+
+    // Lock keys are stateful XKB modifiers.  Sending only their key edge makes
+    // toolkits keep the keypad in navigation mode because wl_keyboard.modifiers
+    // previously advertised locked=0 forever.
+    if pressed && !was_pressed {
+      let lock_mask = match keycode {
+        58 => XKB_LOCK_CAPS,   // KEY_CAPSLOCK
+        69 => XKB_LOCK_NUM,    // KEY_NUMLOCK
+        70 => XKB_LOCK_SCROLL, // KEY_SCROLLLOCK
+        _ => 0,
+      };
+      if lock_mask != 0 {
+        self.kbd_locked ^= lock_mask;
+        self.sync_keyboard_leds();
+      }
+
+      // XKB's grp:alt_shift_toggle action also has to be represented in the
+      // modifiers event.  Rotate once when the second chord key is pressed.
+      if self.kbd_group_count > 1
+        && mod_bit != 0
+        && (self.kbd_mods & (1 | 8)) == (1 | 8)
+        && (previous_mods & (1 | 8)) != (1 | 8)
+      {
+        self.kbd_group = (self.kbd_group + 1) % self.kbd_group_count;
       }
     }
 
@@ -7586,7 +7748,7 @@ impl Server {
       let state = if pressed { 1 } else { 0 };
       if let Some(client) = self.clients.get_mut(&fd) {
         client.send(grab_id, 1, &[Arg::Uint(serial), Arg::Uint(ts), Arg::Uint(keycode), Arg::Uint(state)]);
-        client.send(grab_id, 2, &[Arg::Uint(modifiers_serial), Arg::Uint(self.kbd_mods), Arg::Uint(0), Arg::Uint(0), Arg::Uint(0)]);
+        client.send(grab_id, 2, &[Arg::Uint(modifiers_serial), Arg::Uint(self.kbd_mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
         client.conn.flush();
       }
       return;
@@ -7623,7 +7785,7 @@ impl Server {
     let mods = self.kbd_mods;
     let client = self.clients.get_mut(&fd).unwrap();
     client.send(kbd_id, 3, &[Arg::Uint(serial), Arg::Uint(ts), Arg::Uint(keycode), Arg::Uint(state)]);
-    client.send(kbd_id, 4, &[Arg::Uint(s2), Arg::Uint(mods), Arg::Uint(0), Arg::Uint(0), Arg::Uint(0)]);
+    client.send(kbd_id, 4, &[Arg::Uint(s2), Arg::Uint(mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
     client.conn.flush();
   }
 
@@ -7668,8 +7830,10 @@ impl Server {
     }
     let serial = self.next_serial();
     let keys: Vec<u8> = Vec::new();
+    let mods_serial = self.next_serial();
     let client = self.clients.get_mut(&fd).unwrap();
     client.send(kbd_id, 1, &[Arg::Uint(serial), Arg::Object(surf_id), Arg::Array(keys)]);
+    client.send(kbd_id, 4, &[Arg::Uint(mods_serial), Arg::Uint(self.kbd_mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
     client.conn.flush();
     self.kbd_entered = true;
     self.kbd_client_fd = fd;
@@ -7679,6 +7843,33 @@ impl Server {
     // often fails until the user copies again.
     self.emit_selection_to_client_fd(fd);
     self.emit_primary_to_client_fd(fd);
+  }
+
+  fn send_focused_keyboard_modifiers(&mut self) {
+    if !self.kbd_entered || self.kbd_client_fd < 0 {
+      return;
+    }
+    let fd = self.kbd_client_fd;
+    let keyboard_id = self.clients.get(&fd).and_then(Self::keyboard_id).unwrap_or(0);
+    if keyboard_id == 0 {
+      return;
+    }
+    let serial = self.next_serial();
+    if let Some(client) = self.clients.get_mut(&fd) {
+      client.send(keyboard_id, 4, &[
+        Arg::Uint(serial), Arg::Uint(self.kbd_mods), Arg::Uint(0),
+        Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group),
+      ]);
+      client.conn.flush();
+    }
+  }
+
+  fn sync_keyboard_leds(&self) {
+    let mut leds = 0;
+    if self.kbd_locked & XKB_LOCK_NUM != 0 { leds |= 1; }
+    if self.kbd_locked & XKB_LOCK_CAPS != 0 { leds |= 2; }
+    if self.kbd_locked & XKB_LOCK_SCROLL != 0 { leds |= 4; }
+    self.backend.set_keyboard_leds(leds);
   }
 
   fn update_text_input_focus(&mut self, fd: RawFd, surf_id: u32) {
@@ -7814,6 +8005,23 @@ fn build_xkb_keymap(layout_ov: Option<&str>, variant_ov: Option<&str>, options_o
   text.into_bytes()
 }
 
+fn xkb_layout_group_count(layout_ov: Option<&str>) -> u32 {
+  let layout = layout_ov
+    .map(str::to_owned)
+    .or_else(|| std::env::var("XKB_DEFAULT_LAYOUT").ok())
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(default_xkb_layout);
+  layout.split(',').filter(|part| !part.trim().is_empty()).count().max(1) as u32
+}
+
+fn set_locked_modifier(locked: &mut u32, mask: u32, enabled: bool) {
+  if enabled {
+    *locked |= mask;
+  } else {
+    *locked &= !mask;
+  }
+}
+
 fn default_xkb_layout() -> String {
   let lang = std::env::var("LC_ALL")
     .or_else(|_| std::env::var("LC_CTYPE"))
@@ -7889,16 +8097,14 @@ fn compose_xkb_symbols(layout: &str, variant: &str, options: &str) -> String {
   sym
 }
 
-/// True if the SHM buffer has at least one roughly-opaque pixel.
+/// True if the SHM buffer has at least one visible pixel.
 /// Used to detect GTK cursor surfaces that are still empty/transparent
 /// after set_cursor (theme load race) so we can fall back to the default arrow.
 fn shm_buffer_has_visible_pixel(buf: &crate::shm::ShmBuffer) -> bool {
   buf.begin_cpu_read();
-  let step_x = (buf.width / 8).max(1);
-  let step_y = (buf.height / 8).max(1);
   let mut found = false;
-  'outer: for y in (0..buf.height).step_by(step_y as usize) {
-    for x in (0..buf.width).step_by(step_x as usize) {
+  'outer: for y in 0..buf.height {
+    for x in 0..buf.width {
       if let Some(px) = buf.pixel(x, y) {
         if (px >> 24) & 0xff > 8 {
           found = true;
@@ -8148,6 +8354,24 @@ fn create_signal_fd() -> std::io::Result<RawFd> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn numlock_uses_the_standard_locked_mod2_mask() {
+    let mut locked = 0;
+    set_locked_modifier(&mut locked, XKB_LOCK_NUM, true);
+    assert_eq!(locked, 16);
+    set_locked_modifier(&mut locked, XKB_LOCK_CAPS, true);
+    assert_eq!(locked, 18);
+    set_locked_modifier(&mut locked, XKB_LOCK_NUM, false);
+    assert_eq!(locked, XKB_LOCK_CAPS);
+  }
+
+  #[test]
+  fn layout_group_count_matches_comma_separated_xkb_layouts() {
+    assert_eq!(xkb_layout_group_count(Some("us")), 1);
+    assert_eq!(xkb_layout_group_count(Some("jp,us")), 2);
+    assert_eq!(xkb_layout_group_count(Some("us,ru,de")), 3);
+  }
 
   #[test]
   fn format_table_can_be_transferred_repeatedly() {

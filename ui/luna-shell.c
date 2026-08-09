@@ -19,6 +19,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <locale.h>
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -304,7 +305,6 @@ static int xdg_find_data_file(char* out, size_t n, const char* relative) {
     return 0;
 }
 
-
 /* Load the shell's bundled fonts through the LunaPlatform role API.
  *
  * Relying only on luna-ui.h's process-working-directory scan made the selected
@@ -559,6 +559,8 @@ typedef struct {
     char hostname[64];
     char cursor_theme[64]; /* "aero" | "miku" | custom theme dir name */
     char kb_layout[64];    /* XKB layout, e.g. "jp,us" | "us" | "de,us" */
+    char ui_language[32];  /* locale inherited by newly launched applications */
+    int  numlock_on;       /* desired NumLock state now and at sign-in */
     int  window_gap;       /* tiled window inset in pixels: 0 | 8 | 16 */
     int  edge_snap;
     int  top_edge_maximize;
@@ -578,6 +580,10 @@ static int g_cursor_reload_pending = 0;
  * Backends normally skip an identical role, so carry the frame change
  * explicitly through set_cursor(). */
 static int g_cursor_frame_changed = 0;
+/* Wayland cursor animation is useful only while one of Luna's layer surfaces
+ * owns pointer focus.  Enter/leave callbacks maintain this flag; KMS starts
+ * with its hardware cursor present. */
+static int g_cursor_present = 1;
 
 static void cursor_theme_reload(const char* name);
 static void cursor_theme_tick_and_refresh(void);
@@ -613,7 +619,18 @@ static void settings_defaults(void) {
     g_settings.dock_magnification = 1;
     g_settings.session_restore = 1;
     g_settings.wifi_enabled = 1;
+    g_settings.numlock_on = 1;
     snprintf(g_settings.weather_city, sizeof(g_settings.weather_city), "Tokyo");
+    {
+        const char* lang = getenv("LC_ALL");
+        if (!lang || !*lang) lang = getenv("LANG");
+        if (lang && !strncasecmp(lang, "ja", 2))
+            snprintf(g_settings.ui_language, sizeof(g_settings.ui_language), "ja_JP.UTF-8");
+        else if (lang && (!strncasecmp(lang, "C", 1) || !strncasecmp(lang, "POSIX", 5)))
+            snprintf(g_settings.ui_language, sizeof(g_settings.ui_language), "C.UTF-8");
+        else
+            snprintf(g_settings.ui_language, sizeof(g_settings.ui_language), "en_US.UTF-8");
+    }
     /* Prefer env / locale-aware default already applied by apply_xkb_session_env. */
     {
         const char* lay = getenv("XKB_DEFAULT_LAYOUT");
@@ -662,6 +679,10 @@ static void settings_load(void) {
                  * environment/locale-derived default instead of silently
                  * reverting the entire Wayland session to a US keymap. */
                 snprintf(g_settings.kb_layout, sizeof(g_settings.kb_layout), "%s", val);
+            else if (!strcmp(key, "ui_language") && val[0])
+                snprintf(g_settings.ui_language, sizeof(g_settings.ui_language), "%s", val);
+            else if (!strcmp(key, "numlock_on"))
+                g_settings.numlock_on = atoi(val) != 0;
             else if (!strcmp(key, "window_gap"))
                 g_settings.window_gap = atoi(val);
             else if (!strcmp(key, "edge_snap"))
@@ -712,6 +733,8 @@ static void settings_save(void) {
     fprintf(f, "hostname=%s\n", g_settings.hostname);
     fprintf(f, "cursor_theme=%s\n", g_settings.cursor_theme);
     fprintf(f, "kb_layout=%s\n", g_settings.kb_layout);
+    fprintf(f, "ui_language=%s\n", g_settings.ui_language);
+    fprintf(f, "numlock_on=%d\n", g_settings.numlock_on);
     fprintf(f, "window_gap=%d\n", g_settings.window_gap);
     fprintf(f, "edge_snap=%d\n", g_settings.edge_snap);
     fprintf(f, "top_edge_maximize=%d\n", g_settings.top_edge_maximize);
@@ -818,7 +841,10 @@ static void skin_chrome_defaults(LunaSkin* skin) {
     skin->titlebar_active = 0;
     skin->titlebar_inactive = 0;
     skin->titlebar_frame = 0;
-    skin->prefer_ssd = 1;
+    /* CSD is the safe fallback for clients which do not bind
+     * xdg-decoration (GTK commonly draws a HeaderBar in that case).  Retro
+     * skins which want compositor chrome opt in through skin.conf. */
+    skin->prefer_ssd = 0;
     skin->window_theme = -1;
     skin->controls_on_left = 1;
 }
@@ -1092,10 +1118,12 @@ static int g_settings_idx          = -1;
 static int g_settings_sheet_idx    = -1;
 static int g_settings_panel_apps   = -1;
 static int g_settings_panel_disp   = -1;
+static int g_settings_panel_lang   = -1;
 static int g_settings_panel_kb     = -1;
 static int g_settings_panel_wm     = -1;
 static int g_stab_apps_idx         = -1;
 static int g_stab_disp_idx         = -1;
+static int g_stab_lang_idx         = -1;
 static int g_stab_kb_idx           = -1;
 static int g_stab_wm_idx           = -1;
 static int g_win_menu_idx  = -1;
@@ -2537,6 +2565,25 @@ static void apply_keyboard_layout(const char* layout) {
     shell_send_cmd(cmd);
 }
 
+static void apply_ui_language(const char* locale_name) {
+    if (!locale_name || !*locale_name) return;
+    setenv("LANG", locale_name, 1);
+    setenv("LC_ALL", locale_name, 1);
+    setenv("LC_MESSAGES", locale_name, 1);
+    setenv("LC_TIME", locale_name, 1);
+    /* Refresh libc-backed dates immediately when the locale is installed.
+     * A missing optional locale must not prevent saving the user's choice;
+     * C.UTF-8 remains available as a portable fallback in Settings. */
+    (void)setlocale(LC_ALL, "");
+}
+
+static int apply_numlock_setting(void) {
+    char cmd[48];
+    snprintf(cmd, sizeof(cmd), "keyboard_lock numlock %d", g_settings.numlock_on);
+    setenv("LUNA_NUMLOCK", g_settings.numlock_on ? "1" : "0", 1);
+    return shell_send_cmd(cmd);
+}
+
 static int gtk_ini_has_key(const char* path, const char* key) {
     FILE* f = fopen(path, "r");
     if (!f) return 0;
@@ -2934,6 +2981,8 @@ static void apply_toolkit_session_env(void) {
         setenv("MOZ_ENABLE_WAYLAND", "1", 0);
     if (!getenv("MOZ_LAYERS_ALLOW_SOFTWARE_GL"))
         setenv("MOZ_LAYERS_ALLOW_SOFTWARE_GL", "1", 0);
+    if (!getenv("MOZ_GTK_TITLEBAR_DECORATION"))
+        setenv("MOZ_GTK_TITLEBAR_DECORATION", "client", 0);
     if (!getenv("QT_QPA_PLATFORM"))
         setenv("QT_QPA_PLATFORM", "wayland", 0);
     prefer_libdecor_cairo();
@@ -3578,6 +3627,10 @@ static void app_launch(LunaApp* app) {
             setenv("MOZ_WEBRENDER", "0", 1);
             setenv("MOZ_ACCELERATED", "0", 1);
             setenv("MOZ_ENABLE_WAYLAND", "1", 1);
+            /* Skins may request SSD for other clients.  Firefox combines its
+             * tab strip with the titlebar, so force its supported CSD mode;
+             * mismatching the negotiated frame also offsets pointer input. */
+            setenv("MOZ_GTK_TITLEBAR_DECORATION", "client", 1);
             setenv("GALLIUM_DRIVER", "llvmpipe", 1);
             /* Belt-and-suspenders: console may still have tty/vulkan. */
             setenv("XDG_SESSION_TYPE", "wayland", 1);
@@ -4252,6 +4305,18 @@ static void settings_mark_toggle(const char* id, int enabled) {
     luna_update_classes(idx, "on", enabled ? "on" : NULL);
 }
 
+static void settings_mark_locale(const char* locale_name) {
+    const char* ids[] = { "locale_ja", "locale_en", "locale_c" };
+    const char* values[] = { "ja_JP.UTF-8", "en_US.UTF-8", "C.UTF-8" };
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        int idx = luna_get_element_by_id(ids[i]);
+        if (idx < 0) continue;
+        luna_update_classes(idx, "selected",
+                            !strcmp(locale_name, values[i]) ? "selected" : NULL);
+    }
+    luna_mark_layout_dirty();
+}
+
 static void settings_mark_gap(void) {
     const int gaps[] = { 0, 8, 16 };
     for (int i = 0; i < 3; i++) {
@@ -4267,6 +4332,7 @@ static void settings_mark_gap(void) {
 static void apply_wm_settings(void) {
     char cmd[80];
     int ok = 1;
+    ok &= apply_numlock_setting();
     snprintf(cmd, sizeof(cmd), "wm_config gap %d", g_settings.window_gap);
     ok &= shell_send_cmd(cmd);
     snprintf(cmd, sizeof(cmd), "wm_config edge_snap %d", g_settings.edge_snap);
@@ -4319,6 +4385,8 @@ static void settings_populate_ui(void) {
     settings_mark_wallpaper(g_settings.wallpaper);
     settings_mark_cursor(g_settings.cursor_theme);
     settings_mark_kb(g_settings.kb_layout);
+    settings_mark_locale(g_settings.ui_language);
+    settings_mark_toggle("sys_numlock", g_settings.numlock_on);
     settings_mark_toggle("wm_snap", g_settings.edge_snap);
     settings_mark_toggle("wm_top_maximize", g_settings.top_edge_maximize);
     settings_mark_toggle("wm_double_click", g_settings.titlebar_double_click);
@@ -4330,10 +4398,12 @@ static void settings_populate_ui(void) {
     /* Show apps tab by default */
     set_hidden(g_settings_panel_apps, 0);
     set_hidden(g_settings_panel_disp, 1);
+    set_hidden(g_settings_panel_lang, 1);
     set_hidden(g_settings_panel_kb, 1);
     set_hidden(g_settings_panel_wm, 1);
     if (g_stab_apps_idx >= 0) luna_update_classes(g_stab_apps_idx, "active", "active");
     if (g_stab_disp_idx  >= 0) luna_update_classes(g_stab_disp_idx,  "active", NULL);
+    if (g_stab_lang_idx  >= 0) luna_update_classes(g_stab_lang_idx,  "active", NULL);
     if (g_stab_kb_idx    >= 0) luna_update_classes(g_stab_kb_idx,    "active", NULL);
     if (g_stab_wm_idx    >= 0) luna_update_classes(g_stab_wm_idx,    "active", NULL);
 }
@@ -4385,6 +4455,7 @@ static void on_settings_save(LunaElement* e) {
     apply_wallpaper(g_settings.wallpaper);
     cursor_theme_reload(g_settings.cursor_theme);
     apply_keyboard_layout(g_settings.kb_layout);
+    apply_ui_language(g_settings.ui_language);
     apply_wm_settings();
     g_cursor_reload_pending = 1;
     set_hidden(g_settings_idx, 1);
@@ -4403,6 +4474,7 @@ static void on_settings_tab(LunaElement* e) {
     const char* id = luna_element_at(tab_idx)->id;
     int is_apps = !strcmp(id, "stab_apps");
     int is_disp = !strcmp(id, "stab_disp");
+    int is_lang = !strcmp(id, "stab_language");
     int is_kb = !strcmp(id, "stab_keyboard");
     int is_wm = !strcmp(id, "stab_wm");
 
@@ -4410,14 +4482,49 @@ static void on_settings_tab(LunaElement* e) {
         luna_update_classes(g_stab_apps_idx, "active", is_apps ? "active" : NULL);
     if (g_stab_disp_idx >= 0)
         luna_update_classes(g_stab_disp_idx, "active", is_disp ? "active" : NULL);
+    if (g_stab_lang_idx >= 0)
+        luna_update_classes(g_stab_lang_idx, "active", is_lang ? "active" : NULL);
     if (g_stab_kb_idx >= 0)
         luna_update_classes(g_stab_kb_idx, "active", is_kb ? "active" : NULL);
     if (g_stab_wm_idx >= 0)
         luna_update_classes(g_stab_wm_idx, "active", is_wm ? "active" : NULL);
     set_hidden(g_settings_panel_apps, !is_apps);
     set_hidden(g_settings_panel_disp, !is_disp);
+    set_hidden(g_settings_panel_lang, !is_lang);
     set_hidden(g_settings_panel_kb, !is_kb);
     set_hidden(g_settings_panel_wm, !is_wm);
+}
+
+static void on_locale_select(LunaElement* e) {
+    const char* id = NULL;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* cand = luna_element_at(i)->id;
+        if (str_has_prefix(cand, "locale_")) { id = cand; break; }
+    }
+    if (!id) return;
+    const char* locale_name = NULL;
+    if (!strcmp(id, "locale_ja")) locale_name = "ja_JP.UTF-8";
+    else if (!strcmp(id, "locale_en")) locale_name = "en_US.UTF-8";
+    else if (!strcmp(id, "locale_c")) locale_name = "C.UTF-8";
+    if (!locale_name) return;
+    snprintf(g_settings.ui_language, sizeof(g_settings.ui_language), "%s", locale_name);
+    settings_mark_locale(locale_name);
+    apply_ui_language(locale_name);
+    settings_save();
+    toast_show("Language & Region", "Language updated for newly launched applications.", 3.0);
+}
+
+static void on_system_toggle(LunaElement* e) {
+    const char* id = NULL;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* cand = luna_element_at(i)->id;
+        if (str_has_prefix(cand, "sys_")) { id = cand; break; }
+    }
+    if (!id || strcmp(id, "sys_numlock")) return;
+    g_settings.numlock_on = !g_settings.numlock_on;
+    settings_mark_toggle(id, g_settings.numlock_on);
+    apply_wm_settings();
+    settings_save();
 }
 
 static void on_wm_toggle(LunaElement* e) {
@@ -5587,7 +5694,8 @@ static int shell_wait_timeout_ms(int max_ms, double repaint_deadline) {
             SOONER(g_last_user_activity + INTERACTION_IDLE_GRACE_SEC);
     }
     SOONER(repaint_deadline);
-    if (g_cur_theme.active_role >= 0 &&
+    if (g_cursor_present && !g_interaction_busy &&
+        g_cur_theme.active_role >= 0 &&
         g_cur_theme.active_role < LUNA_CUR_MAX_ROLES) {
         LunaCurAnim* a = &g_cur_theme.roles[g_cur_theme.active_role];
         if (a->loaded && a->nframes > 1)
@@ -5648,6 +5756,8 @@ static void register_handlers(void) {
     luna_register_js_handler("onSettingsMax",   on_settings_max);
     luna_register_js_handler("onSettingsSave",  on_settings_save);
     luna_register_js_handler("onSettingsTab",   on_settings_tab);
+    luna_register_js_handler("onLocaleSelect",  on_locale_select);
+    luna_register_js_handler("onSystemToggle",  on_system_toggle);
     luna_register_js_handler("onWmToggle",      on_wm_toggle);
     luna_register_js_handler("onWmGap",         on_wm_gap);
     luna_register_js_handler("onSkinSelect",    on_skin_select);
@@ -5688,10 +5798,12 @@ static void bind_indices(void) {
     g_settings_sheet_idx = luna_get_element_by_id("settings_sheet");
     g_settings_panel_apps = luna_get_element_by_id("settings_panel_apps");
     g_settings_panel_disp = luna_get_element_by_id("settings_panel_disp");
+    g_settings_panel_lang = luna_get_element_by_id("settings_panel_language");
     g_settings_panel_kb   = luna_get_element_by_id("settings_panel_keyboard");
     g_settings_panel_wm   = luna_get_element_by_id("settings_panel_wm");
     g_stab_apps_idx     = luna_get_element_by_id("stab_apps");
     g_stab_disp_idx     = luna_get_element_by_id("stab_disp");
+    g_stab_lang_idx     = luna_get_element_by_id("stab_language");
     g_stab_kb_idx       = luna_get_element_by_id("stab_keyboard");
     g_stab_wm_idx       = luna_get_element_by_id("stab_wm");
     g_win_menu_idx      = luna_get_element_by_id("win_menu");
@@ -5816,8 +5928,15 @@ static void bind_indices(void) {
     /* Wire settings tab buttons */
     wire_subtree(g_stab_apps_idx, on_settings_tab);
     wire_subtree(g_stab_disp_idx, on_settings_tab);
+    wire_subtree(g_stab_lang_idx, on_settings_tab);
     wire_subtree(g_stab_kb_idx, on_settings_tab);
     wire_subtree(g_stab_wm_idx, on_settings_tab);
+    {
+        const char* locale_ids[] = { "locale_ja", "locale_en", "locale_c" };
+        for (size_t i = 0; i < sizeof(locale_ids) / sizeof(locale_ids[0]); i++)
+            wire_subtree(luna_get_element_by_id(locale_ids[i]), on_locale_select);
+        wire_subtree(luna_get_element_by_id("sys_numlock"), on_system_toggle);
+    }
     {
         const char* toggle_ids[] = {
             "wm_snap", "wm_top_maximize", "wm_double_click", "wm_classic_titlebar", "wm_shortcuts",
@@ -6378,6 +6497,21 @@ static void cursor_theme_tick_and_refresh(void) {
         if (g_backend && g_backend->set_cursor)
             g_backend->set_cursor(g_cur_theme.active_role);
         g_cursor_frame_changed = 0;
+    }
+    if (!g_cursor_present) return;
+    /* Do not inject decorative cursor-surface commits into a drag/click
+     * sequence.  Re-arm an expired deadline so poll() cannot busy-spin while
+     * animation is deferred; resume from the current frame after the grace. */
+    if (g_interaction_busy &&
+        g_cur_theme.active_role >= 0 &&
+        g_cur_theme.active_role < LUNA_CUR_MAX_ROLES) {
+        LunaCurAnim* a = &g_cur_theme.roles[g_cur_theme.active_role];
+        if (a->loaded && a->nframes > 1 && a->frame_until <= g_now) {
+            int delay = a->frames[a->frame_i].delay_ms;
+            if (delay < 1) delay = 1;
+            a->frame_until = g_now + (double)delay / 1000.0;
+        }
+        return;
     }
     if (!luna_cur_theme_tick(&g_cur_theme, g_now)) return;
     /* Re-push the current role so animated .ani frames advance. */
@@ -7294,6 +7428,7 @@ static void wlp_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surfa
     (void)d; (void)p;
     g_wl.pointer_serial = s;
     g_wl.pointer_entered = 1;
+    g_cursor_present = 1;
     g_pointer_surface = NULL;
     for (int i = 0; i < LUNA_SURF_COUNT; i++)
         if (g_surfs[i].wl_surf == surf) { g_pointer_surface = &g_surfs[i]; break; }
@@ -7308,14 +7443,14 @@ static void wlp_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surfa
     luna_mouse_move(g_wl.mouse_x, g_wl.mouse_y);
 }
 static void wlp_leave(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* surf) {
-    (void)d;(void)surf;
+    (void)d; (void)p; (void)s; (void)surf;
     g_pointer_surface = NULL;
     g_wl.pointer_entered = 0;
-    /* Release the cursor role immediately so GTK (or the compositor default)
-     * can own it.  Keeping our glyph after leave is what made the pointer
-     * vanish on top of client windows. */
-    if (p && g_wl.pointer)
-        wl_pointer_set_cursor(p, s, NULL, 0, 0);
+    g_cursor_present = 0;
+    /* The compositor drops the old client's cursor role while changing
+     * pointer focus.  Sending set_cursor(NULL) with the leave serial races the
+     * following client's enter/set_cursor exchange and can replace GTK's
+     * cursor (or the shell cursor on re-entry) with the fallback arrow. */
 }
 static void wlp_motion(void* d, struct wl_pointer* p, uint32_t t, wl_fixed_t x, wl_fixed_t y) {
     (void)d; (void)p; (void)t;
@@ -7870,6 +8005,8 @@ static int surf_is_live(const LunaSurface* s) {
 }
 
 static int wl_backend_start(void) {
+    /* No Luna layer owns the pointer until wl_pointer.enter arrives. */
+    g_cursor_present = 0;
     int forced_scale = wl_scale_override();
     g_wl.default_output_scale = forced_scale > 0 ? forced_scale : 1;
     /* Designated initialisers leave root_idx as 0 (= element 0).  Until
@@ -9003,6 +9140,7 @@ int main(int argc, char** argv) {
     apply_wallpaper(g_settings.wallpaper);
     cursor_theme_reload(g_settings.cursor_theme);
     apply_keyboard_layout(g_settings.kb_layout);
+    apply_ui_language(g_settings.ui_language);
     apply_wm_settings();
 
     if (!shell_async_init())

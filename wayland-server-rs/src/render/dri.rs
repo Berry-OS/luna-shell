@@ -188,11 +188,19 @@ const DRM_MODE_CONNECTED: u32 = 1;
 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
 const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
 
-/// A flip that never reports completion must not wedge the compositor.  Two
-/// frames at 30 Hz is far beyond any real vblank interval, so treating the
-/// scanout as free after this long only ever costs one torn frame on a driver
-/// that has already misbehaved.
-const FLIP_TIMEOUT_MS: u64 = 100;
+/// Allow two nominal refresh periods for the completion event.  If the event
+/// is still missing after that, `present_busy` verifies the CRTC's current
+/// framebuffer instead of blindly declaring the flip complete.  The old
+/// fixed 100 ms timeout produced a very visible 100 ms hitch and could release
+/// scanout resources while the kernel still owned them.
+const MIN_FLIP_EVENT_GRACE_MS: u64 = 20;
+
+fn flip_event_grace_ms(vrefresh: u32) -> u64 {
+  // Some legacy drivers leave vrefresh at zero.  Treat implausible values as
+  // 60 Hz; using 1 Hz here would reintroduce a multi-second watchdog stall.
+  let refresh = if vrefresh >= 10 { vrefresh as u64 } else { 60 };
+  MIN_FLIP_EVENT_GRACE_MS.max((2000 + refresh - 1) / refresh)
+}
 
 /// Scanout resources that may still be live in the CRTC until the pending flip
 /// retires.  Releasing them any earlier removes a framebuffer the hardware is
@@ -230,6 +238,9 @@ pub struct DriBackend {
   /// every frame.  `flip_pending` gates the next composite so we never draw
   /// into a buffer the CRTC has not finished taking over.
   flip_pending: bool,
+  /// `user_data` submitted with the outstanding page flip.  DRM events can be
+  /// delivered late, so only the matching completion may clear the wait.
+  pending_fb_id: u32,
   flip_started: std::time::Instant,
   use_page_flip: bool,
   retire: Vec<Retired>,
@@ -597,6 +608,7 @@ impl DriBackend {
         render_dev: render_node_of(fd),
         direct: None,
         flip_pending: false,
+        pending_fb_id: 0,
         flip_started: std::time::Instant::now(),
         use_page_flip: true,
         retire: Vec::new(),
@@ -699,6 +711,12 @@ impl Backend for DriBackend {
 
   fn take_input_channel(&mut self) -> Option<(mpsc::Receiver<InputEvent>, RawFd)> { self.input.as_mut().and_then(EvdevInput::take_channel) }
 
+  fn set_keyboard_leds(&self, leds: u8) {
+    if let Some(input) = &self.input {
+      input.set_leds(leds);
+    }
+  }
+
   fn drm_render_device(&self) -> Option<u64> { self.render_dev }
 
   fn event_fd(&self) -> Option<RawFd> { Some(self.fd) }
@@ -721,8 +739,20 @@ impl Backend for DriBackend {
         if len < 8 || off + len > n {
           break;
         }
-        if ty == DRM_EVENT_FLIP_COMPLETE {
+        let user_data = if len >= 16 {
+          u64::from_ne_bytes([
+            buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11],
+            buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15],
+          ])
+        } else {
+          0
+        };
+        if ty == DRM_EVENT_FLIP_COMPLETE
+          && self.flip_pending
+          && user_data == self.pending_fb_id as u64
+        {
           self.flip_pending = false;
+          self.pending_fb_id = 0;
         }
         off += len;
       }
@@ -736,8 +766,27 @@ impl Backend for DriBackend {
   }
 
   fn present_busy(&self) -> bool {
-    self.flip_pending
-      && self.flip_started.elapsed() < std::time::Duration::from_millis(FLIP_TIMEOUT_MS)
+    if !self.flip_pending {
+      return false;
+    }
+
+    // Use the mode's refresh rate rather than a fixed 100 ms stall.  Two
+    // periods tolerate an event-loop scheduling slip at vblank; 20 ms is the
+    // floor for high-refresh displays.
+    let grace_ms = flip_event_grace_ms(self.mode.vrefresh);
+    if self.flip_started.elapsed() < std::time::Duration::from_millis(grace_ms) {
+      return true;
+    }
+
+    // A completion event can be lost/delayed even though scanout already
+    // switched.  GETCRTC is a non-modesetting query: recover only when the
+    // kernel confirms the exact framebuffer is current.  On query failure or
+    // a genuinely pending flip, keep waiting instead of entering blocking
+    // SetCrtc and creating a periodic hitch.
+    let mut crtc = ModeCrtc::default();
+    crtc.crtc_id = self.crtc_id;
+    let queried = unsafe { ioctl(self.fd, iowr::<ModeCrtc>(0xA1), &mut crtc) == 0 };
+    !(queried && crtc.fb_id == self.pending_fb_id)
   }
 
   fn deactivate(&mut self) {
@@ -748,6 +797,7 @@ impl Backend for DriBackend {
     // is still in flight, and the scanout buffers come back with unknown
     // contents.
     self.flip_pending = false;
+    self.pending_fb_id = 0;
     self.release_retired();
     self.invalidate_shadow();
     if let Some(input) = &self.input {
@@ -845,6 +895,7 @@ impl DriBackend {
   unsafe fn set_luna_crtc(&mut self) -> bool {
     // A VT resume needs a real modeset, not a flip onto a CRTC we just lost.
     self.flip_pending = false;
+    self.pending_fb_id = 0;
     self.set_crtc_fb(self.bufs[self.front].fb_id)
   }
 
@@ -856,11 +907,13 @@ impl DriBackend {
   /// runs the full modeset path and blocks until the change lands, which on
   /// every frame is what made the console session hitch.
   unsafe fn flip_fb(&mut self, fb_id: u32) -> bool {
-    // A completion that never arrived must not strand us on the SetCrtc path
-    // forever: drop the stale flag and let the kernel arbitrate (a genuinely
-    // outstanding flip answers EBUSY, which is handled below).
+    // If the event was lost but GETCRTC confirmed that scanout switched, retire
+    // the old resources and continue asynchronously.  `present_busy` remains
+    // true when the kernel has not confirmed completion, so this path never
+    // guesses and never falls into blocking SetCrtc for an in-flight flip.
     if self.flip_pending && !self.present_busy() {
       self.flip_pending = false;
+      self.pending_fb_id = 0;
       self.release_retired();
     }
     if self.use_page_flip && !self.flip_pending {
@@ -873,6 +926,7 @@ impl DriBackend {
       };
       if ioctl(self.fd, iowr::<ModeCrtcPageFlip>(0xB0), &mut req) == 0 {
         self.flip_pending = true;
+        self.pending_fb_id = fb_id;
         self.flip_started = std::time::Instant::now();
         return true;
       }
@@ -1128,5 +1182,13 @@ mod tests {
     assert_eq!(iowr::<PrimeHandle>(0x2d), 0xc00c_642d);
     assert_eq!(iowr::<ModeFbCmd2>(0xB8), 0xc068_64b8);
     assert_eq!(iow::<GemClose>(0x09), 0x4008_6409);
+  }
+
+  #[test]
+  fn flip_event_grace_tracks_two_refresh_periods() {
+    assert_eq!(flip_event_grace_ms(60), 34);
+    assert_eq!(flip_event_grace_ms(30), 67);
+    assert_eq!(flip_event_grace_ms(144), MIN_FLIP_EVENT_GRACE_MS);
+    assert_eq!(flip_event_grace_ms(0), 34);
   }
 }

@@ -1,7 +1,7 @@
 use crate::render::InputEvent;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::mem::size_of;
+use std::mem::{size_of, size_of_val};
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
+const EV_LED: u16 = 0x11;
 const SYN_REPORT: u16 = 0x00;
 const REL_X: u16 = 0x00;
 const REL_Y: u16 = 0x01;
@@ -22,6 +23,9 @@ const KEY_LEFTCTRL: u16 = 29;
 const KEY_RIGHTCTRL: u16 = 97;
 const KEY_LEFTALT: u16 = 56;
 const KEY_RIGHTALT: u16 = 100;
+const LED_NUML: u16 = 0x00;
+const LED_CAPSL: u16 = 0x01;
+const LED_SCROLLL: u16 = 0x02;
 const EVIOCGRAB: libc::c_ulong = 0x4004_4590;
 
 #[repr(C)]
@@ -37,6 +41,10 @@ struct Device {
   fd: RawFd,
   keyboard: bool,
   pointer: bool,
+  // LED output must not change the access mode of the input stream.  Some
+  // evdev drivers stop delivering pointer events when their event node is
+  // opened O_RDWR, so keep a separate optional descriptor for LED writes.
+  led_fd: RawFd,
 }
 
 pub struct EvdevInput {
@@ -46,6 +54,7 @@ pub struct EvdevInput {
   stop_fd: RawFd,
   requested: Arc<AtomicU8>,
   applied: Arc<AtomicU8>,
+  leds: Arc<AtomicU8>,
   thread: Option<JoinHandle<()>>,
 }
 
@@ -76,9 +85,15 @@ impl EvdevInput {
     let (tx, rx) = mpsc::channel();
     let requested = Arc::new(AtomicU8::new(1));
     let applied = Arc::new(AtomicU8::new(1));
+    let initial_leds = if std::env::var("LUNA_NUMLOCK")
+      .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off"))
+      .unwrap_or(true)
+    { 1 } else { 0 };
+    let leds = Arc::new(AtomicU8::new(initial_leds));
     let thread_requested = Arc::clone(&requested);
     let thread_applied = Arc::clone(&applied);
-    let handle = thread::Builder::new().name("luna-evdev".into()).spawn(move || input_loop(tx, wake_fd, stop_fd, thread_requested, thread_applied))?;
+    let thread_leds = Arc::clone(&leds);
+    let handle = thread::Builder::new().name("luna-evdev".into()).spawn(move || input_loop(tx, wake_fd, stop_fd, thread_requested, thread_applied, thread_leds))?;
     Ok(Self {
       rx: Some(rx),
       wake_fd,
@@ -86,6 +101,7 @@ impl EvdevInput {
       stop_fd,
       requested,
       applied,
+      leds,
       thread: Some(handle),
     })
   }
@@ -109,6 +125,12 @@ impl EvdevInput {
       thread::sleep(Duration::from_millis(2));
     }
   }
+
+  /// Bit 0 NumLock, bit 1 CapsLock, bit 2 ScrollLock.
+  pub fn set_leds(&self, leds: u8) {
+    self.leds.store(leds & 0x07, Ordering::Release);
+    wake(self.stop_fd);
+  }
 }
 
 impl Drop for EvdevInput {
@@ -128,15 +150,17 @@ impl Drop for EvdevInput {
   }
 }
 
-fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested: Arc<AtomicU8>, applied: Arc<AtomicU8>) {
+fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested: Arc<AtomicU8>, applied: Arc<AtomicU8>, requested_leds: Arc<AtomicU8>) {
   let mut devices: HashMap<String, Device> = HashMap::new();
   let mut pressed = HashMap::<u16, u32>::new();
   let mut consumed_fn = HashSet::<u16>::new();
   let mut last_scan = Instant::now() - Duration::from_secs(2);
+  let mut active = true;
+  let mut leds = requested_leds.load(Ordering::Acquire);
 
   loop {
     if last_scan.elapsed() >= Duration::from_secs(1) {
-      rescan(&mut devices, applied.load(Ordering::Acquire) == 1);
+      rescan(&mut devices, active, leds);
       last_scan = Instant::now();
     }
 
@@ -164,11 +188,20 @@ fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested:
       if state == 2 {
         break;
       }
-      set_devices_grabbed(&devices, state == 1);
-      pressed.clear();
-      consumed_fn.clear();
-      emit(&tx, wake_fd, InputEvent::Reset);
-      applied.store(state, Ordering::Release);
+      let want_active = state == 1;
+      if want_active != active {
+        set_devices_grabbed(&devices, want_active);
+        pressed.clear();
+        consumed_fn.clear();
+        emit(&tx, wake_fd, InputEvent::Reset);
+        active = want_active;
+        applied.store(state, Ordering::Release);
+      }
+      let want_leds = requested_leds.load(Ordering::Acquire);
+      if want_leds != leds {
+        leds = want_leds;
+        set_devices_leds(&devices, leds);
+      }
       continue;
     }
 
@@ -265,10 +298,7 @@ fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested:
     if !dead.is_empty() {
       for path in dead {
         if let Some(dev) = devices.remove(&path) {
-          unsafe {
-            libc::ioctl(dev.fd, EVIOCGRAB, 0);
-            libc::close(dev.fd);
-          }
+          close_device(dev);
         }
       }
       pressed.clear();
@@ -278,10 +308,7 @@ fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested:
   }
 
   for (_, dev) in devices {
-    unsafe {
-      libc::ioctl(dev.fd, EVIOCGRAB, 0);
-      libc::close(dev.fd);
-    }
+    close_device(dev);
   }
 }
 
@@ -357,7 +384,17 @@ fn set_devices_grabbed(devices: &HashMap<String, Device>, grabbed: bool) {
   }
 }
 
-fn rescan(devices: &mut HashMap<String, Device>, active: bool) {
+fn close_device(dev: Device) {
+  unsafe {
+    libc::ioctl(dev.fd, EVIOCGRAB, 0);
+    libc::close(dev.fd);
+    if dev.led_fd >= 0 {
+      libc::close(dev.led_fd);
+    }
+  }
+}
+
+fn rescan(devices: &mut HashMap<String, Device>, active: bool, leds: u8) {
   let Ok(entries) = std::fs::read_dir("/dev/input") else { return };
   for entry in entries.flatten() {
     let name = entry.file_name();
@@ -386,14 +423,42 @@ fn rescan(devices: &mut HashMap<String, Device>, active: bool) {
       continue;
     }
     eprintln!("[luna-compositor] input: {} keyboard={} pointer={}", path, keyboard, pointer);
+    let led_fd = if keyboard {
+      unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) }
+    } else {
+      -1
+    };
+    if led_fd >= 0 {
+      write_leds(led_fd, leds);
+    }
     devices.insert(
       path,
       Device {
         fd,
         keyboard,
         pointer,
+        led_fd,
       },
     );
+  }
+}
+
+fn set_devices_leds(devices: &HashMap<String, Device>, leds: u8) {
+  for dev in devices.values().filter(|dev| dev.led_fd >= 0) {
+    write_leds(dev.led_fd, leds);
+  }
+}
+
+fn write_leds(fd: RawFd, leds: u8) {
+  let zero = libc::timeval { tv_sec: 0, tv_usec: 0 };
+  let events = [
+    InputEventRaw { time: zero, type_: EV_LED, code: LED_NUML, value: (leds & 1 != 0) as i32 },
+    InputEventRaw { time: zero, type_: EV_LED, code: LED_CAPSL, value: (leds & 2 != 0) as i32 },
+    InputEventRaw { time: zero, type_: EV_LED, code: LED_SCROLLL, value: (leds & 4 != 0) as i32 },
+    InputEventRaw { time: zero, type_: EV_SYN, code: SYN_REPORT, value: 0 },
+  ];
+  unsafe {
+    libc::write(fd, events.as_ptr() as *const libc::c_void, size_of_val(&events));
   }
 }
 
