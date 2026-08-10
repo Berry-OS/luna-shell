@@ -414,6 +414,22 @@ pub static ZWLR_LAYER_SURFACE_V1: Interface = Interface {
   ],
 };
 
+/// Luna private absolute placement for session clients (aplay / luna-ui).
+pub static LUNA_WM_V1: Interface = Interface {
+  name: "luna_wm_v1",
+  version: 1,
+  requests: &[
+    m!("destroy", ""),           // 0
+    m!("set_position", "oii"),   // 1: surface, x, y
+    m!("get_position", "o"),     // 2: surface
+    m!("start_move", "o"),       // 3: surface — interactive grab (not set_position spam)
+    m!("show_window_menu", "oii"), // 4: surface, x, y — shell window menu (titlebar right-click)
+  ],
+  events: &[
+    m!("position", "oii"), // 0: surface, x, y
+  ],
+};
+
 pub fn by_name(name: &str) -> Option<&'static Interface> {
   let table: &[&'static Interface] = &[
     &WL_DISPLAY,
@@ -459,6 +475,7 @@ pub fn by_name(name: &str) -> Option<&'static Interface> {
     &ZWP_LINUX_DMABUF_FEEDBACK_V1,
     &ZWLR_LAYER_SHELL_V1,
     &ZWLR_LAYER_SURFACE_V1,
+    &LUNA_WM_V1,
   ];
   table.iter().copied().find(|i| i.name == name)
 }

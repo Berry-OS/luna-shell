@@ -1636,11 +1636,11 @@ static int      g_wl_poll_timeout_ms = 0;
  * Keep a separate bit for them: g_surf_dirty describes Wayland layers, while
  * this flag says that the KMS/X11 framebuffer needs another complete frame. */
 static int      g_frame_dirty = 1;
-/* Animation cadence.  Four wallpaper frames per second was visibly stepped,
- * while a 30 Hz idle wallpaper remains smooth without forcing client windows
- * through the shell's render path. */
-#define LUNA_WL_BG_FRAME_SEC      (1.0 / 30.0)
-#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 30.0)
+/* Animation cadence.  Idle aurora/stars only (no open windows).  12 Hz is
+ * enough for the empty-desktop wallpaper and avoids the old 30 Hz full-screen
+ * commit storm that showed up as a regular hitch on the console session. */
+#define LUNA_WL_BG_FRAME_SEC      (1.0 / 12.0)
+#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 12.0)
 /* A delayed event or maintenance read must not turn one missed frame into a
  * large easing jump.  CSS keyframes use absolute time; this only bounds the
  * interactive interpolation path. */
@@ -2975,6 +2975,8 @@ static void apply_toolkit_session_env(void) {
         setenv("XDG_CURRENT_DESKTOP", "Luna", 0);
     if (!getenv("XDG_SESSION_DESKTOP"))
         setenv("XDG_SESSION_DESKTOP", "luna", 0);
+    /* Hint for clients that may prefer Luna-only extensions (luna_wm_v1). */
+    setenv("LUNA_SESSION", "1", 0);
     if (!getenv("GDK_BACKEND"))
         setenv("GDK_BACKEND", "wayland", 0);
     if (!getenv("MOZ_ENABLE_WAYLAND"))
@@ -2993,14 +2995,20 @@ static void apply_toolkit_session_env(void) {
     setenv("GDK_SCALE", getenv("LUNA_GDK_SCALE") ?: "1", 1);
     setenv("GDK_DPI_SCALE", getenv("LUNA_GDK_DPI_SCALE") ?: "1", 1);
     setenv("QT_SCALE_FACTOR", getenv("LUNA_QT_SCALE_FACTOR") ?: "1", 1);
-    /* Berry often exports GSK_RENDERER=vulkan.  Luna has no Vulkan WSI /
-     * dmabuf path for clients — GTK4 then stalls and Firefox's crash /
-     * Troubleshoot dialogs never paint.  Prefer Cairo (CPU) unless the
-     * user explicitly set something other than vulkan. */
+    /* luna-session may set LUNA_CLIENT_RENDERER / GSK_RENDERER.  Still reject
+     * vulkan: Luna has no Vulkan WSI / dmabuf path for clients, and GTK4 then
+     * stalls (Firefox dialogs never paint). */
     {
+        const char* mode = getenv("LUNA_CLIENT_RENDERER");
+        const char* backend = getenv("LUNA_BACKEND");
         const char* gsk = getenv("GSK_RENDERER");
-        if (!gsk || !*gsk || !strcasecmp(gsk, "vulkan"))
+        if (mode && !strcasecmp(mode, "software"))
             setenv("GSK_RENDERER", "cairo", 1);
+        else if ((!mode || !*mode || !strcasecmp(mode, "auto")) &&
+                 backend && !strcasecmp(backend, "software"))
+            setenv("GSK_RENDERER", "cairo", 1);
+        else if (!gsk || !*gsk || !strcasecmp(gsk, "vulkan"))
+            setenv("GSK_RENDERER", getenv("LUNA_GSK_RENDERER") ?: "cairo", 1);
     }
     /* GTK CSD WindowControls (minimize/maximize/close) when portals absent. */
     {

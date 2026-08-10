@@ -1,0 +1,14 @@
+# Luna vendored wayland-client (headers + wayland-client-rs).
+# Prefer this over system libwayland-dev:
+#   PKG_CONFIG_PATH=/path/to/wayland-client-rs:$PKG_CONFIG_PATH pkg-config ...
+#
+prefix=${pcfiledir}
+exec_prefix=${prefix}
+libdir=${prefix}/../target/release
+includedir=${prefix}/include
+
+Name: wayland-client
+Description: Luna Wayland client API (vendored headers + wayland-client-rs)
+Version: 1.25.0
+Libs: -L${libdir} -lwayland-client -Wl,-rpath,${libdir}
+Cflags: -I${includedir}

@@ -139,12 +139,20 @@ pub enum Role {
   },
   DataSource {
     mime_types: Vec<String>,
+    dnd_actions: u32,
   },
   DataOffer {
     /// Source lives on `source_fd` as object `source_id` (0 = none).
     source_fd: RawFd,
     source_id: u32,
     mime_types: Vec<String>,
+    dnd: bool,
+    accepted_mime: Option<String>,
+    source_actions: u32,
+    dest_actions: u32,
+    preferred_action: u32,
+    action: u32,
+    dropped: bool,
   },
   PrimarySelectionDeviceManager,
   PrimarySelectionDevice {
@@ -235,6 +243,8 @@ pub enum Role {
     toplevel_id: u32,
     mode: u32, // 0=unset, 1=client, 2=server
   },
+  /// Luna private absolute placement global (`luna_wm_v1`).
+  LunaWm,
 }
 
 pub struct Object {

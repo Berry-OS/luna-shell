@@ -287,6 +287,7 @@ make build-webgl    # webgl
 ### wayland-client-rs
 
 - `libwayland-client.so.0` という SONAME を持つ cdylib を生成。
+- `include/` に libwayland 互換ヘッダをベンダー済み。C アプリは `libwayland-dev` 不要で、`luna-wayland-client.mk` または `wayland-client.pc` 経由でコンパイル／リンクする。
 - `wl_proxy_marshal_flags`（可変引数）は x86_64 System V ABI の `#[unsafe(naked)]` アセンブリトランポリンで実装。
 - `*const WlInterface` の静的配列には `Spa<N>` ラッパーで `Sync` を実装。
 - 79 シンボルを `.dynsym` にエクスポート。

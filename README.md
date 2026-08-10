@@ -236,6 +236,8 @@ Single-header HTML/CSS → OpenGL renderer. Everything on screen is styled by CS
 
 ### **wayland-client-rs** 🔧
 - Produces `libwayland_client.so.0` with proper SONAME
+- Vendors libwayland-compatible headers under `include/` (no system `libwayland-dev`)
+- Apps use `luna-wayland-client.mk` or `wayland-client.pc` to compile/link
 - Uses `#[unsafe(naked)]` assembly trampoline for `wl_proxy_marshal_flags`
 - 79 symbols exported
 

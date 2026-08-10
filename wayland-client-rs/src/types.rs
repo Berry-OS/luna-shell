@@ -61,8 +61,15 @@ pub struct wl_list {
 }
 
 impl wl_list {
+    /// Empty circular list sentinel (same as `wl_list_init`).
+    /// Null prev/next is unsafe for `wl_list_remove` — Mesa/libdecor may call it.
     pub const fn new() -> Self {
         wl_list { prev: std::ptr::null_mut(), next: std::ptr::null_mut() }
+    }
+
+    pub unsafe fn init(list: *mut wl_list) {
+        (*list).prev = list;
+        (*list).next = list;
     }
 }
 

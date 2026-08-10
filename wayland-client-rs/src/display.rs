@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::c_void;
+use std::sync::Mutex;
 use crate::interfaces::WlInterface;
 use crate::proxy::Proxy;
 use crate::socket::WaylandSocket;
@@ -31,6 +32,9 @@ pub struct Display {
     pub event_queue: Vec<PendingEvent>,
     pub error:      i32,
     pub error_msg:  Option<String>,
+    /// libwayland serializes map/socket ops with display->mutex. Mesa's EGL
+    /// loader can touch the client from helper threads during eglInitialize.
+    pub mutex:      Mutex<()>,
 }
 
 unsafe impl Send for Display {}
@@ -48,14 +52,21 @@ impl Display {
             event_queue: Vec::new(),
             error: 0,
             error_msg: None,
+            mutex: Mutex::new(()),
         });
 
         let raw = Box::into_raw(display);
         unsafe {
             (*raw).proxy.display = raw;
+            // Seal after move into Box — see Proxy::new / init_queue_link.
+            Proxy::init_queue_link(&mut (*raw).proxy);
             (*raw).objects.insert(1, raw as *mut Proxy);
         }
         Ok(raw)
+    }
+
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.mutex.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn alloc_id(&mut self) -> u32 {
@@ -151,6 +162,9 @@ impl Display {
 
         unsafe {
             let proxy = &*proxy_ptr;
+            if proxy.flags & crate::proxy::WL_PROXY_FLAG_DESTROYED != 0 {
+                return;
+            }
             let iface = proxy.interface;
             if iface.is_null() {
                 return;
@@ -193,7 +207,7 @@ impl Display {
                             let mut p = Proxy::new(new_id, use_iface, ver, self as *mut Display);
                             // Inherit sender queue (Mesa wayland-egl frame callbacks).
                             p.queue = proxy.queue;
-                            let raw = Box::into_raw(Box::new(p));
+                            let raw = Proxy::into_heap(p);
                             self.register(raw);
                             args[arg_idx] = wl_argument { o: raw as *mut c_void };
                         }
@@ -215,13 +229,12 @@ impl Display {
     pub fn roundtrip(&mut self) -> i32 {
         unsafe {
             let cb_id = self.alloc_id();
-            let cb = Box::new(Proxy::new(
+            let cb_raw = Proxy::into_heap(Proxy::new(
                 cb_id,
                 &crate::interfaces::wl_callback_interface,
                 1,
                 self as *mut Display,
             ));
-            let cb_raw = Box::into_raw(cb);
             self.register(cb_raw);
 
             let arg = wl_argument { n: cb_id };

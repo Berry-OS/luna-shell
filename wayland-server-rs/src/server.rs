@@ -43,6 +43,12 @@ const XKB_LOCK_CAPS: u32 = 1 << 1;
 const XKB_LOCK_NUM: u32 = 1 << 4;
 const XKB_LOCK_SCROLL: u32 = 1 << 5;
 
+// wl_data_device_manager.dnd_action
+const DND_COPY: u32 = 1;
+const DND_MOVE: u32 = 2;
+const DND_ASK: u32 = 4;
+const DND_ALL: u32 = DND_COPY | DND_MOVE | DND_ASK;
+
 /// xdg_toplevel.resize_edge bits
 const RESIZE_EDGE_TOP: u32 = 1;
 const RESIZE_EDGE_BOTTOM: u32 = 2;
@@ -60,6 +66,9 @@ enum WmGrab {
     grab_py: i32,
     orig_x: i32,
     orig_y: i32,
+    /// Same-client toplevels that were edge-adjacent at grab start
+    /// (Winamp-style linked windows: aplay main/EQ/playlist).
+    siblings: Vec<(u32, i32, i32)>,
   },
   Resize {
     fd: RawFd,
@@ -72,6 +81,24 @@ enum WmGrab {
     orig_w: i32,
     orig_h: i32,
   },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DragTarget {
+  fd: RawFd,
+  surface_id: u32,
+  device_id: u32,
+  offer_id: u32,
+  origin_x: i32,
+  origin_y: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DragState {
+  source_fd: RawFd,
+  source_id: u32,
+  button: u32,
+  target: Option<DragTarget>,
 }
 
 struct Global {
@@ -93,6 +120,9 @@ pub struct Client {
   /// application's commit cost grow with its own object count.  Almost no
   /// client ever creates one, so a single flag removes the scan outright.
   has_input_popups: bool,
+  /// Client bound `luna_wm_v1` — it will drive absolute placement itself, so
+  /// compositor-side CSD title-strip move promotion must not also grab.
+  has_luna_wm: bool,
 }
 
 impl Client {
@@ -105,6 +135,7 @@ impl Client {
       server_next_id: SERVER_ID_BASE,
       request_args: Vec::with_capacity(8),
       has_input_popups: false,
+      has_luna_wm: false,
     }
   }
 
@@ -149,8 +180,17 @@ pub struct Server {
   cursor_backup: Vec<u32>,
   cursor_backup_rect: Option<(u32, u32, u32, u32)>,
   /// Whether the last presented frame came from `self.fb` rather than direct
-  /// or GPU scanout.  The cursor fast path is only valid for the former.
+  /// or GPU scanout.  The software cursor fast path is only valid for the former.
   last_present_software: bool,
+  /// Last GPU plane list that reached the display.  Cursor-only updates after a
+  /// GPU present re-submit this list with a new cursor bitmap instead of
+  /// rebuilding the whole scene (that rebuild was a regular ~100 ms hitch
+  /// whenever an animated client cursor advanced).
+  retained_gpu_surfaces: Vec<(i32, i32, ShmBuffer)>,
+  /// Press position for CSD windows that never send xdg_toplevel.move
+  /// (GLFW/aplay SetWindowPos).  After a small drag in the top strip we
+  /// promote the implicit grab to WmGrab::Move.
+  csd_press: Option<(RawFd, u32, i32, i32, i32, i32)>,
   /// Fingerprint of the last composited scene: which surfaces were drawn, in
   /// what order, at what position and size, plus the chrome that depends on
   /// them.  When it repeats, only the pixels a client reported as damaged can
@@ -216,10 +256,13 @@ pub struct Server {
   popup_stack: Vec<(RawFd, u32)>,
   /// Last pointer button-press serial (for xdg_toplevel.move/resize).
   last_button_serial: u32,
+  last_button_code: u32,
   last_button_pressed: bool,
   /// Wayland implicit pointer grab: button releases must go to the surface
   /// that received the press, even when focus/stacking changes meanwhile.
   pointer_grab: Option<(RawFd, u32, u32, i32, i32)>,
+  /// Active wl_data_device drag.
+  drag: Option<DragState>,
   /// Explicit xdg_popup grab: (client fd, xdg_popup object, wl_surface).
   /// Firefox relies on this for native menus; ignoring xdg_popup.grab leaves
   /// the menu mapped while pointer events leak to unrelated surfaces.
@@ -289,6 +332,20 @@ pub struct Server {
   poll_client_fds: Vec<RawFd>,
 }
 
+/// Client-side decoration strip treated as a draggable titlebar when the
+/// client never issues xdg_toplevel.move (typical of GLFW SetWindowPos apps).
+/// Tall enough for luna-window native titlebars (~42px) without covering the
+/// usual content toolbar row beneath.
+const CSD_MOVE_STRIP_PX: i32 = 48;
+const CSD_MOVE_THRESHOLD_PX: i32 = 8;
+/// Left/right chrome reserved for client titlebar buttons (traffic lights /
+/// close-min-max).  Outside these zones the compositor owns the drag so
+/// move/snap no longer depend on a luna_wm.start_move round-trip.
+const CSD_BUTTON_ZONE_PX: i32 = 96;
+/// Server-side decoration titlebar height.  Must stay in sync with
+/// `draw_ssd_titlebar` / `hit_ssd` / maximize tiling insets.
+const SSD_BAR_H: i32 = 28;
+
 /// Toplevel state the compositor needs while drawing, flattened out of
 /// `Role::XdgToplevel`.
 #[derive(Clone, Copy, Default)]
@@ -324,6 +381,8 @@ impl Server {
       cursor_backup: Vec::new(),
       cursor_backup_rect: None,
       last_present_software: false,
+      retained_gpu_surfaces: Vec::new(),
+      csd_press: None,
       scene_sig: 0,
       fb_valid: false,
       frame_done: Vec::new(),
@@ -369,8 +428,10 @@ impl Server {
       window_stack: Vec::new(),
       popup_stack: Vec::new(),
       last_button_serial: 0,
+      last_button_code: 0,
       last_button_pressed: false,
       pointer_grab: None,
+      drag: None,
       popup_grab: None,
       wm_grab: WmGrab::None,
       pending_activate: None,
@@ -443,6 +504,7 @@ impl Server {
       (&protocol::ZWP_VIRTUAL_KEYBOARD_MANAGER_V1, 1),
       (&protocol::XDG_WM_BASE, 5),
       (&protocol::ZWLR_LAYER_SHELL_V1, 4),
+      (&protocol::LUNA_WM_V1, 1),
     ];
     if server.dmabuf_format_table >= 0 && server.dmabuf_main_device != 0 {
       advertised.push((&protocol::ZWP_LINUX_DMABUF_V1, 4));
@@ -489,8 +551,13 @@ impl Server {
       }
       // With work queued we only spin when the scanout is free; while a page
       // flip is in flight the flip-completion descriptor is what wakes us, and
-      // the short timeout is purely a guard against a lost event.
-      let timeout = if !self.dirty && !self.cursor_dirty {
+      // the short timeout is purely a guard against a lost event.  Pending
+      // frame callbacks / buffer releases must also wake us — otherwise a
+      // client waiting on wl_surface.frame stalls until the next input event.
+      let pending_side_effects =
+        !self.frame_done.is_empty() || !self.buffer_release.is_empty();
+      let work = self.dirty || self.cursor_dirty || pending_side_effects;
+      let timeout = if !work {
         -1
       } else if self.backend.present_busy() {
         16
@@ -550,11 +617,14 @@ impl Server {
           self.dirty = false;
           self.cursor_dirty = false;
         } else if self.cursor_dirty {
-          // Nothing on screen changed except the pointer position.
+          // Nothing on screen changed except the pointer position / glyph.
+          // Never escalate to a full desktop rebuild: that was a regular
+          // 100–200 ms hitch whenever the cursor fast path missed a frame
+          // (animated cursors, SSD scenes, transient GPU retain clears).
           if self.repaint_cursor_only() {
             self.cursor_dirty = false;
           } else {
-            self.dirty = true;
+            self.cursor_dirty = false;
           }
         } else if !self.frame_done.is_empty() || !self.buffer_release.is_empty() {
           // Clients often commit solely to receive a frame callback.  Deliver
@@ -565,7 +635,9 @@ impl Server {
         }
       }
 
-      if self.shell_state_dirty {
+      // Never rewrite state.json mid-drag: the shell was re-parsing geometry
+      // on every sample and that alone produced a regular ~100 ms hitch.
+      if self.shell_state_dirty && matches!(self.wm_grab, WmGrab::None) {
         self.export_shell_state(false);
       }
 
@@ -661,6 +733,7 @@ impl Server {
       if matches!(self.wm_grab, WmGrab::Move { fd: gfd, .. } | WmGrab::Resize { fd: gfd, .. } if gfd == fd) {
         self.wm_grab = WmGrab::None;
       }
+      self.cancel_drag_for_fd(fd);
       if self.selection.map(|(sfd, _)| sfd) == Some(fd) {
         self.selection = None;
         self.pending_selection_broadcast = true;
@@ -682,6 +755,10 @@ impl Server {
       self.flush_wm_actions();
       self.flush_selection_broadcast();
       self.flush_primary_broadcast();
+      if self.drag.as_ref().is_some_and(|d| d.target.is_none()) {
+        let (x, y) = (self.ptr_x, self.ptr_y);
+        self.update_drag_motion(x, y);
+      }
     }
   }
 
@@ -725,7 +802,7 @@ impl Server {
       "wl_seat" => self.req_seat(client, id, msg.opcode, &args),
       "wl_pointer" | "wl_keyboard" => self.req_input_device(client, id, msg.opcode, &args),
       "wl_output" => self.req_simple_destroy(client, id, msg.opcode, 0),
-      "wl_data_device_manager" => self.req_ddm(client, msg.opcode, &args),
+      "wl_data_device_manager" => self.req_ddm(client, id, msg.opcode, &args),
       "wl_data_source" => self.req_data_source(client, id, msg.opcode, &args),
       "wl_data_device" => self.req_data_device(client, id, msg.opcode, &args),
       "wl_data_offer" => self.req_data_offer(client, id, msg.opcode, &args),
@@ -753,6 +830,7 @@ impl Server {
       "zwp_linux_dmabuf_feedback_v1" => self.req_simple_destroy(client, id, msg.opcode, 0),
       "zwlr_layer_shell_v1" => self.req_layer_shell(client, id, msg.opcode, &args),
       "zwlr_layer_surface_v1" => self.req_layer_surface(client, id, msg.opcode, &args),
+      "luna_wm_v1" => self.req_luna_wm(client, id, msg.opcode, &args),
       _ => {}
     }
     args.clear();
@@ -816,6 +894,9 @@ impl Server {
     let version = req_ver.min(global.version).min(iface.version);
     let role = role_for(iface.name);
     client.objects.insert(new_id, Object::new(iface, version, role));
+    if iface.name == "luna_wm_v1" {
+      client.has_luna_wm = true;
+    }
 
     self.init_global_object(client, new_id, iface.name, version);
   }
@@ -1398,25 +1479,57 @@ impl Server {
         let parent_geom = Self::toplevel_parent_surface_in(client, id)
           .and_then(|parent| Self::surface_geometry_in(client, parent));
         let (ux, uy, uw, uh) = self.usable_area();
-        if let Some(Object {
-          role: Role::Surface(s),
-          ..
-        }) = client.objects.get_mut(&id)
-        {
-          // Transient dialogs are centered over their parent and kept inside
-          // the usable output. Ordinary windows retain the desktop cascade.
-          if s.x == 0 && s.y == 0 {
-            if let Some((px, py, pw, ph)) = parent_geom {
-              let (_, _, cw, ch) = child_geom;
-              let visible_x = (px + (pw - cw) / 2).clamp(ux, ux + (uw - cw).max(0));
-              let visible_y = (py + (ph - ch) / 2).clamp(uy, uy + (uh - ch).max(0));
-              // window_geometry may start inside a shadow-padded buffer.
-              s.x = visible_x - child_geom.0;
-              s.y = visible_y - child_geom.1;
-            } else {
-              s.x = ux + ((uw - child_geom.2) / 2).max(0) + cascade;
-              s.y = uy + ((uh - child_geom.3) / 2).max(0) + cascade;
-            }
+        // Reserve room only when this surface already negotiated SSD.  Using
+        // `prefer_ssd` here shifted GTK CSD windows down by a phantom titlebar
+        // before set_mode(1) arrived.  `ensure_ssd_titlebar_clearance` nudges
+        // windows later if decoration flips to server mode.
+        // Use the in-hand `client` — request dispatch has removed it from
+        // `self.clients`, so fd-based lookups would miss the decoration mode.
+        let ssd_extra = self.ssd_chrome_height_in(client, id);
+        // Resolve sibling placement before mutably borrowing the new surface.
+        let sibling_geom = self
+          .window_stack
+          .iter()
+          .rev()
+          .find(|&&(f, s)| f == fd && s != id)
+          .and_then(|&(_, s)| Self::surface_geometry_in(client, s));
+        let needs_place = matches!(
+          client.objects.get(&id),
+          Some(Object { role: Role::Surface(s), .. }) if s.x == 0 && s.y == 0
+        );
+        let place = if needs_place {
+          if let Some((px, py, pw, ph)) = parent_geom {
+            let (_, _, cw, ch) = child_geom;
+            let min_y = uy + ssd_extra;
+            let visible_x = (px + (pw - cw) / 2).clamp(ux, ux + (uw - cw).max(0));
+            let visible_y = (py + (ph - ch) / 2)
+              .clamp(min_y, uy + (uh - ch).max(0).max(min_y));
+            Some((visible_x - child_geom.0, visible_y - child_geom.1))
+          } else if let Some((sx, sy, _sw, sh)) = sibling_geom {
+            // Stack under the newest same-client sibling (aplay main→EQ→playlist).
+            let min_y = uy + ssd_extra;
+            let visible_x = sx.clamp(ux, ux + (uw - child_geom.2).max(0));
+            let visible_y = (sy + sh).clamp(min_y, uy + (uh - child_geom.3).max(0).max(min_y));
+            Some((visible_x - child_geom.0, visible_y - child_geom.1))
+          } else {
+            let visible_x = ux + ((uw - child_geom.2) / 2).max(0) + cascade;
+            let visible_y = uy
+              + ssd_extra
+              + ((uh - ssd_extra - child_geom.3) / 2).max(0)
+              + cascade;
+            Some((visible_x - child_geom.0, visible_y - child_geom.1))
+          }
+        } else {
+          None
+        };
+        if let Some((nx, ny)) = place {
+          if let Some(Object {
+            role: Role::Surface(s),
+            ..
+          }) = client.objects.get_mut(&id)
+          {
+            s.x = nx;
+            s.y = ny;
           }
         }
         self.raise_surface(fd, id);
@@ -1460,6 +1573,7 @@ impl Server {
           let (buf_w, buf_h) = Self::surface_tree_size(client, parent_id)
             .unwrap_or((960, 640));
           let (ux, uy, uw, uh) = self.usable_area();
+          let ssd_extra = self.ssd_chrome_height_in(client, parent_id);
           if let Some(Object {
             role: Role::Surface(s),
             ..
@@ -1467,7 +1581,10 @@ impl Server {
           {
             if s.x == 0 && s.y == 0 {
               s.x = ux + ((uw - buf_w) / 2).max(0) + cascade;
-              s.y = uy + ((uh - buf_h) / 2).max(0) + cascade;
+              s.y = uy
+                + ssd_extra
+                + ((uh - ssd_extra - buf_h) / 2).max(0)
+                + cascade;
             }
           }
           self.raise_surface(fd, parent_id);
@@ -2384,20 +2501,12 @@ impl Server {
       height = bh as i32;
       self.set_surface_screen_pos(fd, surface_id, 0, 0, width, height);
     } else if maxed {
-      let ssd_extra = if Self::uses_ssd(self.toplevel_decoration_mode(fd, surface_id)) {
-        28
-      } else {
-        0
-      };
+      let ssd_extra = self.ssd_chrome_height(fd, surface_id);
       width = uw;
       height = (uh - ssd_extra).max(64);
       self.set_surface_screen_pos(fd, surface_id, ux, uy + ssd_extra, width, height);
     } else if tiled == 1 || tiled == 2 {
-      let ssd_extra = if Self::uses_ssd(self.toplevel_decoration_mode(fd, surface_id)) {
-        28
-      } else {
-        0
-      };
+      let ssd_extra = self.ssd_chrome_height(fd, surface_id);
       let gap = self.wm_window_gap.clamp(0, 32);
       width = ((uw - gap * 3) / 2).max(64);
       height = (uh - ssd_extra - gap * 2).max(64);
@@ -2473,6 +2582,175 @@ impl Server {
     Some((s.x, s.y, buf.width, buf.height))
   }
 
+  /// Same-client toplevels whose content boxes share an edge with `surface_id`
+  /// (transitive).  Winamp-style apps (aplay) keep main/EQ/playlist glued;
+  /// Wayland has no SetWindowPos, so the compositor must move the group.
+  fn attached_move_siblings_in(
+    &self,
+    client: &Client,
+    fd: RawFd,
+    surface_id: u32,
+  ) -> Vec<(u32, i32, i32)> {
+    let touches = |a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)| -> bool {
+      let (ax, ay, aw, ah) = a;
+      let (bx, by, bw, bh) = b;
+      const TOL: i32 = 2;
+      let x_overlap = ax < bx + bw && bx < ax + aw;
+      let y_overlap = ay < by + bh && by < ay + ah;
+      let vert = x_overlap
+        && ((ay + ah - by).abs() <= TOL || (by + bh - ay).abs() <= TOL);
+      let horiz = y_overlap
+        && ((ax + aw - bx).abs() <= TOL || (bx + bw - ax).abs() <= TOL);
+      vert || horiz
+    };
+    let mut nodes: Vec<(u32, (i32, i32, i32, i32), i32, i32)> = Vec::new();
+    for &(f, sid) in &self.window_stack {
+      if f != fd || self.surface_is_minimized(client, sid) {
+        continue;
+      }
+      let Some(geom) = Self::surface_geometry_in(client, sid) else {
+        continue;
+      };
+      let Some(Object {
+        role: Role::Surface(s),
+        ..
+      }) = client.objects.get(&sid)
+      else {
+        continue;
+      };
+      nodes.push((sid, geom, s.x, s.y));
+    }
+    let mut attached = Vec::new();
+    let mut seen = std::collections::HashSet::from([surface_id]);
+    let mut queue = vec![surface_id];
+    while let Some(cur) = queue.pop() {
+      let Some(&(_, cg, _, _)) = nodes.iter().find(|n| n.0 == cur) else {
+        continue;
+      };
+      for &(sid, sg, bx, by) in &nodes {
+        if sid == cur || seen.contains(&sid) {
+          continue;
+        }
+        if touches(cg, sg) {
+          seen.insert(sid);
+          queue.push(sid);
+          attached.push((sid, bx, by));
+        }
+      }
+    }
+    attached
+  }
+
+  fn attached_move_siblings(&self, fd: RawFd, surface_id: u32) -> Vec<(u32, i32, i32)> {
+    let Some(client) = self.clients.get(&fd) else {
+      return Vec::new();
+    };
+    self.attached_move_siblings_in(client, fd, surface_id)
+  }
+
+  /// True when `(px,py)` sits on the compositor-owned CSD drag strip:
+  /// decoration never negotiated (mode 0), inside the top strip, and outside
+  /// the left/right button chrome so luna-ui traffic lights still receive clicks.
+  fn csd_title_drag_hit(&self, fd: RawFd, surface_id: u32, px: i32, py: i32) -> bool {
+    if self.toplevel_decoration_mode(fd, surface_id) != 0 {
+      return false;
+    }
+    if !self
+      .clients
+      .get(&fd)
+      .map(|c| Self::surface_is_xdg_toplevel_in(c, surface_id))
+      .unwrap_or(false)
+    {
+      return false;
+    }
+    let Some((gx, gy, gw, _)) = self.surface_geometry(fd, surface_id) else {
+      return false;
+    };
+    if gw <= CSD_BUTTON_ZONE_PX * 2 {
+      return false;
+    }
+    if px < gx || px >= gx + gw || py < gy || py >= gy + CSD_MOVE_STRIP_PX {
+      return false;
+    }
+    let rel = px - gx;
+    rel >= CSD_BUTTON_ZONE_PX && rel < gw - CSD_BUTTON_ZONE_PX
+  }
+
+  /// Full CSD title strip (including traffic-light / toolbar button zones).
+  /// Used for the window menu so right-click works anywhere on the bar.
+  fn csd_title_menu_hit(&self, fd: RawFd, surface_id: u32, px: i32, py: i32) -> bool {
+    if self.toplevel_decoration_mode(fd, surface_id) != 0 {
+      return false;
+    }
+    if !self
+      .clients
+      .get(&fd)
+      .map(|c| Self::surface_is_xdg_toplevel_in(c, surface_id))
+      .unwrap_or(false)
+    {
+      return false;
+    }
+    let Some((gx, gy, gw, _)) = self.surface_geometry(fd, surface_id) else {
+      return false;
+    };
+    px >= gx && px < gx + gw && py >= gy && py < gy + CSD_MOVE_STRIP_PX
+  }
+
+  fn begin_move_grab(&mut self, fd: RawFd, surface_id: u32, grab_px: i32, grab_py: i32) {
+    let (orig_x, orig_y) = match self.clients.get(&fd).and_then(|c| c.objects.get(&surface_id)) {
+      Some(Object {
+        role: Role::Surface(s),
+        ..
+      }) => (s.x, s.y),
+      _ => return,
+    };
+    self.window_stack.retain(|&(f, s)| !(f == fd && s == surface_id));
+    self.window_stack.push((fd, surface_id));
+    self.focused_client_fd = fd;
+    self.focused_surface_id = surface_id;
+    self.wm_grab = WmGrab::Move {
+      fd,
+      surface_id,
+      grab_px,
+      grab_py,
+      orig_x,
+      orig_y,
+      siblings: self.attached_move_siblings(fd, surface_id),
+    };
+    self.pointer_grab = None;
+    self.csd_press = None;
+    self.cursor_client_fd = -1;
+    self.cursor_surface_id = 0;
+    self.pending_cursor = None;
+    self.cursor_dirty = true;
+    self.dirty = true;
+  }
+
+  /// GLFW apps that never bind zxdg-decoration and never send
+  /// xdg_toplevel.move (SetWindowPos on X11) need a compositor-side drag.
+  /// GTK/libdecor negotiate decoration (mode 1/2) and issue move themselves —
+  /// promoting those presses would steal HeaderBar button clicks.
+  fn maybe_promote_csd_move(&mut self, fd: RawFd, surface_id: u32) -> bool {
+    let Some((pfd, psid, gpx, gpy, orig_x, orig_y)) = self.csd_press else {
+      return false;
+    };
+    if pfd != fd || psid != surface_id {
+      return false;
+    }
+    let (px, py) = self.screen_ptr();
+    if (px - gpx).abs() < CSD_MOVE_THRESHOLD_PX && (py - gpy).abs() < CSD_MOVE_THRESHOLD_PX {
+      return false;
+    }
+    // Press must have started on the compositor-owned strip (not button chrome).
+    if !self.csd_title_drag_hit(fd, surface_id, gpx, gpy) {
+      self.csd_press = None;
+      return false;
+    }
+    let _ = (orig_x, orig_y);
+    self.begin_move_grab(fd, surface_id, gpx, gpy);
+    true
+  }
+
   fn update_wm_grab(&mut self) {
     let (px, py) = self.screen_ptr();
     match self.wm_grab.clone() {
@@ -2484,14 +2762,38 @@ impl Server {
         grab_py,
         orig_x,
         orig_y,
+        siblings,
       } => {
+        let dx = px - grab_px;
+        let dy = py - grab_py;
+        let mut moved = false;
         if let Some(Object { role: Role::Surface(s), .. }) =
           self.clients.get_mut(&fd).and_then(|c| c.objects.get_mut(&surface_id))
         {
-          s.x = orig_x + (px - grab_px);
-          s.y = orig_y + (py - grab_py);
+          let nx = orig_x + dx;
+          let ny = orig_y + dy;
+          if s.x != nx || s.y != ny {
+            s.x = nx;
+            s.y = ny;
+            moved = true;
+          }
         }
-        self.dirty = true;
+        for (sid, ox, oy) in siblings {
+          if let Some(Object { role: Role::Surface(s), .. }) =
+            self.clients.get_mut(&fd).and_then(|c| c.objects.get_mut(&sid))
+          {
+            let nx = ox + dx;
+            let ny = oy + dy;
+            if s.x != nx || s.y != ny {
+              s.x = nx;
+              s.y = ny;
+              moved = true;
+            }
+          }
+        }
+        if moved {
+          self.dirty = true;
+        }
       }
       WmGrab::Resize {
         fd,
@@ -2601,7 +2903,7 @@ impl Server {
     let grab = std::mem::replace(&mut self.wm_grab, WmGrab::None);
     match grab {
       WmGrab::None => {}
-      WmGrab::Move { fd, surface_id, .. } => {
+      WmGrab::Move { fd, surface_id, siblings, .. } => {
         let (px, py) = self.screen_ptr();
         let (ux, uy, uw, uh) = self.usable_area();
         let edge = 24i32;
@@ -2611,9 +2913,11 @@ impl Server {
         if self.wm_top_edge_maximize && near_top && !near_left && !near_right {
           self.maximize_surface_for(fd, surface_id, true);
         } else if self.wm_edge_snap && near_left {
-          self.tile_surface(surface_id, 1);
+          // Use the grab's fd — surface ids are per-client and looking them up
+          // globally silently no-oped edge snap for every multi-client session.
+          self.tile_surface_for(fd, surface_id, 1);
         } else if self.wm_edge_snap && near_right {
-          self.tile_surface(surface_id, 2);
+          self.tile_surface_for(fd, surface_id, 2);
         } else if let Some((ox, oy, w, h)) = self.surface_geometry(fd, surface_id) {
           // Was this window tiled/maximized?  Dragging away restores floating
           // size once — plain moves must NOT send configure (GTK/Firefox
@@ -2634,6 +2938,7 @@ impl Server {
             })
           }).unwrap_or((false, 0));
           let min_visible = 48i32;
+          let ssd_extra = self.ssd_chrome_height(fd, surface_id);
           let mut nx = ox;
           let mut ny = oy;
           if nx + w < ux + min_visible {
@@ -2642,14 +2947,48 @@ impl Server {
           if nx > ux + uw - min_visible {
             nx = ux + uw - min_visible;
           }
-          if ny < uy {
-            ny = uy;
+          // Keep the SSD titlebar below the top exclusive zone (menubar).
+          // Clamping content to `uy` hid the bar under the menubar and made
+          // subsequent titlebar drags impossible (layer-shell ate the clicks).
+          let min_y = uy + ssd_extra;
+          if ny < min_y {
+            ny = min_y;
           }
           if ny > uy + uh - min_visible {
             ny = uy + uh - min_visible;
           }
           if nx != ox || ny != oy {
-            self.set_surface_screen_pos(fd, surface_id, nx, ny, w, h);
+            // `surface_geometry` is the content box; convert back to buffer origin.
+            let (bx, by) = self
+              .clients
+              .get(&fd)
+              .and_then(|c| c.objects.get(&surface_id))
+              .and_then(|o| match &o.role {
+                Role::Surface(s) => Some((s.x, s.y)),
+                _ => None,
+              })
+              .map(|(bx, by)| (bx + (nx - ox), by + (ny - oy)))
+              .unwrap_or((nx, ny));
+            let (old_bx, old_by) = self
+              .clients
+              .get(&fd)
+              .and_then(|c| c.objects.get(&surface_id))
+              .and_then(|o| match &o.role {
+                Role::Surface(s) => Some((s.x, s.y)),
+                _ => None,
+              })
+              .unwrap_or((nx, ny));
+            let dbx = bx - old_bx;
+            let dby = by - old_by;
+            self.set_surface_screen_pos(fd, surface_id, bx, by, w, h);
+            for (sid, _, _) in &siblings {
+              if let Some(Object { role: Role::Surface(s), .. }) =
+                self.clients.get_mut(&fd).and_then(|c| c.objects.get_mut(sid))
+              {
+                s.x += dbx;
+                s.y += dby;
+              }
+            }
           }
           if was_max || was_tiled != 0 {
             self.clear_tile_flags(fd, surface_id);
@@ -2657,8 +2996,10 @@ impl Server {
             self.send_toplevel_configure_for(fd, surface_id, size, false);
           }
           self.dirty = true;
+          self.shell_state_dirty = true;
         } else {
           self.dirty = true;
+          self.shell_state_dirty = true;
         }
       }
       WmGrab::Resize {
@@ -2775,6 +3116,7 @@ impl Server {
     })?;
     let (x, y, w, h) = saved;
     self.set_surface_screen_pos(fd, surface_id, x, y, w, h);
+    self.ensure_ssd_titlebar_clearance(fd, surface_id);
     Some((w, h))
   }
 
@@ -3375,37 +3717,38 @@ impl Server {
     }
   }
 
-  fn req_ddm(&mut self, client: &mut Client, opcode: u16, args: &[Arg]) {
+  fn req_ddm(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
+    let manager_version = client
+      .objects
+      .get(&id)
+      .map(|o| o.version)
+      .unwrap_or(1)
+      .min(3);
     match opcode {
       0 => {
-        // create_data_source(new_id)
         let nid = args.get(0).map(|a| a.as_object()).unwrap_or(0);
-        if nid == 0 {
-          return;
-        }
+        if nid == 0 { return; }
         client.objects.insert(
           nid,
           Object::new(
             &protocol::WL_DATA_SOURCE,
-            3,
+            manager_version,
             Role::DataSource {
               mime_types: Vec::new(),
+              dnd_actions: 0,
             },
           ),
         );
       }
       1 => {
-        // get_data_device(new_id, seat)
         let nid = args.get(0).map(|a| a.as_object()).unwrap_or(0);
         let seat_id = args.get(1).map(|a| a.as_object()).unwrap_or(0);
-        if nid == 0 {
-          return;
-        }
+        if nid == 0 { return; }
         client.objects.insert(
           nid,
           Object::new(
             &protocol::WL_DATA_DEVICE,
-            3,
+            manager_version,
             Role::DataDevice { seat_id },
           ),
         );
@@ -3415,15 +3758,54 @@ impl Server {
     }
   }
 
+  fn send_source_event(
+    &mut self,
+    current: &mut Client,
+    source_fd: RawFd,
+    source_id: u32,
+    opcode: u16,
+    args: &[Arg],
+  ) {
+    if source_id == 0 { return; }
+    if source_fd == current.conn.fd {
+      let allowed = current.objects.get(&source_id)
+        .is_some_and(|o| opcode < 3 || o.version >= 3);
+      if allowed {
+        current.send(source_id, opcode, args);
+      }
+    } else if let Some(source) = self.clients.get_mut(&source_fd) {
+      let allowed = source.objects.get(&source_id)
+        .is_some_and(|o| opcode < 3 || o.version >= 3);
+      if allowed {
+        source.send(source_id, opcode, args);
+        source.conn.flush();
+      }
+    }
+  }
+
+  #[inline]
+  fn choose_dnd_action(source: u32, dest: u32, preferred: u32) -> u32 {
+    let common = source & dest & DND_ALL;
+    if preferred != 0 && preferred.count_ones() == 1 && (common & preferred) != 0 {
+      preferred
+    } else if (common & DND_COPY) != 0 {
+      DND_COPY
+    } else if (common & DND_MOVE) != 0 {
+      DND_MOVE
+    } else if (common & DND_ASK) != 0 {
+      DND_ASK
+    } else {
+      0
+    }
+  }
+
   fn req_data_source(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
       0 => {
         let mime = args.get(0).and_then(|a| a.as_str()).unwrap_or("").to_string();
-        if mime.is_empty() {
-          return;
-        }
+        if mime.is_empty() { return; }
         if let Some(Object {
-          role: Role::DataSource { mime_types },
+          role: Role::DataSource { mime_types, .. },
           ..
         }) = client.objects.get_mut(&id)
         {
@@ -3431,25 +3813,40 @@ impl Server {
             mime_types.push(mime);
           }
         }
-        // Mime offers can arrive after set_selection; rebroadcast once ready.
         if self.selection == Some((client.conn.fd, id)) {
           self.pending_selection_broadcast = true;
         }
       }
       1 => {
+        if self.drag.as_ref().is_some_and(|d| d.source_fd == client.conn.fd && d.source_id == id) {
+          // Source-side cancellation while request dispatch temporarily owns `client`.
+          if let Some(drag) = self.drag.take() {
+            if let Some(target) = drag.target {
+              if let Some(dst) = self.clients.get_mut(&target.fd) {
+                if dst.objects.contains_key(&target.device_id) {
+                  dst.send(target.device_id, 2, &[]);
+                  dst.conn.flush();
+                }
+              }
+            }
+          }
+        }
         let owned = self.selection == Some((client.conn.fd, id));
         client.objects.remove(&id);
         if owned {
           self.selection = None;
-          let devices: Vec<u32> = client
-            .objects
-            .iter()
-            .filter_map(|(&did, o)| matches!(o.role, Role::DataDevice { .. }).then_some(did))
-            .collect();
-          for did in devices {
-            client.send(did, 5, &[Arg::Object(0)]);
-          }
           self.pending_selection_broadcast = true;
+        }
+      }
+      2 => {
+        let actions = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
+        if actions & !DND_ALL != 0 { return; }
+        if let Some(Object {
+          role: Role::DataSource { dnd_actions, .. },
+          ..
+        }) = client.objects.get_mut(&id)
+        {
+          *dnd_actions = actions;
         }
       }
       _ => {}
@@ -3458,17 +3855,47 @@ impl Server {
 
   fn req_data_device(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
-      0 => { /* start_drag — not yet */ }
+      0 => {
+        // start_drag(source?, origin, icon?, serial)
+        let source_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
+        let origin = args.get(1).map(|a| a.as_object()).unwrap_or(0);
+        let _icon = args.get(2).map(|a| a.as_object()).unwrap_or(0);
+        let serial = args.get(3).map(|a| a.as_uint()).unwrap_or(0);
+        let fd = client.conn.fd;
+
+        let valid_grab = self.pointer_grab
+          .is_some_and(|(gfd, sid, _, _, _)| gfd == fd && sid == origin);
+        if serial == 0 || serial != self.last_button_serial || !valid_grab {
+          return;
+        }
+        if !matches!(client.objects.get(&origin), Some(Object { role: Role::Surface(_), .. })) {
+          return;
+        }
+        if source_id != 0 && !matches!(
+          client.objects.get(&source_id),
+          Some(Object { role: Role::DataSource { .. }, .. })
+        ) {
+          return;
+        }
+
+        self.drag = Some(DragState {
+          source_fd: fd,
+          source_id,
+          button: self.last_button_code,
+          target: None,
+        });
+        self.pointer_grab = None;
+        self.cursor_client_fd = -1;
+        self.cursor_surface_id = 0;
+        self.pending_cursor = None;
+        self.cursor_dirty = true;
+      }
       1 => {
         // set_selection(source?, serial)
         let source = args.get(0).map(|a| a.as_object()).unwrap_or(0);
         let fd = client.conn.fd;
         if source == 0 {
-          // Only the current selection owner may clear the seat clipboard.
-          // A non-owner null set_selection must NOT wipe other clients' view
-          // of the offer (that made Ctrl+V fail after focus changes).
-          let clearing = self.selection.map(|(sfd, _)| sfd == fd).unwrap_or(false);
-          if clearing {
+          if self.selection.map(|(sfd, _)| sfd == fd).unwrap_or(false) {
             self.selection = None;
             self.pending_selection_broadcast = true;
           }
@@ -3476,10 +3903,7 @@ impl Server {
         }
         if !matches!(
           client.objects.get(&source),
-          Some(Object {
-            role: Role::DataSource { .. },
-            ..
-          })
+          Some(Object { role: Role::DataSource { .. }, .. })
         ) {
           return;
         }
@@ -3487,16 +3911,13 @@ impl Server {
         if let Some((pfd, pid)) = prev {
           if !(pfd == fd && pid == source) {
             if pfd == fd {
-              client.send(pid, 2, &[]); // cancelled
+              client.send(pid, 2, &[]);
             } else if let Some(prev_client) = self.clients.get_mut(&pfd) {
               prev_client.send(pid, 2, &[]);
               prev_client.conn.flush();
             }
           }
         }
-        // Do not emit here: `client` is outside `self.clients` during request
-        // handling.  One broadcast after re-insert reaches every data_device
-        // exactly once (a prior emit+broadcast double-offer confused GTK paste).
         self.pending_selection_broadcast = true;
       }
       2 => {
@@ -3508,27 +3929,61 @@ impl Server {
 
   fn req_data_offer(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
+      0 => {
+        // accept(serial, mime_type?)
+        let mime = args.get(1).and_then(|a| a.as_str()).map(str::to_owned);
+        let (source_fd, source_id, valid_mime, dnd) = match client.objects.get(&id) {
+          Some(Object {
+            role: Role::DataOffer {
+              source_fd, source_id, mime_types, dnd, ..
+            },
+            ..
+          }) => (
+            *source_fd,
+            *source_id,
+            mime.as_ref().map_or(true, |m| mime_types.iter().any(|offered| offered == m)),
+            *dnd,
+          ),
+          _ => return,
+        };
+        if !dnd { return; }
+        let accepted = if valid_mime { mime } else { None };
+        if let Some(Object {
+          role: Role::DataOffer { accepted_mime, .. },
+          ..
+        }) = client.objects.get_mut(&id)
+        {
+          *accepted_mime = accepted.clone();
+        }
+        self.send_source_event(
+          client,
+          source_fd,
+          source_id,
+          0,
+          &[Arg::Str(accepted)],
+        );
+      }
       1 => {
         // receive(mime_type, fd)
         let mime = args.get(0).and_then(|a| a.as_str()).unwrap_or("").to_string();
         let pipe_fd = args.get(1).map(|a| a.as_fd()).unwrap_or(-1);
-        if pipe_fd < 0 {
-          return;
-        }
-        let (source_fd, source_id) = match client.objects.get(&id) {
+        if pipe_fd < 0 { return; }
+        let (source_fd, source_id, offered) = match client.objects.get(&id) {
           Some(Object {
             role: Role::DataOffer {
-              source_fd,
-              source_id,
-              ..
+              source_fd, source_id, mime_types, ..
             },
             ..
-          }) if *source_id != 0 => (*source_fd, *source_id),
+          }) => (*source_fd, *source_id, mime_types.iter().any(|m| m == &mime)),
           _ => {
             unsafe { libc::close(pipe_fd) };
             return;
           }
         };
+        if !offered || source_id == 0 {
+          unsafe { libc::close(pipe_fd) };
+          return;
+        }
         if source_fd == client.conn.fd {
           client.send(source_id, 1, &[Arg::Str(Some(mime)), Arg::Fd(pipe_fd)]);
         } else if let Some(src) = self.clients.get_mut(&source_fd) {
@@ -3539,9 +3994,338 @@ impl Server {
         }
       }
       2 => {
+        if let Some(drag) = self.drag {
+          if drag.target.is_some_and(|t| t.fd == client.conn.fd && t.offer_id == id) {
+            self.drag = Some(DragState { target: None, ..drag });
+          }
+        }
         client.objects.remove(&id);
       }
+      3 => {
+        // finish()
+        let (source_fd, source_id, dnd, dropped, accepted, action) =
+          match client.objects.get(&id) {
+            Some(Object {
+              role: Role::DataOffer {
+                source_fd, source_id, dnd, dropped, accepted_mime, action, ..
+              },
+              ..
+            }) => (
+              *source_fd, *source_id, *dnd, *dropped,
+              accepted_mime.is_some(), *action
+            ),
+            _ => return,
+          };
+        if dnd && dropped && accepted && action != 0 {
+          self.send_source_event(client, source_fd, source_id, 4, &[]);
+        }
+        client.objects.remove(&id);
+      }
+      4 => {
+        // set_actions(dnd_actions, preferred_action)
+        let dest = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
+        let preferred = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
+        if (dest & !DND_ALL) != 0
+          || (preferred != 0 && (preferred & !DND_ALL != 0 || preferred.count_ones() != 1))
+        {
+          return;
+        }
+
+        let (source_fd, source_id, source_actions, old_action, dnd, version) =
+          match client.objects.get(&id) {
+            Some(Object {
+              version,
+              role: Role::DataOffer {
+                source_fd, source_id, source_actions, action, dnd, ..
+              },
+              ..
+            }) => (*source_fd, *source_id, *source_actions, *action, *dnd, *version),
+            _ => return,
+          };
+        if !dnd || version < 3 { return; }
+
+        let selected = Self::choose_dnd_action(source_actions, dest, preferred);
+        if let Some(Object {
+          role: Role::DataOffer {
+            dest_actions, preferred_action, action, ..
+          },
+          ..
+        }) = client.objects.get_mut(&id)
+        {
+          *dest_actions = dest;
+          *preferred_action = preferred;
+          *action = selected;
+        }
+
+        if selected != old_action {
+          client.send(id, 2, &[Arg::Uint(selected)]);
+          self.send_source_event(
+            client,
+            source_fd,
+            source_id,
+            5,
+            &[Arg::Uint(selected)],
+          );
+        }
+      }
       _ => {}
+    }
+  }
+
+  fn data_device_id(client: &Client) -> Option<(u32, u32)> {
+    client.objects.iter().filter_map(|(&id, o)| {
+      matches!(o.role, Role::DataDevice { .. }).then_some((id, o.version))
+    }).min_by_key(|&(id, _)| id)
+  }
+
+  fn dnd_source_snapshot(&self, drag: DragState) -> Option<(Vec<String>, u32)> {
+    if drag.source_id == 0 {
+      return Some((Vec::new(), 0));
+    }
+    let client = self.clients.get(&drag.source_fd)?;
+    match client.objects.get(&drag.source_id) {
+      Some(Object {
+        role: Role::DataSource { mime_types, dnd_actions },
+        ..
+      }) => {
+        let actions = if *dnd_actions == 0 { DND_COPY } else { *dnd_actions & DND_ALL };
+        Some((mime_types.clone(), actions))
+      }
+      _ => None,
+    }
+  }
+
+  fn leave_drag_target(&mut self) {
+    let source = self.drag.map(|d| (d.source_fd, d.source_id));
+    let old = self.drag.as_mut().and_then(|d| d.target.take());
+    if let Some(target) = old {
+      if let Some(client) = self.clients.get_mut(&target.fd) {
+        if client.objects.contains_key(&target.device_id) {
+          client.send(target.device_id, 2, &[]);
+          client.conn.flush();
+        }
+      }
+    }
+    if let Some((source_fd, source_id)) = source {
+      if source_id != 0 {
+        if let Some(client) = self.clients.get_mut(&source_fd) {
+          let v3 = client.objects.get(&source_id).is_some_and(|o| o.version >= 3);
+          if v3 {
+            client.send(source_id, 5, &[Arg::Uint(0)]);
+            client.conn.flush();
+          }
+        }
+      }
+    }
+  }
+
+  fn update_drag_motion(&mut self, nx: f32, ny: f32) {
+    let Some(drag) = self.drag else { return; };
+
+    let hit = self.find_input_target().and_then(
+      |(fd, surface_id, _, _, _, _, ox, oy)| {
+        let client = self.clients.get(&fd)?;
+        let (device_id, _) = Self::data_device_id(client)?;
+        Some((fd, surface_id, device_id, ox, oy))
+      },
+    );
+
+    let old_key = drag.target.map(|t| (t.fd, t.surface_id, t.device_id));
+    let new_key = hit.map(|(fd, sid, did, _, _)| (fd, sid, did));
+
+    if old_key != new_key {
+      self.leave_drag_target();
+      let Some((fd, surface_id, device_id, ox, oy)) = hit else {
+        if drag.source_id != 0 {
+          if let Some(source) = self.clients.get_mut(&drag.source_fd) {
+            let v3 = source.objects.get(&drag.source_id).is_some_and(|o| o.version >= 3);
+            if v3 {
+              source.send(drag.source_id, 5, &[Arg::Uint(0)]);
+              source.conn.flush();
+            }
+          }
+        }
+        return;
+      };
+
+      let Some((mimes, source_actions)) = self.dnd_source_snapshot(drag) else {
+        self.cancel_drag();
+        return;
+      };
+      let serial = self.next_serial();
+      let (fx, fy) = self.to_surface_fixed(nx, ny, ox, oy);
+
+      let offer_id = if drag.source_id == 0 {
+        0
+      } else {
+        let Some(target) = self.clients.get_mut(&fd) else { return; };
+        let offer_version = target.objects.get(&device_id).map(|o| o.version).unwrap_or(1).min(3);
+        let oid = target.alloc_server_id();
+        target.objects.insert(
+          oid,
+          Object::new(
+            &protocol::WL_DATA_OFFER,
+            offer_version,
+            Role::DataOffer {
+              source_fd: drag.source_fd,
+              source_id: drag.source_id,
+              mime_types: mimes.clone(),
+              dnd: true,
+              accepted_mime: None,
+              source_actions,
+              dest_actions: 0,
+              preferred_action: 0,
+              action: if offer_version >= 3 { 0 } else { DND_COPY },
+              dropped: false,
+            },
+          ),
+        );
+        target.send(device_id, 0, &[Arg::NewId(oid)]);
+        for mime in &mimes {
+          target.send(oid, 0, &[Arg::Str(Some(mime.clone()))]);
+        }
+        if offer_version >= 3 {
+          target.send(oid, 1, &[Arg::Uint(source_actions)]);
+          target.send(oid, 2, &[Arg::Uint(0)]);
+        }
+        oid
+      };
+
+      if let Some(target) = self.clients.get_mut(&fd) {
+        target.send(
+          device_id,
+          1,
+          &[
+            Arg::Uint(serial),
+            Arg::Object(surface_id),
+            Arg::Fixed(fx),
+            Arg::Fixed(fy),
+            Arg::Object(offer_id),
+          ],
+        );
+        target.conn.flush();
+      }
+      if let Some(d) = self.drag.as_mut() {
+        d.target = Some(DragTarget {
+          fd,
+          surface_id,
+          device_id,
+          offer_id,
+          origin_x: ox,
+          origin_y: oy,
+        });
+      }
+      return;
+    }
+
+    if let Some(target) = drag.target {
+      let (fx, fy) = self.to_surface_fixed(nx, ny, target.origin_x, target.origin_y);
+      let ts = now_ms();
+      if let Some(client) = self.clients.get_mut(&target.fd) {
+        if client.objects.contains_key(&target.device_id) {
+          client.send(
+            target.device_id,
+            3,
+            &[Arg::Uint(ts), Arg::Fixed(fx), Arg::Fixed(fy)],
+          );
+          client.conn.flush();
+        }
+      }
+    }
+  }
+
+  fn finish_drag_drop(&mut self) {
+    let Some(drag) = self.drag.take() else { return; };
+    let Some(target) = drag.target else {
+      if drag.source_id != 0 {
+        if let Some(source) = self.clients.get_mut(&drag.source_fd) {
+          if source.objects.contains_key(&drag.source_id) {
+            source.send(drag.source_id, 2, &[]);
+            source.conn.flush();
+          }
+        }
+      }
+      return;
+    };
+
+    let accepted_action = self.clients.get(&target.fd).and_then(|client| {
+      match client.objects.get(&target.offer_id) {
+        Some(Object {
+          role: Role::DataOffer {
+            accepted_mime, action, ..
+          },
+          ..
+        }) if accepted_mime.is_some() && *action != 0 => Some(*action),
+        _ => None,
+      }
+    });
+
+    let Some(_action) = accepted_action else {
+      if let Some(client) = self.clients.get_mut(&target.fd) {
+        if client.objects.contains_key(&target.device_id) {
+          client.send(target.device_id, 2, &[]);
+          client.conn.flush();
+        }
+      }
+      if drag.source_id != 0 {
+        if let Some(source) = self.clients.get_mut(&drag.source_fd) {
+          if source.objects.contains_key(&drag.source_id) {
+            source.send(drag.source_id, 2, &[]);
+            source.conn.flush();
+          }
+        }
+      }
+      return;
+    };
+
+    if let Some(client) = self.clients.get_mut(&target.fd) {
+      if let Some(Object {
+        role: Role::DataOffer { dropped, .. },
+        ..
+      }) = client.objects.get_mut(&target.offer_id)
+      {
+        *dropped = true;
+      }
+      client.send(target.device_id, 4, &[]);
+      client.conn.flush();
+    }
+    if drag.source_id != 0 {
+      if let Some(source) = self.clients.get_mut(&drag.source_fd) {
+        let v3 = source.objects.get(&drag.source_id).is_some_and(|o| o.version >= 3);
+        if v3 {
+          source.send(drag.source_id, 3, &[]);
+          source.conn.flush();
+        }
+      }
+    }
+  }
+
+  fn cancel_drag(&mut self) {
+    let Some(drag) = self.drag.take() else { return; };
+    if let Some(target) = drag.target {
+      if let Some(client) = self.clients.get_mut(&target.fd) {
+        if client.objects.contains_key(&target.device_id) {
+          client.send(target.device_id, 2, &[]);
+          client.conn.flush();
+        }
+      }
+    }
+    if drag.source_id != 0 {
+      if let Some(source) = self.clients.get_mut(&drag.source_fd) {
+        if source.objects.contains_key(&drag.source_id) {
+          source.send(drag.source_id, 2, &[]);
+          source.conn.flush();
+        }
+      }
+    }
+  }
+
+  fn cancel_drag_for_fd(&mut self, fd: RawFd) {
+    let involved = self.drag.is_some_and(|d| {
+      d.source_fd == fd || d.target.is_some_and(|t| t.fd == fd)
+    });
+    if involved {
+      self.cancel_drag();
     }
   }
 
@@ -3552,7 +4336,7 @@ impl Server {
     let mimes = if let Some(c) = current.filter(|c| c.conn.fd == source_fd) {
       match c.objects.get(&source_id) {
         Some(Object {
-          role: Role::DataSource { mime_types },
+          role: Role::DataSource { mime_types, .. },
           ..
         }) => mime_types.clone(),
         _ => return None,
@@ -3560,7 +4344,7 @@ impl Server {
     } else {
       match self.clients.get(&source_fd).and_then(|c| c.objects.get(&source_id)) {
         Some(Object {
-          role: Role::DataSource { mime_types },
+          role: Role::DataSource { mime_types, .. },
           ..
         }) => mime_types.clone(),
         _ => return None,
@@ -3586,6 +4370,13 @@ impl Server {
               source_fd,
               source_id,
               mime_types: mimes.clone(),
+              dnd: false,
+              accepted_mime: None,
+              source_actions: 0,
+              dest_actions: 0,
+              preferred_action: 0,
+              action: 0,
+              dropped: false,
             },
           ),
         );
@@ -3626,7 +4417,7 @@ impl Server {
     let snapshot = self.selection.and_then(|(sfd, sid)| {
       self.clients.get(&sfd).and_then(|c| match c.objects.get(&sid) {
         Some(Object {
-          role: Role::DataSource { mime_types },
+          role: Role::DataSource { mime_types, .. },
           ..
         }) if !mime_types.is_empty() => Some((sfd, sid, mime_types.clone())),
         _ => None,
@@ -3663,6 +4454,13 @@ impl Server {
                 source_fd: *source_fd,
                 source_id: *source_id,
                 mime_types: mimes.clone(),
+                dnd: false,
+                accepted_mime: None,
+                source_actions: 0,
+                dest_actions: 0,
+                preferred_action: 0,
+                action: 0,
+                dropped: false,
               },
             ),
           );
@@ -3988,8 +4786,7 @@ impl Server {
     decoration_mode == 2
   }
 
-  fn toplevel_decoration_mode(&self, fd: RawFd, surface_id: u32) -> u32 {
-    let Some(client) = self.clients.get(&fd) else { return 0 };
+  fn toplevel_decoration_mode_in(client: &Client, surface_id: u32) -> u32 {
     let xdg = match client.objects.get(&surface_id) {
       Some(Object {
         role: Role::Surface(s),
@@ -4014,9 +4811,67 @@ impl Server {
       .unwrap_or(0)
   }
 
+  fn toplevel_decoration_mode(&self, fd: RawFd, surface_id: u32) -> u32 {
+    let Some(client) = self.clients.get(&fd) else { return 0 };
+    Self::toplevel_decoration_mode_in(client, surface_id)
+  }
+
+  /// Height of compositor SSD chrome currently drawn for this toplevel.
+  #[inline]
+  fn ssd_chrome_height(&self, fd: RawFd, surface_id: u32) -> i32 {
+    if Self::uses_ssd(self.toplevel_decoration_mode(fd, surface_id)) {
+      SSD_BAR_H
+    } else {
+      0
+    }
+  }
+
+  /// Same as `ssd_chrome_height`, but for a client currently borrowed out of
+  /// `self.clients` (request dispatch / commit).
+  #[inline]
+  fn ssd_chrome_height_in(&self, client: &Client, surface_id: u32) -> i32 {
+    if Self::uses_ssd(Self::toplevel_decoration_mode_in(client, surface_id)) {
+      SSD_BAR_H
+    } else {
+      0
+    }
+  }
+
+  /// If an SSD titlebar would sit inside the top exclusive zone, push the
+  /// window down so the bar stays clickable.
+  fn ensure_ssd_titlebar_clearance_in(&mut self, client: &mut Client, surface_id: u32) {
+    if !Self::uses_ssd(Self::toplevel_decoration_mode_in(client, surface_id)) {
+      return;
+    }
+    let (_, uy, _, _) = self.usable_area();
+    let Some((_, oy, _, _)) = Self::surface_geometry_in(client, surface_id) else {
+      return;
+    };
+    let min_y = uy + SSD_BAR_H;
+    if oy >= min_y {
+      return;
+    }
+    let dy = min_y - oy;
+    if let Some(Object {
+      role: Role::Surface(s),
+      ..
+    }) = client.objects.get_mut(&surface_id)
+    {
+      s.y += dy;
+      self.dirty = true;
+    }
+  }
+
+  fn ensure_ssd_titlebar_clearance(&mut self, fd: RawFd, surface_id: u32) {
+    let Some(mut client) = self.clients.remove(&fd) else {
+      return;
+    };
+    self.ensure_ssd_titlebar_clearance_in(&mut client, surface_id);
+    self.clients.insert(fd, client);
+  }
+
   fn draw_ssd_titlebar(&mut self, win_x: i32, win_y: i32, win_w: i32, focused: bool) {
-    const BAR_H: i32 = 28;
-    let bar_y = win_y - BAR_H;
+    let bar_y = win_y - SSD_BAR_H;
     // Chrome is drawn through Framebuffer::put so a damage-limited composite
     // leaves the parts of the titlebar nobody touched exactly as they were.
     let clip = self.fb.clip();
@@ -4033,7 +4888,7 @@ impl Server {
         0xff2a_2a32
       };
       let bar_hi: u32 = if focused { 0xff4d_8fd8 } else { 0xff3a_3a46 };
-      for y in bar_y.max(0).max(clip.y0)..(bar_y + BAR_H).min(fh).min(clip.y1) {
+      for y in bar_y.max(0).max(clip.y0)..(bar_y + SSD_BAR_H).min(fh).min(clip.y1) {
         let row_c = if y == bar_y { bar_hi } else { bar_color };
         for x in win_x.max(0).max(clip.x0)..(win_x + win_w).min(fw).min(clip.x1) {
           self.fb.put(x, y, row_c);
@@ -4048,7 +4903,7 @@ impl Server {
           }
         }
       };
-      let cy = bar_y + BAR_H / 2;
+      let cy = bar_y + SSD_BAR_H / 2;
       draw_dot(&mut self.fb, win_x + 16, cy, 0xffe8_4a4a);
       draw_dot(&mut self.fb, win_x + 36, cy, 0xffe8_c04a);
       draw_dot(&mut self.fb, win_x + 56, cy, 0xff4a_c86a);
@@ -4066,11 +4921,11 @@ impl Server {
       };
       let hi = 0xffdf_dfdf;
       let lo = 0xff80_8080;
-      for y in bar_y.max(0).max(clip.y0)..(bar_y + BAR_H).min(fh).min(clip.y1) {
+      for y in bar_y.max(0).max(clip.y0)..(bar_y + SSD_BAR_H).min(fh).min(clip.y1) {
         for x in win_x.max(0).max(clip.x0)..(win_x + win_w).min(fw).min(clip.x1) {
           let c = if y == bar_y {
             hi
-          } else if y == bar_y + BAR_H - 1 {
+          } else if y == bar_y + SSD_BAR_H - 1 {
             lo
           } else {
             bar_color
@@ -4080,7 +4935,7 @@ impl Server {
       }
       // Square system-menu / minimize / maximize / close affordances (left,
       // matching hit_ssd targets used by the other titlebar styles).
-      let cy = bar_y + BAR_H / 2;
+      let cy = bar_y + SSD_BAR_H / 2;
       let draw_box = |fb: &mut Framebuffer, cx: i32, fill: u32, ink: u32| {
         for dy in -6i32..=6 {
           for dx in -6i32..=6 {
@@ -4132,19 +4987,19 @@ impl Server {
     };
     let x0 = win_x.max(0).max(clip.x0);
     let x1 = (win_x + win_w).min(fw).min(clip.x1);
-    for y in bar_y.max(0).max(clip.y0)..(bar_y + BAR_H).min(fh).min(clip.y1) {
+    for y in bar_y.max(0).max(clip.y0)..(bar_y + SSD_BAR_H).min(fh).min(clip.y1) {
       for x in x0..x1 {
         let t = (((x - win_x).max(0) as i64 * 255) / win_w.max(1) as i64) as u32;
         let mut color = mix_rgb(left, right, t.min(255));
         if y == bar_y { color = mix_rgb(color, 0xffff_ffff, if focused { 42 } else { 24 }); }
-        if y == bar_y + BAR_H - 1 { color = mix_rgb(color, 0xff00_0000, 48); }
+        if y == bar_y + SSD_BAR_H - 1 { color = mix_rgb(color, 0xff00_0000, 48); }
         self.fb.put(x, y, color);
       }
     }
 
     // Compact translucent controls; their hit targets intentionally remain
     // identical to the classic style.
-    let cy = bar_y + BAR_H / 2;
+    let cy = bar_y + SSD_BAR_H / 2;
     let draw_control = |fb: &mut Framebuffer, cx: i32, glyph: u8, danger: bool| {
       for dy in -6i32..=6 {
         for dx in -6i32..=6 {
@@ -4174,7 +5029,6 @@ impl Server {
 
   /// Visible window frame so the user can see (and grab) resize borders.
   fn draw_window_frame(&mut self, win_x: i32, win_y: i32, win_w: i32, win_h: i32, ssd: bool, focused: bool) {
-    const BAR_H: i32 = 28;
     const FRAME: i32 = 3;
     let frame_c: u32 = if self.wm_titlebar_frame != 0 {
       self.wm_titlebar_frame
@@ -4187,7 +5041,7 @@ impl Server {
     } else {
       0xff48_4b58
     };
-    let top = if ssd { win_y - BAR_H } else { win_y };
+    let top = if ssd { win_y - SSD_BAR_H } else { win_y };
     let left = win_x - FRAME;
     let right = win_x + win_w + FRAME;
     let bottom = win_y + win_h + FRAME;
@@ -4222,29 +5076,60 @@ impl Server {
   }
 
   fn hit_ssd(&self, px: i32, py: i32) -> Option<(&'static str, RawFd, u32)> {
-    const BAR_H: i32 = 28;
+    let (_, uy, _, _) = self.usable_area();
     for &(fd, sid) in self.window_stack.iter().rev() {
       let Some(client) = self.clients.get(&fd) else { continue };
       if self.surface_is_minimized(client, sid) {
         continue;
       }
-      if !Self::uses_ssd(self.toplevel_decoration_mode(fd, sid)) {
-        continue;
+      let Some((ox, oy, w, h)) = self.surface_geometry(fd, sid) else { continue };
+      let ssd = Self::uses_ssd(self.toplevel_decoration_mode(fd, sid));
+      if ssd {
+        let bar_y = oy - SSD_BAR_H;
+        // Ignore the portion buried under the top exclusive zone; those clicks
+        // belong to the menubar.  `ensure_ssd_titlebar_clearance` normally
+        // keeps the whole bar below `uy`.
+        let hit_top = bar_y.max(uy);
+        if px >= ox && px < ox + w && py >= hit_top && py < oy {
+          let lx = px - ox;
+          if (lx - 16).abs() <= 8 {
+            return Some(("close", fd, sid));
+          }
+          if (lx - 36).abs() <= 8 {
+            return Some(("min", fd, sid));
+          }
+          if (lx - 56).abs() <= 8 {
+            return Some(("max", fd, sid));
+          }
+          return Some(("move", fd, sid));
+        }
       }
-      let Some((ox, oy, w, _h)) = self.surface_geometry(fd, sid) else { continue };
-      let bar_y = oy - BAR_H;
-      if px >= ox && px < ox + w && py >= bar_y && py < oy {
-        let lx = px - ox;
-        if (lx - 16).abs() <= 8 {
-          return Some(("close", fd, sid));
+      // Content (and SSD chrome) of this window occludes titlebars behind it.
+      // Match find_input_target: use the input-capable buffer for CSD windows
+      // so trimmed shadow regions still let clicks reach an SSD titlebar below,
+      // while a real content hit blocks it.
+      let Some(Object {
+        role: Role::Surface(s),
+        ..
+      }) = client.objects.get(&sid)
+      else {
+        continue;
+      };
+      if ssd {
+        let top = oy - SSD_BAR_H;
+        if px >= ox && px < ox + w && py >= top && py < oy + h {
+          return None;
         }
-        if (lx - 36).abs() <= 8 {
-          return Some(("min", fd, sid));
+      } else {
+        let (bw, bh) = Self::surface_tree_size(client, sid).unwrap_or((0, 0));
+        if px >= s.x
+          && py >= s.y
+          && px < s.x + bw
+          && py < s.y + bh
+          && Self::surface_input_hit(s, px - s.x, py - s.y)
+        {
+          return None;
         }
-        if (lx - 56).abs() <= 8 {
-          return Some(("max", fd, sid));
-        }
-        return Some(("move", fd, sid));
       }
     }
     None
@@ -4294,7 +5179,7 @@ impl Server {
       // so it still cannot steal clicks from the actual client contents.
       let Some((ox, oy, w, h)) = self.surface_geometry(fd, sid) else { continue };
       // SSD titlebar sits above the buffer — treat it as part of the window.
-      let top_extra = if ssd { 28 } else { 0 };
+      let top_extra = if ssd { SSD_BAR_H } else { 0 };
       let inner_l = ox;
       let inner_r = ox + w;
       let inner_t = oy - top_extra;
@@ -4365,6 +5250,11 @@ impl Server {
         {
           *decoration_mode = pref;
         }
+        if pref == 2 {
+          if let Some(sid) = self.toplevel_surface_id(client, toplevel) {
+            self.ensure_ssd_titlebar_clearance_in(client, sid);
+          }
+        }
       }
       _ => {}
     }
@@ -4403,6 +5293,11 @@ impl Server {
           *decoration_mode = mode;
         }
         client.send(id, 0, &[Arg::Uint(mode)]);
+        if mode == 2 {
+          if let Some(sid) = self.toplevel_surface_id(client, toplevel) {
+            self.ensure_ssd_titlebar_clearance_in(client, sid);
+          }
+        }
         self.dirty = true;
       }
       2 => {
@@ -4432,6 +5327,11 @@ impl Server {
           *decoration_mode = pref;
         }
         client.send(id, 0, &[Arg::Uint(pref)]);
+        if pref == 2 {
+          if let Some(sid) = self.toplevel_surface_id(client, toplevel) {
+            self.ensure_ssd_titlebar_clearance_in(client, sid);
+          }
+        }
         self.dirty = true;
       }
       _ => {}
@@ -4479,6 +5379,12 @@ impl Server {
         client.send(decoration_id, 0, &[Arg::Uint(effective)]);
       }
       client.conn.flush();
+    }
+    if prefer {
+      let targets: Vec<(RawFd, u32)> = self.window_stack.clone();
+      for (fd, sid) in targets {
+        self.ensure_ssd_titlebar_clearance(fd, sid);
+      }
     }
     self.dirty = true;
     self.shell_state_dirty = true;
@@ -5200,12 +6106,12 @@ impl Server {
                 parent_surface_id: None,
                 saved_geom: None,
                 tiled: 0,
-                // Absence of an xdg-decoration object means the compositor
-                // cannot know that client pixels exclude decorations.  Treat
-                // such clients as CSD (notably GTK HeaderBar windows); the
-                // decoration manager switches this to the configured mode as
-                // soon as the client opts into negotiation.
-                decoration_mode: 1,
+                // 0 = decoration never negotiated.  GLFW/luna-ui apps that
+                // draw their own titlebar never bind zxdg-decoration and never
+                // send xdg_toplevel.move (X11 SetWindowPos); mode 0 keeps the
+                // compositor top-strip drag path alive.  Clients that bind
+                // decoration (GTK, libdecor) switch this to 1 or 2 immediately.
+                decoration_mode: 0,
                 min_w: 0,
                 min_h: 0,
                 max_w: 0,
@@ -5517,7 +6423,10 @@ impl Server {
           grab_py: py,
           orig_x,
           orig_y,
+          siblings: self.attached_move_siblings_in(client, fd, surface_id),
         };
+        self.pointer_grab = None;
+        self.csd_press = None;
         self.cursor_client_fd = -1;
         self.cursor_surface_id = 0;
         self.pending_cursor = None;
@@ -5989,6 +6898,181 @@ impl Server {
     }
   }
 
+  /// Luna private `luna_wm_v1` — absolute SetWindowPos / GetWindowPos for
+  /// session clients.  Coordinates are content-box top-left (window_geometry).
+  fn req_luna_wm(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
+    match opcode {
+      0 => {
+        client.objects.remove(&id);
+      }
+      1 => {
+        // set_position(surface, x, y) — programmatic place only (aplay EQ etc).
+        let surface_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
+        let x = args.get(1).map(|a| a.as_int()).unwrap_or(0);
+        let y = args.get(2).map(|a| a.as_int()).unwrap_or(0);
+        if surface_id == 0 || !Self::surface_is_xdg_toplevel_in(client, surface_id) {
+          return;
+        }
+        let fd = client.conn.fd;
+        // Compositor owns interactive moves; ignore client set_position spam.
+        if matches!(
+          self.wm_grab,
+          WmGrab::Move { fd: gfd, surface_id: gsid, .. } if gfd == fd && gsid == surface_id
+        ) {
+          return;
+        }
+
+        // Drop maximized / fullscreen / tile so an absolute place sticks.
+        let xdg_id = match client.objects.get(&surface_id) {
+          Some(Object {
+            role: Role::Surface(s),
+            ..
+          }) => s.xdg_surface_id,
+          _ => None,
+        };
+        if let Some(xdg_id) = xdg_id {
+          for obj in client.objects.values_mut() {
+            if let Role::XdgToplevel {
+              xdg_surface_id,
+              maximized,
+              fullscreen,
+              minimized,
+              tiled,
+              ..
+            } = &mut obj.role
+            {
+              if *xdg_surface_id == xdg_id {
+                *maximized = false;
+                *fullscreen = false;
+                *minimized = false;
+                *tiled = 0;
+              }
+            }
+          }
+        }
+
+        let (gx, gy, cw, ch) = match Self::surface_geometry_in(client, surface_id) {
+          Some((cx, cy, w, h)) => {
+            let (gx, gy) = match client.objects.get(&surface_id) {
+              Some(Object {
+                role: Role::Surface(s),
+                ..
+              }) => s.window_geom.map(|(gx, gy, _, _)| (gx, gy)).unwrap_or((0, 0)),
+              _ => (0, 0),
+            };
+            let _ = (cx, cy);
+            (gx, gy, w.max(64), h.max(64))
+          }
+          None => (0, 0, 320, 240),
+        };
+        let (ux, uy, uw, uh) = self.usable_area();
+        let max_x = ux + (uw - cw).max(0);
+        let max_y = uy + (uh - ch).max(0);
+        let nx = x.clamp(ux, max_x);
+        let ny = y.clamp(uy, max_y);
+        if let Some(Object {
+          role: Role::Surface(s),
+          ..
+        }) = client.objects.get_mut(&surface_id)
+        {
+          s.x = nx - gx;
+          s.y = ny - gy;
+        }
+        self.window_stack.retain(|&(f, s)| !(f == fd && s == surface_id));
+        self.window_stack.push((fd, surface_id));
+        self.focused_client_fd = fd;
+        self.focused_surface_id = surface_id;
+        // Scene only — do not rewrite state.json on every place (drag spam).
+        self.dirty = true;
+      }
+      2 => {
+        // get_position(surface) → position event
+        let surface_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
+        let (x, y) = Self::surface_geometry_in(client, surface_id)
+          .map(|(x, y, _, _)| (x, y))
+          .unwrap_or_else(|| match client.objects.get(&surface_id) {
+            Some(Object {
+              role: Role::Surface(s),
+              ..
+            }) => (s.x, s.y),
+            _ => (0, 0),
+          });
+        client.send(id, 0, &[Arg::Object(surface_id), Arg::Int(x), Arg::Int(y)]);
+      }
+      3 => {
+        // start_move(surface) — interactive grab (titlebar drag).
+        let surface_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
+        if surface_id == 0 || !Self::surface_is_xdg_toplevel_in(client, surface_id) {
+          return;
+        }
+        // Match xdg_toplevel.move: serial proves the implicit grab.  If the
+        // button is already up, ignore — never start-then-end (that ate snap).
+        if self.last_button_serial == 0 || self.last_button_code != 0x110 {
+          return;
+        }
+        if !self.last_button_pressed || !matches!(self.wm_grab, WmGrab::None) {
+          return;
+        }
+        let fd = client.conn.fd;
+        let (orig_x, orig_y) = match client.objects.get(&surface_id) {
+          Some(Object {
+            role: Role::Surface(s),
+            ..
+          }) => (s.x, s.y),
+          _ => return,
+        };
+        let (px, py) = self.screen_ptr();
+        let siblings = self.attached_move_siblings_in(client, fd, surface_id);
+        self.window_stack.retain(|&(f, s)| !(f == fd && s == surface_id));
+        self.window_stack.push((fd, surface_id));
+        self.focused_client_fd = fd;
+        self.focused_surface_id = surface_id;
+        self.wm_grab = WmGrab::Move {
+          fd,
+          surface_id,
+          grab_px: px,
+          grab_py: py,
+          orig_x,
+          orig_y,
+          siblings,
+        };
+        self.pointer_grab = None;
+        self.csd_press = None;
+        self.cursor_client_fd = -1;
+        self.cursor_surface_id = 0;
+        self.pending_cursor = None;
+        self.cursor_dirty = true;
+        self.dirty = true;
+      }
+      4 => {
+        // show_window_menu(surface, x, y) — surface-local coords, like xdg.
+        let surface_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
+        let x = args.get(1).map(|a| a.as_int()).unwrap_or(0);
+        let y = args.get(2).map(|a| a.as_int()).unwrap_or(0);
+        if surface_id == 0 || !Self::surface_is_xdg_toplevel_in(client, surface_id) {
+          return;
+        }
+        let fd = client.conn.fd;
+        self.window_stack.retain(|&(f, s)| !(f == fd && s == surface_id));
+        self.window_stack.push((fd, surface_id));
+        self.focused_client_fd = fd;
+        self.focused_surface_id = surface_id;
+        let (ox, oy) = match client.objects.get(&surface_id) {
+          Some(Object {
+            role: Role::Surface(s),
+            ..
+          }) => (s.x, s.y),
+          _ => (0, 0),
+        };
+        let (sx, sy) = (ox.saturating_add(x), oy.saturating_add(y));
+        self.pending_shell_menu = Some((fd, surface_id, sx, sy));
+        self.dirty = true;
+        self.shell_state_dirty = true;
+      }
+      _ => {}
+    }
+  }
+
   fn req_layer_surface(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
       0 => { // set_size(width, height)
@@ -6434,8 +7518,15 @@ impl Server {
   /// Repaint only the cursor over the last composited scene.  Returns false
   /// when the previous frame cannot be reused and a full composite is needed.
   fn repaint_cursor_only(&mut self) -> bool {
-    if !self.last_present_software || self.input_rx.is_none() {
+    if self.input_rx.is_none() {
       return false;
+    }
+    if !self.last_present_software {
+      // GPU path: re-submit the retained plane list.  If that fails, leave
+      // cursor_dirty set and retry after the next full frame — forcing
+      // dirty=true here turned every animated cursor tick (~100 ms) into a
+      // whole-desktop rebuild whenever the retained list was momentarily empty.
+      return self.repaint_cursor_gpu();
     }
     let (w, h) = self.backend.size();
     if self.fb.width != w || self.fb.height != h {
@@ -6449,6 +7540,63 @@ impl Server {
     let new_cursor = self.cursor_damage();
     self.backend.present_damage(&self.fb, old_cursor.union(&new_cursor));
     true
+  }
+
+  /// Re-present the retained GPU plane list with an updated cursor glyph.
+  fn repaint_cursor_gpu(&mut self) -> bool {
+    if self.retained_gpu_surfaces.is_empty() || !self.backend.can_gpu_compose() {
+      return false;
+    }
+    let (w, h) = self.backend.size();
+    let px = (self.ptr_x * w as f32) as i32;
+    let py = (self.ptr_y * h as f32) as i32;
+    let resize_edges = match self.wm_grab {
+      WmGrab::Resize { edges, .. } => Some(edges),
+      WmGrab::None => self.hit_resize_edge(px, py).map(|v| v.2),
+      WmGrab::Move { .. } => None,
+    };
+    let mut surfaces = self.retained_gpu_surfaces.clone();
+    let mut gpu_cursor_bitmap = None;
+    let mut gpu_cursor_pos = (0, 0, 0, 0);
+    if resize_edges.is_none() {
+      let cursor = (self.cursor_surface_id != 0 && self.cursor_client_fd >= 0)
+        .then(|| self.clients.get(&self.cursor_client_fd))
+        .flatten()
+        .and_then(|c| c.objects.get(&self.cursor_surface_id))
+        .and_then(|o| match &o.role {
+          Role::Surface(s) => s.current_buffer.clone(),
+          _ => None,
+        });
+      match cursor {
+        Some(buf) if buf.dmabuf_fd().is_some() || buf.stride == buf.width * 4 => {
+          surfaces.push((px - self.cursor_hot_x, py - self.cursor_hot_y, buf));
+        }
+        _ => {
+          let (cw, ch, hx, hy, pixels) = crate::cursor_aero::gpu_bitmap(None);
+          gpu_cursor_pos = (px - hx, py - hy, cw, ch);
+          gpu_cursor_bitmap = Some(pixels);
+        }
+      }
+    } else {
+      let (cw, ch, hx, hy, pixels) = crate::cursor_aero::gpu_bitmap(resize_edges);
+      gpu_cursor_pos = (px - hx, py - hy, cw, ch);
+      gpu_cursor_bitmap = Some(pixels);
+    }
+    let bitmap = gpu_cursor_bitmap.as_ref().map(|pixels| crate::render::GpuBitmap {
+      x: gpu_cursor_pos.0,
+      y: gpu_cursor_pos.1,
+      width: gpu_cursor_pos.2,
+      height: gpu_cursor_pos.3,
+      pixels,
+    });
+    if self.backend.present_dmabufs(&surfaces, bitmap) {
+      true
+    } else {
+      // Retained handles went stale — drop them so the next full composite
+      // rebuilds a fresh list instead of failing the fast path forever.
+      self.retained_gpu_surfaces.clear();
+      false
+    }
   }
 
   fn composite_and_present(&mut self) {
@@ -6644,6 +7792,9 @@ impl Server {
         }
       }
       for (fd, sid, x, y) in &toplevels {
+        // Server-side titlebars are CPU-drawn into `self.fb`.  Mixing them with
+        // a pure dmabuf scanout would hide the chrome, so fall back to the
+        // software compositor for the whole frame when any SSD window is up.
         let ssd = Self::uses_ssd(flags_of(&self.clients, *fd, *sid).decoration_mode);
         if ssd { gpu_allowed = false; }
         if let Some(c) = self.clients.get(fd) { Self::collect_gpu_surface_tree(c, &subs, *fd, *sid, *x, *y, 0, &mut gpu_surfaces); }
@@ -6685,6 +7836,25 @@ impl Server {
     let bitmap = gpu_cursor_bitmap.as_ref().map(|pixels| crate::render::GpuBitmap {
       x:gpu_cursor_pos.0,y:gpu_cursor_pos.1,width:gpu_cursor_pos.2,height:gpu_cursor_pos.3,pixels,
     });
+    // Keep a cursor-free plane list so animated set_cursor commits can
+    // re-present without collecting every window again.
+    let retained_scene = if gpu_allowed && !direct_scanout && !gpu_surfaces.is_empty() {
+      let cursor_planes = match (&bitmap, gpu_surfaces.last()) {
+        (Some(_), _) => 0usize, // cursor is the separate bitmap, not a plane
+        (None, Some((_, _, buf)))
+          if buf.width > 0
+            && buf.height > 0
+            && buf.width <= 128
+            && buf.height <= 128 =>
+        {
+          1
+        }
+        _ => 0,
+      };
+      Some(gpu_surfaces[..gpu_surfaces.len().saturating_sub(cursor_planes)].to_vec())
+    } else {
+      None
+    };
     let gpu_scanout = gpu_allowed && !direct_scanout && !gpu_surfaces.is_empty()
       && self.backend.present_dmabufs(&gpu_surfaces, bitmap);
 
@@ -6877,6 +8047,13 @@ impl Server {
       }
     }
     self.last_present_software = !direct_scanout && !gpu_scanout;
+    if self.last_present_software {
+      self.retained_gpu_surfaces.clear();
+    } else if let Some(scene) = retained_scene.filter(|_| gpu_scanout) {
+      self.retained_gpu_surfaces = scene;
+    } else {
+      self.retained_gpu_surfaces.clear();
+    }
     if !self.last_present_software {
       self.cursor_backup_rect = None;
       // Scanning out a client buffer or a GPU-composed one leaves `self.fb`
@@ -6939,6 +8116,10 @@ impl Server {
     // key, a reset — flushes the pending position first, so a click still lands
     // where the pointer was when it happened.
     let mut pending_motion = false;
+    // Left-button releases are deferred until the end of the batch (and one
+    // client drain) so xdg_toplevel.move / luna_wm.start_move in response to
+    // the matching press can land before we clear last_button_pressed.
+    let mut deferred_left_release = false;
     while let Ok(ev) = rx.try_recv() {
       match ev {
         InputEvent::PointerMotion { x, y } => {
@@ -6959,9 +8140,14 @@ impl Server {
         }
         InputEvent::PointerButton { button, pressed } => {
           self.flush_pending_motion(&mut pending_motion);
+          if button == 0x110 && !pressed {
+            deferred_left_release = true;
+            continue;
+          }
+          if button == 0x110 && pressed {
+            deferred_left_release = false; // press supersedes a prior deferred release
+          }
           self.inject_ptr_button(button, pressed);
-          // After a press, drain client sockets once so xdg_toplevel.move /
-          // .resize can land before a queued release clears last_button_pressed.
           if pressed {
             self.poll_clients_nonblocking();
           }
@@ -6976,15 +8162,21 @@ impl Server {
         }
         InputEvent::Reset => {
           pending_motion = false;
+          deferred_left_release = false;
           self.reset_input_state();
         }
         InputEvent::VtSwitch(vt) => {
           pending_motion = false;
+          deferred_left_release = false;
           self.backend.switch_vt(vt);
         }
       }
     }
     self.flush_pending_motion(&mut pending_motion);
+    if deferred_left_release {
+      self.poll_clients_nonblocking();
+      self.inject_ptr_button(0x110, false);
+    }
     self.input_rx = Some(rx);
   }
 
@@ -7030,7 +8222,10 @@ impl Server {
     }
     self.kbd_mods = 0;
     self.last_button_pressed = false;
+    self.last_button_code = 0;
     self.pointer_grab = None;
+    self.csd_press = None;
+    self.cancel_drag();
     self.ptr_entered = false;
     self.kbd_entered = false;
   }
@@ -7076,131 +8271,200 @@ impl Server {
     let (bw, bh) = self.backend.size();
     let px = (self.ptr_x * bw as f32) as i32;
     let py = (self.ptr_y * bh as f32) as i32;
+    let (_, uy, _, _) = self.usable_area();
 
-    // Collect candidates per client
-    // (layer_priority, fd, surface_id, ptr_id, kbd_id, surf_w, surf_h, ox, oy)
-    // layer_priority: OVERLAY=60, IM/xdg popup=50, TOP=30,
-    // focused_window=20, other_window=10, BOTTOM=5, BG=0.
-    // Keep this in the same order as composite_and_present(), so an invisible
-    // pointer-focus layer can never disagree with what is visibly on top.
-    let mut candidates: Vec<(i32, RawFd, u32, u32, u32, i32, i32, i32, i32)> = Vec::new();
+    // (priority, stack_index, fd, surface, pointer, keyboard, w, h, ox, oy)
+    let mut best: Option<(i32, i32, RawFd, u32, u32, u32, i32, i32, i32, i32)> = None;
 
-    for (&fd, client) in &self.clients {
+    // Helper: pointer/keyboard ids for a client fd.
+    let seat_ids = |client: &Client| -> (u32, u32) {
       let mut ptr_id = 0u32;
       let mut kbd_id = 0u32;
       for (&oid, obj) in &client.objects {
-        match &obj.role {
-          // Toolkits may bind another seat pointer for CSD/libdecor after the
-          // application's pointer. HashMap iteration order is deliberately
-          // unstable, so select the oldest resource deterministically instead
-          // of sometimes routing all input to the decoration helper.
+        match obj.role {
           Role::Pointer if ptr_id == 0 || oid < ptr_id => ptr_id = oid,
           Role::Keyboard if kbd_id == 0 || oid < kbd_id => kbd_id = oid,
           _ => {}
         }
       }
+      (ptr_id, kbd_id)
+    };
 
-      // Build map: surface_id → (layer, anchor, size_w, size_h, mt, mr, mb, ml, keyboard)
-      let ls_map: HashMap<u32, (u32, u32, u32, u32, i32, i32, i32, i32, u32)> = client.objects.iter().filter_map(|(_, obj)| {
-        if let Role::LayerSurface { surface_id, layer, anchor, size_w, size_h, margin_top, margin_right, margin_bottom, margin_left, keyboard, .. } = &obj.role {
-          Some((*surface_id, (*layer, *anchor, *size_w, *size_h, *margin_top, *margin_right, *margin_bottom, *margin_left, *keyboard)))
-        } else { None }
-      }).collect();
-
+    // 1) Overlays / popups / IM / layer-shell (not BACKGROUND).
+    for (&fd, client) in &self.clients {
+      let (ptr_id, kbd_id) = seat_ids(client);
       for (&surf_id, obj) in &client.objects {
         let Role::Surface(s) = &obj.role else { continue };
-        // Empty input region → never a hit target (click-through).
-        if matches!(&s.input_region, Some(r) if r.is_empty()) { continue; }
-        if let Some((layer, anchor, size_w, size_h, mt, mr, mb, ml, _kbd)) = ls_map.get(&surf_id).copied() {
-          if s.mapped && s.current_buffer.is_some() {
-            // BACKGROUND is wallpaper: even if a buggy client forgets to clear
-            // its input region, never let it beat real windows or chrome.
-            if layer == 0 {
-              continue;
-            }
-            let (ox, oy, cw, ch) = layer_surface_rect(bw, bh, anchor, size_w, size_h, mt, mr, mb, ml);
-            if px >= ox && py >= oy && px < ox + cw as i32 && py < oy + ch as i32
-              && Self::surface_input_hit(s, px - ox, py - oy)
-            {
-              let prio = match layer { 3 => 60, 2 => 30, 1 => 5, _ => 0 };
-              candidates.push((prio, fd, surf_id, ptr_id, kbd_id, cw as i32, ch as i32, ox, oy));
-            }
+        if matches!(&s.input_region, Some(r) if r.is_empty()) {
+          continue;
+        }
+        let candidate = if let Some(layer_id) = s.layer_surface_id {
+          let Some(Object {
+            role: Role::LayerSurface {
+              layer,
+              anchor,
+              size_w,
+              size_h,
+              margin_top,
+              margin_right,
+              margin_bottom,
+              margin_left,
+              ..
+            },
+            ..
+          }) = client.objects.get(&layer_id)
+          else {
+            continue;
+          };
+          if *layer == 0 || !s.mapped || s.current_buffer.is_none() {
+            continue;
           }
-        } else if s.input_method_popup {
-          if let Some(buf) = &s.current_buffer {
-            if self.active_text_input.is_some()
-              && px >= s.x
-              && py >= s.y
-              && px < s.x + buf.width
-              && py < s.y + buf.height
-              && Self::surface_input_hit(s, px - s.x, py - s.y)
-            {
-              candidates.push((50, fd, surf_id, ptr_id, kbd_id, buf.width, buf.height, s.x, s.y));
-            }
-          }
-        } else if s.popup {
-          if let Some(buf) = &s.current_buffer {
-            if s.mapped
-              && px >= s.x && py >= s.y && px < s.x + buf.width && py < s.y + buf.height
-              && Self::surface_input_hit(s, px - s.x, py - s.y)
-            {
-              candidates.push((45, fd, surf_id, ptr_id, kbd_id, buf.width, buf.height, s.x, s.y));
-            }
-          }
-        } else if s.xdg_surface_id.is_some()
-            && !self.surface_is_minimized(client, surf_id)
-            // Firefox/WebRender often leaves the xdg_toplevel parent
-            // buffer-less and commits pixels only to desynchronised
-            // subsurfaces.  The parent still owns wl_pointer/wl_keyboard,
-            // so hit-test the visible surface tree but deliver input to this
-            // parent surface.
-            && Self::surface_tree_has_content(client, surf_id)
+          let (ox, oy, w, h) = layer_surface_rect(
+            bw,
+            bh,
+            *anchor,
+            *size_w,
+            *size_h,
+            *margin_top,
+            *margin_right,
+            *margin_bottom,
+            *margin_left,
+          );
+          if px < ox
+            || py < oy
+            || px >= ox + w as i32
+            || py >= oy + h as i32
+            || !Self::surface_input_hit(s, px - ox, py - oy)
           {
-            let ox = s.x;
-            let oy = s.y;
-            // MUST clip to the window rect.  Without this, the topmost
-            // xdg_toplevel steals pointer focus for the entire output —
-            // cursor vanishes everywhere except layer-shell chrome (dock),
-            // and title-bar hit-testing / move requests go to the wrong place.
-            let (w, h) = Self::surface_tree_size(client, surf_id)
-              // `surface_tree_has_content` above guarantees a non-empty tree.
-              .unwrap_or((0, 0));
-            if px >= ox && py >= oy && px < ox + w && py < oy + h
-              && Self::surface_input_hit(s, px - ox, py - oy)
-            {
-              // Base prio 10 for all windows; stack order breaks ties below.
-              candidates.push((10, fd, surf_id, ptr_id, kbd_id, w, h, ox, oy));
-            }
+            continue;
+          }
+          let priority = match *layer {
+            3 => 60,
+            2 => 30,
+            1 => 5,
+            _ => 0,
+          };
+          Some((priority, w as i32, h as i32, ox, oy))
+        } else if s.input_method_popup {
+          let Some(buf) = &s.current_buffer else { continue };
+          if self.active_text_input.is_none()
+            || px < s.x
+            || py < s.y
+            || px >= s.x + buf.width
+            || py >= s.y + buf.height
+            || !Self::surface_input_hit(s, px - s.x, py - s.y)
+          {
+            continue;
+          }
+          Some((50, buf.width, buf.height, s.x, s.y))
+        } else if s.popup {
+          let Some(buf) = &s.current_buffer else { continue };
+          if !s.mapped
+            || px < s.x
+            || py < s.y
+            || px >= s.x + buf.width
+            || py >= s.y + buf.height
+            || !Self::surface_input_hit(s, px - s.x, py - s.y)
+          {
+            continue;
+          }
+          Some((45, buf.width, buf.height, s.x, s.y))
+        } else {
+          None
+        };
+        let Some((priority, w, h, ox, oy)) = candidate else { continue };
+        let stack = self.stack_index(fd, surf_id);
+        let better = best
+          .as_ref()
+          .map_or(true, |b| priority > b.0 || (priority == b.0 && stack > b.1));
+        if better {
+          best = Some((priority, stack, fd, surf_id, ptr_id, kbd_id, w, h, ox, oy));
         }
       }
     }
 
-    // Return highest-priority candidate; among equal prio prefer raised windows.
-    candidates.sort_by(|a, b| {
-      b.0.cmp(&a.0).then_with(|| self.stack_index(b.1, b.2).cmp(&self.stack_index(a.1, a.2)))
-    });
-    let best = candidates.into_iter().next()
-      .map(|(_, fd, sid, ptr_id, kbd_id, sw, sh, ox, oy)| (fd, sid, ptr_id, kbd_id, sw, sh, ox, oy));
-    // An explicit popup grab is owner-events: surfaces belonging to the same
-    // client still receive input normally.  Everywhere else routes to the
-    // grabbing popup (with coordinates outside its bounds), allowing Firefox
-    // to track and close native menus without activating the shell below.
+    // 2) Toplevels in true stacking order (top → bottom).  Walking the HashMap
+    // and comparing stack indices previously let a lower GTK window's large
+    // CSD buffer win when the SSD chrome of the window above owned the point
+    // (titlebar sits above the client buffer, so the SSD surface itself never
+    // "hit").  Treat SSD chrome as exclusive: it blocks lower windows and is
+    // handled by hit_ssd, so we return None for that strip.
+    if best.as_ref().map_or(true, |b| b.0 <= 10) {
+      for &(fd, surf_id) in self.window_stack.iter().rev() {
+        let Some(client) = self.clients.get(&fd) else { continue };
+        if self.surface_is_minimized(client, surf_id) {
+          continue;
+        }
+        let Some(Object {
+          role: Role::Surface(s),
+          ..
+        }) = client.objects.get(&surf_id)
+        else {
+          continue;
+        };
+        if s.xdg_surface_id.is_none() || !Self::surface_tree_has_content(client, surf_id) {
+          continue;
+        }
+        if matches!(&s.input_region, Some(r) if r.is_empty()) {
+          continue;
+        }
+        let ssd = Self::uses_ssd(Self::toplevel_decoration_mode_in(client, surf_id));
+        if let Some((gx, gy, gw, _gh)) = Self::surface_geometry_in(client, surf_id) {
+          if ssd {
+            let bar_y = gy - SSD_BAR_H;
+            let hit_top = bar_y.max(uy);
+            if px >= gx && px < gx + gw && py >= hit_top && py < gy {
+              // SSD titlebar — compositor chrome, not a client surface.
+              best = None;
+              break;
+            }
+          }
+        }
+        let (w, h) = Self::surface_tree_size(client, surf_id).unwrap_or((0, 0));
+        if px < s.x
+          || py < s.y
+          || px >= s.x + w
+          || py >= s.y + h
+          || !Self::surface_input_hit(s, px - s.x, py - s.y)
+        {
+          // Outside this window's input (e.g. GTK shadow with input_region
+          // trimmed) — keep looking underneath.
+          continue;
+        }
+        let (ptr_id, kbd_id) = seat_ids(client);
+        let stack = self.stack_index(fd, surf_id);
+        best = Some((10, stack, fd, surf_id, ptr_id, kbd_id, w, h, s.x, s.y));
+        break;
+      }
+    }
+
+    let result = best.map(|(_, _, fd, sid, ptr, kbd, w, h, ox, oy)| (fd, sid, ptr, kbd, w, h, ox, oy));
+
     if let Some((grab_fd, _, grab_sid)) = self.popup_grab {
-      if best.map(|t| t.0) == Some(grab_fd) {
-        return best;
+      if result.map(|t| t.0) == Some(grab_fd) {
+        return result;
       }
       if let Some(client) = self.clients.get(&grab_fd) {
-        let ptr_id = client.objects.iter().filter_map(|(&oid, o)|
-          matches!(o.role, Role::Pointer).then_some(oid)).min().unwrap_or(0);
-        if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&grab_sid)
+        let ptr_id = client
+          .objects
+          .iter()
+          .filter_map(|(&oid, o)| matches!(o.role, Role::Pointer).then_some(oid))
+          .min()
+          .unwrap_or(0);
+        if let Some(Object {
+          role: Role::Surface(s),
+          ..
+        }) = client
+          .objects
+          .get(&grab_sid)
           .filter(|Object { role, .. }| matches!(role, Role::Surface(s) if s.mapped && s.popup))
         {
-          let (sw, sh) = Self::surface_tree_size(client, grab_sid).unwrap_or((1, 1));
-          return Some((grab_fd, grab_sid, ptr_id, 0, sw, sh, s.x, s.y));
+          let (w, h) = Self::surface_tree_size(client, grab_sid).unwrap_or((1, 1));
+          return Some((grab_fd, grab_sid, ptr_id, 0, w, h, s.x, s.y));
         }
       }
     }
-    best
+    result
   }
 
   fn to_surface_fixed(&self, nx: f32, ny: f32, origin_x: i32, origin_y: i32) -> (i32, i32) {
@@ -7220,6 +8484,11 @@ impl Server {
   }
 
   fn inject_ptr_motion(&mut self, nx: f32, ny: f32) {
+    if self.drag.is_some() {
+      self.update_drag_motion(nx, ny);
+      self.cursor_dirty = true;
+      return;
+    }
     if !matches!(self.wm_grab, WmGrab::None) {
       self.update_wm_grab();
       return;
@@ -7227,7 +8496,11 @@ impl Server {
     // A press establishes an implicit grab.  Keep motion and the matching
     // release on that surface; raising/configuring a Firefox window during
     // click-to-focus must not move pointer focus halfway through the click.
-    if let Some((fd, _surf_id, ptr_id, ox, oy)) = self.pointer_grab {
+    if let Some((fd, surf_id, ptr_id, ox, oy)) = self.pointer_grab {
+      if self.last_button_code == 0x110 && self.maybe_promote_csd_move(fd, surf_id) {
+        self.update_wm_grab();
+        return;
+      }
       if self.clients.contains_key(&fd) {
         let (fx, fy) = self.to_surface_fixed(nx, ny, ox, oy);
         let ts = now_ms();
@@ -7239,23 +8512,25 @@ impl Server {
         return;
       }
       self.pointer_grab = None;
+      self.csd_press = None;
       self.last_button_pressed = false;
     }
     let (px, py) = self.screen_ptr();
-    // Keep compositor cursor over SSD chrome / resize frame (outside client buffer).
-    // Skip when a layer-shell overlay (Settings dialog, menu, …) owns the point.
-    if !self.layer_shell_owns_pointer()
-      && (self.hit_ssd(px, py).is_some() || self.hit_resize_edge(px, py).is_some())
-    {
+    // SSD chrome lives in the gap above the client buffer.  Prefer it over
+    // layer-shell whenever the hit is below the exclusive zone — `hit_ssd`
+    // already clips away the menubar strip (`bar_y.max(uy)`), so a titlebar
+    // parked just under the menubar stays draggable even if a layer surface's
+    // buffer is taller than its exclusive_zone.
+    if self.hit_ssd(px, py).is_some() || self.hit_resize_edge(px, py).is_some() {
       let had_client_cursor = self.cursor_surface_id != 0 || self.ptr_entered;
       self.send_pointer_leave();
       if self.cursor_client_fd >= 0 || self.cursor_surface_id != 0 {
         self.cursor_client_fd = -1;
         self.cursor_surface_id = 0;
         self.pending_cursor = None;
-        self.dirty = true; // redraw once to drop client glyph
+        self.cursor_dirty = true; // drop client glyph without a full rebuild
       } else if had_client_cursor {
-        self.dirty = true;
+        self.cursor_dirty = true;
       }
       return;
     }
@@ -7292,8 +8567,8 @@ impl Server {
         self.cursor_client_fd = -1;
         self.cursor_surface_id = 0;
         self.pending_cursor = None;
+        self.cursor_dirty = true;
       }
-      self.dirty = true;
     }
     if let Some(client) = self.clients.get_mut(&fd) {
       client.send(ptr_id, 2, &[Arg::Uint(ts), Arg::Fixed(fx), Arg::Fixed(fy)]);
@@ -7329,12 +8604,35 @@ impl Server {
     if self.cursor_client_fd == fd {
       self.cursor_client_fd = -1;
       self.cursor_surface_id = 0;
-      self.dirty = true;
+      self.cursor_dirty = true;
     }
     self.ptr_entered = false;
   }
 
   fn inject_ptr_button(&mut self, button: u32, pressed: bool) {
+    if self.drag.is_some() {
+      // A live drag owns the pointer.  Any release ends it; a different
+      // button press cancels it.  Leaving drag stuck used to swallow every
+      // subsequent click (windows looked dead: no move, no buttons).
+      if !pressed {
+        self.last_button_pressed = false;
+        self.pointer_grab = None;
+        if button == self.drag.as_ref().map(|d| d.button).unwrap_or(button) {
+          self.finish_drag_drop();
+        } else {
+          self.cancel_drag();
+        }
+        let (x, y) = (self.ptr_x, self.ptr_y);
+        self.inject_ptr_motion(x, y);
+        return;
+      }
+      if self.drag.as_ref().is_some_and(|d| d.button != button) {
+        self.cancel_drag();
+        // Fall through and treat this press as a normal click.
+      } else {
+        return;
+      }
+    }
     // A press outside the topmost explicit popup dismisses it.  xdg-shell
     // requires the compositor to send popup_done; merely routing the click to
     // the window underneath leaves Firefox's menu state active indefinitely.
@@ -7364,6 +8662,7 @@ impl Server {
     // Left button release ends an interactive move/resize grab.
     if !pressed && button == 0x110 && !matches!(self.wm_grab, WmGrab::None) {
       self.last_button_pressed = false;
+      self.csd_press = None;
       self.end_wm_grab();
       return;
     }
@@ -7374,7 +8673,8 @@ impl Server {
     }
     // A server-side titlebar has no client to issue
     // xdg_toplevel.show_window_menu, so forward its right click to the shell.
-    if button == 0x111 && pressed && !self.layer_shell_owns_pointer() {
+    // Check SSD before layer-shell: hit_ssd already ignores the exclusive zone.
+    if button == 0x111 && pressed {
       let (px, py) = self.screen_ptr();
       if let Some(("move", fd, sid)) = self.hit_ssd(px, py) {
         self.raise_surface(fd, sid);
@@ -7389,7 +8689,7 @@ impl Server {
       }
     }
     // Server-side decoration chrome (above client surface).
-    if button == 0x110 && pressed && !self.layer_shell_owns_pointer() {
+    if button == 0x110 && pressed {
       let (px, py) = self.screen_ptr();
       if let Some((action, fd, sid)) = self.hit_ssd(px, py) {
         let serial = self.next_serial();
@@ -7434,48 +8734,60 @@ impl Server {
               grab_py: py,
               orig_x,
               orig_y,
+              siblings: self.attached_move_siblings(fd, sid),
             };
+            // Compositor owns the pointer for the grab — drop any client
+            // cursor / enter so motion only drives update_wm_grab.
+            self.send_pointer_leave();
+            self.pointer_grab = None;
+            self.csd_press = None;
+            self.cursor_client_fd = -1;
+            self.cursor_surface_id = 0;
+            self.pending_cursor = None;
             self.dirty = true;
+            self.shell_state_dirty = true;
           }
           _ => {}
         }
         return;
       }
       // Compositor-side resize border (outside the client buffer only).
-      // Firefox SSD / clients that never call xdg_toplevel.resize from CSD edges.
-      if let Some((fd, sid, edges)) = self.hit_resize_edge(px, py) {
-        let serial = self.next_serial();
-        self.last_button_serial = serial;
-        self.last_button_pressed = true;
-        // Position = buffer origin; size = window geometry (configure units).
-        let Some((orig_x, orig_y, _, _)) = self.surface_buffer_rect(fd, sid) else {
+      // Skip when a layer-shell overlay genuinely owns the point.
+      if !self.layer_shell_owns_pointer() {
+        if let Some((fd, sid, edges)) = self.hit_resize_edge(px, py) {
+          let serial = self.next_serial();
+          self.last_button_serial = serial;
+          self.last_button_pressed = true;
+          // Position = buffer origin; size = window geometry (configure units).
+          let Some((orig_x, orig_y, _, _)) = self.surface_buffer_rect(fd, sid) else {
+            return;
+          };
+          let Some((_, _, orig_w, orig_h)) = self.surface_geometry(fd, sid) else {
+            return;
+          };
+          self.raise_surface(fd, sid);
+          self.focused_client_fd = fd;
+          self.focused_surface_id = sid;
+          self.wm_grab = WmGrab::Resize {
+            fd,
+            surface_id: sid,
+            edges,
+            grab_px: px,
+            grab_py: py,
+            orig_x,
+            orig_y,
+            orig_w,
+            orig_h,
+          };
+          self.cursor_client_fd = -1;
+          self.cursor_surface_id = 0;
+          self.pending_cursor = None;
+          // Do NOT send a configure until the pointer actually moves — a bare
+          // click on the frame was flooding GTK/Firefox with RESIZING configures.
+          self.dirty = true;
+          self.shell_state_dirty = true;
           return;
-        };
-        let Some((_, _, orig_w, orig_h)) = self.surface_geometry(fd, sid) else {
-          return;
-        };
-        self.raise_surface(fd, sid);
-        self.focused_client_fd = fd;
-        self.focused_surface_id = sid;
-        self.wm_grab = WmGrab::Resize {
-          fd,
-          surface_id: sid,
-          edges,
-          grab_px: px,
-          grab_py: py,
-          orig_x,
-          orig_y,
-          orig_w,
-          orig_h,
-        };
-        self.cursor_client_fd = -1;
-        self.cursor_surface_id = 0;
-        self.pending_cursor = None;
-        // Do NOT send a configure until the pointer actually moves — a bare
-        // click on the frame was flooding GTK/Firefox with RESIZING configures.
-        self.dirty = true;
-        self.shell_state_dirty = true;
-        return;
+        }
       }
     }
     let target = if !pressed {
@@ -7495,6 +8807,59 @@ impl Server {
     if ptr_id == 0 {
       return;
     }
+
+    // Undecorated (mode 0) CSD title strip — compositor owns the drag immediately
+    // so luna-editor / aplay move+snap no longer wait on start_move.  Left/right
+    // button chrome is excluded by csd_title_drag_hit and still reaches the client.
+    if pressed && button == 0x110 {
+      let (px, py) = self.screen_ptr();
+      if self.csd_title_drag_hit(fd, surf_id, px, py) {
+        let serial = self.next_serial();
+        self.last_button_pressed = true;
+        self.last_button_serial = serial;
+        self.last_button_code = button;
+        let now = now_ms();
+        let dbl = matches!(
+          self.ssd_last_click,
+          Some((t, prev_fd, prev_sid)) if prev_fd == fd && prev_sid == surf_id && now.wrapping_sub(t) < 400
+        );
+        self.ssd_last_click = Some((now, fd, surf_id));
+        if dbl && self.wm_titlebar_double_click {
+          self.ssd_last_click = None;
+          self.raise_surface(fd, surf_id);
+          self.focused_client_fd = fd;
+          self.focused_surface_id = surf_id;
+          self.toggle_maximize_surface_for(fd, surf_id);
+          self.dirty = true;
+          self.shell_state_dirty = true;
+          return;
+        }
+        self.raise_surface(fd, surf_id);
+        self.focused_client_fd = fd;
+        self.focused_surface_id = surf_id;
+        self.ensure_kbd_entered(fd, surf_id);
+        self.begin_move_grab(fd, surf_id, px, py);
+        return;
+      }
+    }
+    // Frameless CSD titlebar right-click → shell window menu (same path as
+    // xdg_toplevel.show_window_menu / SSD titlebar).  Full strip including
+    // toolbar button zones so luna-editor Open/Save chrome still opens the menu.
+    if pressed && button == 0x111 {
+      let (px, py) = self.screen_ptr();
+      if self.csd_title_menu_hit(fd, surf_id, px, py) {
+        self.raise_surface(fd, surf_id);
+        self.focused_client_fd = fd;
+        self.focused_surface_id = surf_id;
+        self.pending_shell_menu = Some((fd, surf_id, px, py));
+        self.last_button_serial = self.next_serial();
+        self.last_button_pressed = false;
+        self.dirty = true;
+        self.shell_state_dirty = true;
+        return;
+      }
+    }
+
     if !self.ptr_entered || self.ptr_client_fd != fd || self.ptr_surface_id != surf_id {
       // Enter at the real pointer location, not the screen center, so the
       // button lands where the user actually clicked.
@@ -7520,7 +8885,9 @@ impl Server {
     if pressed {
       self.last_button_pressed = true;
       self.last_button_serial = serial;
+      self.last_button_code = button;
       self.pointer_grab = Some((fd, surf_id, ptr_id, ox, oy));
+      self.csd_press = None;
       // Click-to-focus.  Object ids are per-client — always check the surface
       // on the fd returned by find_input_target, never a global id lookup.
       let is_toplevel = self
@@ -7561,6 +8928,7 @@ impl Server {
     client.conn.flush();
     if !pressed {
       self.pointer_grab = None;
+      self.csd_press = None;
     }
   }
 
@@ -7630,9 +8998,17 @@ impl Server {
     // KEY_ESC is 1 on libinput's evdev keycode scale.  A resize is a
     // compositor-owned modal operation, so do this before forwarding to an
     // input-method grab or the focused client.
-    if pressed && keycode == 1 && matches!(self.wm_grab, WmGrab::Resize { .. }) {
-      self.cancel_wm_grab();
-      return;
+    if pressed && keycode == 1 {
+      if matches!(self.wm_grab, WmGrab::Resize { .. }) {
+        self.cancel_wm_grab();
+        return;
+      }
+      if self.drag.is_some() {
+        self.cancel_drag();
+        let (x, y) = (self.ptr_x, self.ptr_y);
+        self.inject_ptr_motion(x, y);
+        return;
+      }
     }
 
     // Session Zap — handled here so it wins over text fields and IM grabs.
@@ -8236,6 +9612,7 @@ fn role_for(iface: &str) -> Role {
     "xdg_wm_base" => Role::WmBase,
     "zwp_linux_dmabuf_v1" => Role::Dmabuf,
     "zwlr_layer_shell_v1" => Role::LayerShell,
+    "luna_wm_v1" => Role::LunaWm,
     _ => Role::Display,
   }
 }

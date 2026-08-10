@@ -1,0 +1,8 @@
+Vendored libwayland client headers (MIT/X11), version stamped in wayland-version.h.
+
+These exist so Luna apps can compile without system libwayland-dev.
+Link and run against wayland-client-rs (libwayland_client.so /
+libwayland-client.so.0), not the system libwayland-client, so the
+ABI matches GLFW's dlopen("libwayland-client.so.0").
+
+See ../luna-wayland-client.mk and ../wayland-client.pc.

@@ -33,10 +33,13 @@ build-dri:
 build-webgl:
 	cargo build --features webgl $(if $(filter release,$(PROFILE)),--release,)
 
+# Compositor + shell; default shell links system libwayland-client.
+# Use LUNA_WAYLAND_CLIENT=vendored for the replacement client.
 build-desktop: build build-dri build-shell symlinks
 
-# Compositor + shell only; GTK/GLFW use system libwayland-client
-build-desktop-system: build-dri build-shell symlinks-system
+# Force system libwayland-client for shell/clipboard (ignores LUNA_WAYLAND_CLIENT).
+build-desktop-system:
+	$(MAKE) build-dri build-shell symlinks-system LUNA_WAYLAND_CLIENT=system
 
 build-shell: luna-shell luna-clipboard luna-tray-notify
 
@@ -58,15 +61,34 @@ symlinks-system:
 
 UI_DIR = ui
 
+# Wayland client for luna-shell / luna-clipboard:
+#   LUNA_WAYLAND_CLIENT=system   (default) — distro libwayland-client
+#   LUNA_WAYLAND_CLIENT=vendored — wayland-client-rs (replacement work)
+LUNA_WAYLAND_CLIENT ?= system
+
+include wayland-client-rs/luna-wayland-client.mk
+
+ifeq ($(LUNA_WAYLAND_CLIENT),vendored)
+SHELL_WL_CFLAGS := $(LUNA_WAYLAND_CFLAGS)
+SHELL_WL_LIBS   := $(LUNA_WAYLAND_LIBS)
+SHELL_WL_DEPS   := luna-wayland-client-lib
+SHELL_WL_LABEL  := vendored wayland-client
+else
+SHELL_WL_CFLAGS := $(shell pkg-config --cflags wayland-client 2>/dev/null)
+SHELL_WL_LIBS   := -lwayland-client
+SHELL_WL_DEPS   :=
+SHELL_WL_LABEL  := system wayland-client
+endif
+
 $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h: $(UI_DIR)/luna-shell.css $(UI_DIR)/luna-shell.html $(UI_DIR)/gen_include.sh
 	cd $(UI_DIR) && ./gen_include.sh luna-shell.css luna-shell.html
 
 SHELL_CFLAGS := -pthread \
                 $(shell pkg-config --cflags libdrm 2>/dev/null) \
-                $(shell pkg-config --cflags wayland-client 2>/dev/null) \
+                $(SHELL_WL_CFLAGS) \
                 $(shell pkg-config --cflags xkbcommon 2>/dev/null)
 SHELL_LIBS   := -pthread -lm -lEGL -lgbm -ldrm -linput -ludev -lxkbcommon \
-                -lwayland-client -lwayland-egl -lGL
+                $(SHELL_WL_LIBS) -lwayland-egl -lGL
 
 LAYER_SHELL_XML  := $(UI_DIR)/protocols/wlr-layer-shell-unstable-v1.xml
 LAYER_SHELL_HDR  := $(UI_DIR)/wlr-layer-shell-unstable-v1-client-protocol.h
@@ -78,13 +100,13 @@ $(LAYER_SHELL_HDR): $(LAYER_SHELL_XML)
 $(LAYER_SHELL_SRC): $(LAYER_SHELL_XML)
 	wayland-scanner private-code $< $@
 
-luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
+luna-shell: $(SHELL_WL_DEPS) $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
             $(UI_DIR)/luna-client-env-policy.h \
             $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
             $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \
             $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
-	@echo "→ Building luna-shell (Luna Desktop shell)"
+	@echo "→ Building luna-shell (Luna Desktop shell, $(SHELL_WL_LABEL))"
 	# luna-shell's layout, animation and draw-list walks are hot on every KMS \
 	# frame.  Prefer runtime optimization over the size-oriented global default.
 	# Wi-Fi backend (luna-wifi.h) and the status poller both use pthreads.
@@ -92,10 +114,10 @@ luna-shell: $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
 	    $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c $(LAYER_SHELL_SRC) \
 	    -o luna-shell $(SHELL_LIBS) -lX11
 
-luna-clipboard: clipboard/luna-clipboard.c
-	@echo "→ Building luna-clipboard (Wayland clipboard manager)"
-	gcc -Os -Wall -Wextra -o luna-clipboard clipboard/luna-clipboard.c \
-	    $$(pkg-config --cflags --libs wayland-client)
+luna-clipboard: $(SHELL_WL_DEPS) clipboard/luna-clipboard.c
+	@echo "→ Building luna-clipboard (Wayland clipboard manager, $(SHELL_WL_LABEL))"
+	gcc -Os -Wall -Wextra $(SHELL_WL_CFLAGS) -o luna-clipboard clipboard/luna-clipboard.c \
+	    $(SHELL_WL_LIBS)
 
 luna-tray-notify: tray/luna-tray-notify.c
 	@echo "→ Building luna-tray-notify (XEmbed tray notification service)"
@@ -153,25 +175,26 @@ webgl: build-webgl symlinks
 run-gtk: build-webgl symlinks
 	PROFILE=$(PROFILE) PORT=$(PORT) ./run-gtk $(APP)
 
-# Full Luna Desktop session (compositor + shell + vendored libwayland-client)
+# Full Luna Desktop session (compositor + shell)
+# Vendored client: make desktop LUNA_WAYLAND_CLIENT=vendored
 desktop: build-desktop
 	chmod +x luna-session
-	PROFILE=$(PROFILE) BACKEND=dri ./luna-session
+	PROFILE=$(PROFILE) BACKEND=dri LUNA_WAYLAND_CLIENT=$(LUNA_WAYLAND_CLIENT) ./luna-session
 
-# Luna Desktop with system libwayland-client (recommended for production)
+# Luna Desktop with system libwayland-client (recommended default)
 desktop-system: build-desktop-system
 	chmod +x luna-session
-	PROFILE=$(PROFILE) BACKEND=dri LUNA_USE_SYSTEM_WAYLAND=1 ./luna-session
+	PROFILE=$(PROFILE) BACKEND=dri LUNA_USE_SYSTEM_WAYLAND=1 LUNA_WAYLAND_CLIENT=system ./luna-session
 
 # Software backend desktop (VM / no GPU)
 desktop-soft: build-desktop
 	chmod +x luna-session
-	PROFILE=$(PROFILE) BACKEND=software ./luna-session
+	PROFILE=$(PROFILE) BACKEND=software LUNA_WAYLAND_CLIENT=$(LUNA_WAYLAND_CLIENT) ./luna-session
 
 # Software backend + system libwayland-client
 desktop-soft-system: build-desktop-system
 	chmod +x luna-session
-	PROFILE=$(PROFILE) BACKEND=software LUNA_USE_SYSTEM_WAYLAND=1 ./luna-session
+	PROFILE=$(PROFILE) BACKEND=software LUNA_USE_SYSTEM_WAYLAND=1 LUNA_WAYLAND_CLIENT=system ./luna-session
 
 luna-session: build-desktop
 	chmod +x luna-session
@@ -203,6 +226,24 @@ install: build-desktop
 	install -m 755 $(TARGET)/libwayland_client.so $(LUNA_LIB)/
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so.0
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so
+	install -d $(PREFIX)/include/luna-wayland $(PREFIX)/lib/pkgconfig \
+	            $(PREFIX)/share/luna-desktop/wayland-client
+	install -m 644 wayland-client-rs/include/*.h $(PREFIX)/include/luna-wayland/
+	install -m 644 wayland-client-rs/include/README $(PREFIX)/include/luna-wayland/
+	install -m 644 wayland-client-rs/luna-wayland-client.mk \
+	               $(PREFIX)/share/luna-desktop/wayland-client/
+	# Installed .pc points at PREFIX (not the build tree).
+	printf '%s\n' \
+	  'prefix=$(PREFIX)' \
+	  'libdir=$${prefix}/lib/luna' \
+	  'includedir=$${prefix}/include/luna-wayland' \
+	  '' \
+	  'Name: wayland-client' \
+	  'Description: Luna Wayland client API (vendored headers + wayland-client-rs)' \
+	  'Version: 1.25.0' \
+	  'Libs: -L$${libdir} -lwayland-client -Wl,-rpath,$${libdir}' \
+	  'Cflags: -I$${includedir}' \
+	  > $(PREFIX)/lib/pkgconfig/luna-wayland-client.pc
 	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 ui/luna-ui/luna-ui.h ui/luna-ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 skins/fonts/LunaSymbols-Solid.otf skins/fonts/LunaSymbols-Regular.otf \

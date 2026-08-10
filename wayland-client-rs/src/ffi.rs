@@ -13,19 +13,131 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use crate::display::Display;
 use crate::interfaces::WlInterface;
-use crate::proxy::Proxy;
+use crate::proxy::{
+    Proxy, WL_PROXY_FLAG_DESTROYED, WL_PROXY_FLAG_WRAPPER,
+};
 use crate::types::{wl_argument, wl_array, wl_dispatcher_func_t, wl_event_queue, wl_list};
 use crate::wire;
 
-// Fallback when proxy->display is wrong (real libwayland proxy passed in).
-
+// Fallback only when proxy->display is NULL (broken callers). Never override a
+// non-null display pointer: Mesa opens a second wl_display during EGL probe,
+// and forcing GLOBAL then mutates the wrong HashMap / UAF after disconnect.
 static GLOBAL_DISPLAY: std::sync::atomic::AtomicPtr<Display> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
+/// Live wl_display pointers.  After wl_display_disconnect frees a Display, Mesa
+/// may still call wl_proxy_destroy on already-freed proxies; validating against
+/// this set prevents HashMap ops on dangling Display* (the old GPF in
+/// hashbrown::HashMap::remove during dri2_teardown_wayland).
+struct LiveDisplay(*mut Display);
+unsafe impl Send for LiveDisplay {}
+unsafe impl Sync for LiveDisplay {}
+
+static LIVE_DISPLAYS: std::sync::Mutex<Vec<LiveDisplay>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn live_display_register(d: *mut Display) {
+    if d.is_null() {
+        return;
+    }
+    if let Ok(mut live) = LIVE_DISPLAYS.lock() {
+        if !live.iter().any(|p| p.0 == d) {
+            live.push(LiveDisplay(d));
+        }
+    }
+}
+
+fn live_display_unregister(d: *mut Display) {
+    if d.is_null() {
+        return;
+    }
+    if let Ok(mut live) = LIVE_DISPLAYS.lock() {
+        live.retain(|p| p.0 != d);
+    }
+}
+
+fn display_is_live(d: *mut Display) -> bool {
+    if d.is_null() {
+        return false;
+    }
+    LIVE_DISPLAYS
+        .lock()
+        .map(|live| live.iter().any(|p| p.0 == d))
+        .unwrap_or(false)
+}
 
 #[inline(always)]
 unsafe fn disp(d: *mut Display) -> &'static mut Display {
     &mut *d
+}
+
+/// Prefer the proxy's own display when it is still live; GLOBAL only as a
+/// last resort and only if that display is still registered.
+#[inline(always)]
+unsafe fn resolve_display(proxy: *const Proxy) -> *mut Display {
+    if proxy.is_null() {
+        return std::ptr::null_mut();
+    }
+    let d = (*proxy).display;
+    if display_is_live(d) {
+        return d;
+    }
+    let gd = GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::Relaxed);
+    if display_is_live(gd) {
+        return gd;
+    }
+    std::ptr::null_mut()
+}
+
+unsafe fn proxy_unref(proxy: *mut Proxy) {
+    if proxy.is_null() {
+        return;
+    }
+    (*proxy).refcount -= 1;
+    if (*proxy).refcount <= 0 {
+        let _ = Box::from_raw(proxy);
+    }
+}
+
+/// libwayland-compatible destroy: mark DESTROYED, drop map entry, unref.
+/// Never frees the wl_display object (id 1) — that is wl_display_disconnect.
+unsafe fn proxy_destroy_locked(proxy: *mut Proxy) {
+    if proxy.is_null() {
+        return;
+    }
+    if (*proxy).flags & WL_PROXY_FLAG_WRAPPER != 0 {
+        // Real libwayland aborts; treat as no-op to avoid killing the session.
+        return;
+    }
+    if (*proxy).flags & WL_PROXY_FLAG_DESTROYED != 0 {
+        return;
+    }
+    (*proxy).flags |= WL_PROXY_FLAG_DESTROYED;
+
+    let id = (*proxy).id;
+    let display = resolve_display(proxy);
+    let is_display_obj = id == 1 || (!display.is_null() && proxy as *mut Display == display);
+
+    if !display.is_null() && !is_display_obj {
+        if let Some(&mapped) = (*display).objects.get(&id) {
+            if mapped == proxy {
+                (*display).objects.remove(&id);
+            }
+        }
+    }
+
+    (*proxy).queue = std::ptr::null_mut();
+    let link = &mut (*proxy).queue_link as *mut wl_list;
+    if !(*link).prev.is_null() && !(*link).next.is_null() {
+        wl_list_remove(link);
+        wl_list::init(link);
+    }
+
+    if is_display_obj {
+        // Display lifetime is owned by wl_display_disconnect.
+        return;
+    }
+    proxy_unref(proxy);
 }
 
 
@@ -42,6 +154,7 @@ pub unsafe extern "C" fn wl_display_connect(name: *const c_char) -> *mut Display
             let proxy_id = (*d).proxy.id;
             let proxy_off = (&(*d).proxy as *const _ as usize) - (d as usize);
             eprintln!("[wl-client] wl_display_connect → {:p} proxy_offset={} proxy.id={}", d, proxy_off, proxy_id);
+            live_display_register(d);
             GLOBAL_DISPLAY.store(d, std::sync::atomic::Ordering::Relaxed);
             d
         }
@@ -71,29 +184,56 @@ pub unsafe extern "C" fn wl_display_connect_to_fd(fd: c_int) -> *mut Display {
         event_queue: Vec::new(),
         error: 0,
         error_msg: None,
+        mutex: std::sync::Mutex::new(()),
     });
     let raw = Box::into_raw(display);
     (*raw).proxy.display = raw;
+    Proxy::init_queue_link(&mut (*raw).proxy);
     (*raw).objects.insert(1, raw as *mut Proxy);
+    live_display_register(raw);
     GLOBAL_DISPLAY.store(raw, std::sync::atomic::Ordering::Relaxed);
     raw
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_display_disconnect(display: *mut Display) {
-    if !display.is_null() {
-        let d = &mut *display;
-        let ids: Vec<u32> = d.objects.keys().copied().collect();
-        for id in ids {
-            if id == 1 { continue; }
-            if let Some(p) = d.objects.remove(&id) {
-                if !p.is_null() {
-                    let _ = Box::from_raw(p);
-                }
+    if display.is_null() {
+        return;
+    }
+    // Unregister before freeing so concurrent/stray wl_proxy_destroy cannot
+    // touch this Display's HashMap after teardown (Mesa EGL probe path).
+    live_display_unregister(display);
+    let _ = GLOBAL_DISPLAY.compare_exchange(
+        display,
+        std::ptr::null_mut(),
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    // Lock via raw pointer so we can still mutably access Display fields.
+    let mutex = &(*display).mutex as *const std::sync::Mutex<()>;
+    let _guard = (*mutex).lock().unwrap_or_else(|e| e.into_inner());
+    let d = &mut *display;
+    let ids: Vec<u32> = d.objects.keys().copied().collect();
+    for id in ids {
+        if id == 1 {
+            continue;
+        }
+        if let Some(p) = d.objects.remove(&id) {
+            if p.is_null() {
+                continue;
+            }
+            // Detach before free so a late destroy sees a null display and
+            // bails via resolve_display / DESTROYED instead of UAF.
+            (*p).display = std::ptr::null_mut();
+            if ((*p).flags & WL_PROXY_FLAG_DESTROYED) == 0 {
+                (*p).flags |= WL_PROXY_FLAG_DESTROYED;
+                let _ = Box::from_raw(p);
             }
         }
-        let _ = Box::from_raw(display);
     }
+    d.proxy.display = std::ptr::null_mut();
+    drop(_guard);
+    let _ = Box::from_raw(display);
 }
 
 #[no_mangle]
@@ -264,15 +404,13 @@ pub unsafe extern "C" fn wl_proxy_create(
     if factory.is_null() || interface.is_null() {
         return std::ptr::null_mut();
     }
-    let display = {
-        let d = (*factory).display;
-        let gd = GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::Relaxed);
-        if d.is_null() || d != gd { gd } else { d }
-    };
-    if display.is_null() { return std::ptr::null_mut(); }
+    let display = resolve_display(factory);
+    if display.is_null() {
+        return std::ptr::null_mut();
+    }
+    let _guard = (*display).lock();
     let id = (*display).alloc_id();
-    let proxy = Box::new(Proxy::new(id, interface, (*interface).version as u32, display));
-    let raw = Box::into_raw(proxy);
+    let raw = Proxy::into_heap(Proxy::new(id, interface, (*interface).version as u32, display));
     (*display).register(raw);
     raw
 }
@@ -281,14 +419,14 @@ pub unsafe extern "C" fn wl_proxy_create(
 pub unsafe extern "C" fn wl_proxy_create_wrapper(proxy: *mut Proxy) -> *mut c_void {
     if proxy.is_null() { return std::ptr::null_mut(); }
     let p = &*proxy;
-    let wrapper = Box::new(Proxy {
+    let mut wrapper = Box::new(Proxy {
         interface: p.interface,
         implementation: p.implementation,
         id: p.id,
         _id_pad: p._id_pad,
         display: p.display,
         queue: p.queue,
-        flags: p.flags | crate::proxy::WL_PROXY_FLAG_WRAPPER,
+        flags: p.flags | WL_PROXY_FLAG_WRAPPER,
         refcount: 1,
         user_data: p.user_data,
         dispatcher: p.dispatcher,
@@ -297,29 +435,44 @@ pub unsafe extern "C" fn wl_proxy_create_wrapper(proxy: *mut Proxy) -> *mut c_vo
         tag: p.tag,
         queue_link: crate::types::wl_list::new(),
     });
+    // Init while still in Box (heap address stable across into_raw).
+    Proxy::init_queue_link(&mut *wrapper);
     Box::into_raw(wrapper) as *mut c_void
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_proxy_wrapper_destroy(proxy: *mut c_void) {
-    if !proxy.is_null() {
-        let _ = Box::from_raw(proxy as *mut Proxy);
+    if proxy.is_null() {
+        return;
     }
+    let p = proxy as *mut Proxy;
+    if ((*p).flags & WL_PROXY_FLAG_WRAPPER) == 0 {
+        return;
+    }
+    let _ = Box::from_raw(p);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_proxy_destroy(proxy: *mut Proxy) {
-    if proxy.is_null() { return; }
-    let display = {
-        let d = (*proxy).display;
-        let gd = GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::Relaxed);
-        if d.is_null() || d != gd { gd } else { d }
-    };
-    if !display.is_null() {
-        (*display).objects.remove(&(*proxy).id);
+    if proxy.is_null() {
+        return;
     }
-    // WRAPPER proxies are not in the object map.
-    let _ = Box::from_raw(proxy);
+    // Refuse HashMap ops on a Display that has already been disconnect()'d.
+    // Late destroys after Mesa's dri2_teardown are safe no-ops (may leak the
+    // proxy box if disconnect already tore the map down — matches libwayland
+    // leak-on-disconnect-without-destroy more than a GPF).
+    if ((*proxy).flags & WL_PROXY_FLAG_DESTROYED) != 0 {
+        return;
+    }
+    let display = resolve_display(proxy);
+    if display.is_null() {
+        return;
+    }
+    let _guard = (*display).lock();
+    if ((*proxy).flags & WL_PROXY_FLAG_DESTROYED) != 0 {
+        return;
+    }
+    proxy_destroy_locked(proxy);
 }
 
 #[no_mangle]
@@ -329,7 +482,7 @@ pub unsafe extern "C" fn wl_proxy_add_listener(
     data: *mut c_void,
 ) -> c_int {
     if proxy.is_null() { return -1; }
-    if (*proxy).flags & crate::proxy::WL_PROXY_FLAG_WRAPPER != 0 { return -1; }
+    if (*proxy).flags & WL_PROXY_FLAG_WRAPPER != 0 { return -1; }
     if !(*proxy).implementation.is_null() || (*proxy).dispatcher.is_some() { return -1; }
     (*proxy).implementation = listener as *const c_void;
     (*proxy).user_data = data;
@@ -351,7 +504,7 @@ pub unsafe extern "C" fn wl_proxy_add_dispatcher(
     data: *mut c_void,
 ) -> c_int {
     if proxy.is_null() { return -1; }
-    if (*proxy).flags & crate::proxy::WL_PROXY_FLAG_WRAPPER != 0 { return -1; }
+    if (*proxy).flags & WL_PROXY_FLAG_WRAPPER != 0 { return -1; }
     if !(*proxy).implementation.is_null() || (*proxy).dispatcher.is_some() { return -1; }
     (*proxy).implementation = implementation;
     (*proxy).dispatcher = dispatcher;
@@ -370,13 +523,14 @@ pub unsafe extern "C" fn wl_proxy_marshal_array_flags(
 ) -> *mut Proxy {
     if proxy.is_null() { return std::ptr::null_mut(); }
 
-    // Use GLOBAL_DISPLAY when proxy->display is null or mismatched.
-    let display = {
-        let d = (*proxy).display;
-        let gd = GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::Relaxed);
-        if d.is_null() || d != gd { gd } else { d }
-    };
+    let display = resolve_display(proxy);
     if display.is_null() { return std::ptr::null_mut(); }
+    let _guard = (*display).lock();
+
+    if (*proxy).flags & WL_PROXY_FLAG_DESTROYED != 0 {
+        return std::ptr::null_mut();
+    }
+
     let proxy_iface = (*proxy).interface;
 
     fn is_valid_iface(p: *const WlInterface) -> bool {
@@ -410,7 +564,7 @@ pub unsafe extern "C" fn wl_proxy_marshal_array_flags(
         // new_id inherits the factory proxy's queue (Mesa eglSwapBuffers).
         let mut p = Proxy::new(id, interface, vv, display);
         p.queue = (*proxy).queue;
-        new_proxy = Box::into_raw(Box::new(p));
+        new_proxy = Proxy::into_heap(p);
         (*display).register(new_proxy);
 
         if methods_ok {
@@ -439,7 +593,8 @@ pub unsafe extern "C" fn wl_proxy_marshal_array_flags(
     (*display).socket.queue(&msg, &fds);
 
     if flags & 1 != 0 {
-        wl_proxy_destroy(proxy);
+        // WL_MARSHAL_FLAG_DESTROY — same as libwayland (under display lock).
+        proxy_destroy_locked(proxy);
     }
 
     new_proxy
@@ -493,10 +648,7 @@ pub unsafe extern "C" fn wl_proxy_get_queue(proxy: *const Proxy) -> *mut wl_even
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_proxy_get_display(proxy: *mut Proxy) -> *mut Display {
-    if proxy.is_null() { return std::ptr::null_mut(); }
-    let d = (*proxy).display;
-    let gd = GLOBAL_DISPLAY.load(std::sync::atomic::Ordering::Relaxed);
-    if d.is_null() || (!gd.is_null() && d != gd) { gd } else { d }
+    resolve_display(proxy)
 }
 
 #[no_mangle]
@@ -560,10 +712,17 @@ pub unsafe extern "C" fn wl_list_insert(list: *mut wl_list, elm: *mut wl_list) {
 
 #[no_mangle]
 pub unsafe extern "C" fn wl_list_remove(elm: *mut wl_list) {
+    if elm.is_null() {
+        return;
+    }
+    // Uninitialized / already-detached nodes have null links.
+    if (*elm).prev.is_null() || (*elm).next.is_null() {
+        wl_list::init(elm);
+        return;
+    }
     (*(*elm).prev).next = (*elm).next;
     (*(*elm).next).prev = (*elm).prev;
-    (*elm).prev = std::ptr::null_mut();
-    (*elm).next = std::ptr::null_mut();
+    wl_list::init(elm);
 }
 
 #[no_mangle]

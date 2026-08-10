@@ -44,6 +44,11 @@ impl Proxy {
         version: u32,
         display: *mut crate::display::Display,
     ) -> Self {
+        // queue_link stays null until `init_queue_link` after the Proxy lives at
+        // its final heap address.  Self-init here would bake in a stack pointer
+        // that is invalidated when the value is moved into a Box — wl_list_remove
+        // on destroy then writes through dangling stack addresses (heap corruption
+        // / double-free on wl_data_offer_destroy during clipboard selection).
         Proxy {
             interface,
             implementation: std::ptr::null(),
@@ -62,7 +67,26 @@ impl Proxy {
         }
     }
 
+    /// Init `queue_link` to a self-pointing empty list at the proxy's final address.
+    pub unsafe fn init_queue_link(proxy: *mut Proxy) {
+        if proxy.is_null() {
+            return;
+        }
+        wl_list::init(&mut (*proxy).queue_link);
+    }
+
+    /// Box a proxy and seal its queue_link (the only safe construction path).
+    pub unsafe fn into_heap(proxy: Proxy) -> *mut Proxy {
+        let raw = Box::into_raw(Box::new(proxy));
+        Self::init_queue_link(raw);
+        raw
+    }
+
     pub fn is_deleted(&self) -> bool {
         self.flags & WL_PROXY_FLAG_ID_DELETED != 0
+    }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.flags & WL_PROXY_FLAG_DESTROYED != 0
     }
 }
