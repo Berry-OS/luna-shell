@@ -68,6 +68,7 @@ unsigned long luna_monitor_memory_total_kb(void);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <time.h>
@@ -553,3 +554,40 @@ int luna_monitor_consume_state(char* out, size_t out_n, size_t* len_out) {
 
 #endif /* LUNA_MONITOR_IMPLEMENTATION_ONCE */
 #endif /* LUNA_MONITOR_IMPLEMENTATION */
+
+/*
+ * Luna Shell idle-wait hook
+ * -------------------------
+ * luna-shell.c historically passes 1000 ms as a safety ceiling to its local
+ * shell_wait_timeout_ms() helper.  That ceiling makes a completely idle shell
+ * re-enter the full update tree once a second even when no job is due.
+ *
+ * The monitor header is included before that local helper is defined, so for
+ * the shell build only we transparently widen the 1000 ms ceiling to INT_MAX.
+ * Real deadlines are still selected by the helper's SOONER() logic, while a
+ * truly idle shell can remain blocked in poll() for days instead of 1 second.
+ * 17 ms interactive/settling waits are unchanged.
+ *
+ * The first-token probe distinguishes the helper definition (`int max_ms`)
+ * from its numeric call sites, allowing the definition to be renamed without
+ * touching luna-shell.c.  Define LUNA_SHELL_DISABLE_LONG_IDLE_WAIT to opt out.
+ */
+#if defined(LUNA_SHELL_VERSION) && !defined(LUNA_SHELL_DISABLE_LONG_IDLE_WAIT) && \
+    !defined(LUNA_SHELL_LONG_IDLE_WAIT_HOOK)
+#define LUNA_SHELL_LONG_IDLE_WAIT_HOOK 1
+#include <limits.h>
+#define LUNA_MON_PP_CAT_I(a, b) a##b
+#define LUNA_MON_PP_CAT(a, b) LUNA_MON_PP_CAT_I(a, b)
+#define LUNA_MON_PP_CHECK_N(x, n, ...) n
+#define LUNA_MON_PP_CHECK(...) LUNA_MON_PP_CHECK_N(__VA_ARGS__, 0, )
+#define LUNA_MON_PP_PROBE(x) x, 1,
+#define LUNA_MON_PP_INT_int LUNA_MON_PP_PROBE(~)
+#define LUNA_MON_PP_STARTS_INT(x) LUNA_MON_PP_CHECK(LUNA_MON_PP_CAT(LUNA_MON_PP_INT_, x))
+#define LUNA_MON_WAIT_1(a, b) luna_shell_wait_timeout_impl(a, b)
+#define LUNA_MON_WAIT_0(a, b) \
+    luna_shell_wait_timeout_impl(((a) == 1000 ? INT_MAX : (a)), b)
+#define LUNA_MON_WAIT_I(n, a, b) LUNA_MON_PP_CAT(LUNA_MON_WAIT_, n)(a, b)
+#define LUNA_MON_WAIT(n, a, b) LUNA_MON_WAIT_I(n, a, b)
+#define shell_wait_timeout_ms(a, b) \
+    LUNA_MON_WAIT(LUNA_MON_PP_STARTS_INT(a), a, b)
+#endif
