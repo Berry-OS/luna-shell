@@ -1,118 +1,97 @@
 #!/usr/bin/env bash
-# Luna Desktop session launcher — fast/system-Wayland edition.
-# No libdecor setup, no vendored libwayland preload, no runtime polling loop.
-set -euo pipefail
+# Luna Desktop session launcher.
+# Runtime supervision is fully event-driven: after startup this process blocks
+# in wait(2) and never wakes the desktop on a timer.
+set -Eeuo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE="${PROFILE:-release}"
 TARGET="$ROOT/target/$PROFILE"
 BACKEND="${BACKEND:-dri}"
 SOCKET="${LUNA_SOCKET:-wayland-0}"
-SIZE="${LUNA_SIZE:-}"
-FBDEV="${LUNA_FBDEV:-}"
 PORT="${LUNA_WEBGL_PORT:-8081}"
+PIDS=()
+COMPOSITOR_PID=
+SHELL_PID=
 
-COMPOSITOR_PID=""
-SHELL_PID=""
-INPUT_METHOD_PID=""
-CLIPBOARD_PID=""
-APP_PIDS=()
-CLEANING=0
-
-die() { printf 'luna-session: %s\n' "$*" >&2; exit 1; }
-
-is_running() {
-    [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null
-}
+fail() { printf 'luna-session: %s\n' "$*" >&2; exit 1; }
+alive() { [[ -n ${1:-} ]] && kill -0 "$1" 2>/dev/null; }
 
 cleanup() {
-    [ "$CLEANING" = 0 ] || return
-    CLEANING=1
+    local p alive_any
     trap - EXIT INT TERM HUP
+    ((${#PIDS[@]})) || return 0
 
-    local pids=()
-    local p
-    for p in "${APP_PIDS[@]}"; do [ -n "$p" ] && pids+=("$p"); done
-    [ -n "$INPUT_METHOD_PID" ] && pids+=("$INPUT_METHOD_PID")
-    [ -n "$CLIPBOARD_PID" ] && pids+=("$CLIPBOARD_PID")
-    [ -n "$SHELL_PID" ] && pids+=("$SHELL_PID")
-    [ -n "$COMPOSITOR_PID" ] && pids+=("$COMPOSITOR_PID")
-
-    for p in "${pids[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
+    kill -TERM "${PIDS[@]}" 2>/dev/null || true
     for _ in {1..20}; do
-        local alive=0
-        for p in "${pids[@]}"; do is_running "$p" && alive=1; done
-        [ "$alive" = 1 ] || break
+        alive_any=0
+        for p in "${PIDS[@]}"; do alive "$p" && alive_any=1; done
+        ((alive_any)) || break
         sleep 0.05
     done
-    for p in "${pids[@]}"; do
-        is_running "$p" && kill -KILL "$p" 2>/dev/null || true
-    done
-    for p in "${pids[@]}"; do wait "$p" 2>/dev/null || true; done
-    rm -f "${XDG_RUNTIME_DIR:-/tmp}/$SOCKET" 2>/dev/null || true
+    for p in "${PIDS[@]}"; do alive "$p" && kill -KILL "$p" 2>/dev/null || true; done
+    for p in "${PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+    rm -f -- "${XDG_RUNTIME_DIR:-/tmp}/$SOCKET" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-# XDG runtime directory
-if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+# Runtime directory ---------------------------------------------------------
+if [[ -z ${XDG_RUNTIME_DIR:-} ]]; then
     XDG_RUNTIME_DIR="/run/user/$(id -u)"
-    if [ ! -d "$XDG_RUNTIME_DIR" ]; then
-        XDG_RUNTIME_DIR="/tmp/luna-runtime-$(id -u)"
-    fi
+    [[ -d $XDG_RUNTIME_DIR ]] || XDG_RUNTIME_DIR="/tmp/luna-runtime-$(id -u)"
 fi
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 700 "$XDG_RUNTIME_DIR"
+install -d -m 700 "$XDG_RUNTIME_DIR"
 export XDG_RUNTIME_DIR
 
-# Prefer source-tree target when this script lives in the repository.
-# This avoids accidentally running a stale luna-compositor copied beside the script.
-if [ -n "${LUNA_BIN:-}" ]; then
+# Resolve binaries.  A source checkout builds once when needed; an installed
+# session simply uses PATH.  There is no build/stat polling after launch.
+if [[ -n ${LUNA_BIN:-} ]]; then
     BIN="$LUNA_BIN"
-elif [ -f "$ROOT/wayland-server-rs/Cargo.toml" ]; then
+elif [[ -f $ROOT/wayland-server-rs/Cargo.toml ]]; then
     BIN="$TARGET"
 else
     BIN="$ROOT"
 fi
 
-if [ ! -x "$BIN/luna-compositor" ] || [ ! -x "$BIN/luna-shell" ]; then
-    if [ -f "$ROOT/Makefile" ]; then
-        echo "→ Building Luna desktop (system Wayland)"
+if [[ ! -x $BIN/luna-compositor || ! -x $BIN/luna-shell ]]; then
+    if [[ -f $ROOT/Makefile ]]; then
+        printf '→ Building Luna desktop\n'
         make -C "$ROOT" build-desktop-system PROFILE="$PROFILE"
         BIN="$TARGET"
     else
-        command -v luna-compositor >/dev/null 2>&1 || die "luna-compositor not found"
-        command -v luna-shell >/dev/null 2>&1 || die "luna-shell not found"
-        BIN="$(dirname "$(command -v luna-compositor)")"
+        COMPOSITOR_PATH="$(command -v luna-compositor || true)"
+        SHELL_PATH="$(command -v luna-shell || true)"
+        [[ -n $COMPOSITOR_PATH && -n $SHELL_PATH ]] || fail 'Luna binaries not found'
+        BIN="$(dirname -- "$COMPOSITOR_PATH")"
     fi
 fi
 
 COMPOSITOR="${LUNA_COMPOSITOR:-$BIN/luna-compositor}"
 SHELL_BIN="${LUNA_SHELL:-$BIN/luna-shell}"
-[ -x "$COMPOSITOR" ] || die "not executable: $COMPOSITOR"
-[ -x "$SHELL_BIN" ] || die "not executable: $SHELL_BIN"
+[[ -x $COMPOSITOR ]] || fail "not executable: $COMPOSITOR"
+[[ -x $SHELL_BIN ]] || fail "not executable: $SHELL_BIN"
 
-# Session preferences: only values needed before compositor startup.
+# Small subset of settings required before the compositor starts.
 SETTINGS="${XDG_CONFIG_HOME:-$HOME/.config}/luna-shell/settings.conf"
-saved_lang=""
-saved_layout=""
-saved_numlock=""
-if [ -r "$SETTINGS" ]; then
-    while IFS='=' read -r k v; do
-        case "$k" in
-            ui_language) saved_lang="$v" ;;
-            kb_layout)   saved_layout="$v" ;;
-            numlock_on)  saved_numlock="$v" ;;
+saved_lang= saved_layout= saved_numlock=
+if [[ -r $SETTINGS ]]; then
+    while IFS='=' read -r key value; do
+        case "$key" in
+            ui_language) saved_lang="$value" ;;
+            kb_layout)   saved_layout="$value" ;;
+            numlock_on)  saved_numlock="$value" ;;
         esac
     done < "$SETTINGS"
 fi
-
 case "$saved_lang" in
     ja_JP.UTF-8|en_US.UTF-8|C.UTF-8) export LANG="$saved_lang" LC_ALL="$saved_lang" ;;
-    *) export LANG="${LANG:-ja_JP.UTF-8}" ;;
+    '') : ;;
 esac
-
-if [ -z "${XKB_DEFAULT_LAYOUT:-}" ]; then
-    if [ -n "$saved_layout" ]; then
+if [[ -z ${XKB_DEFAULT_LAYOUT:-} ]]; then
+    if [[ -n $saved_layout ]]; then
         export XKB_DEFAULT_LAYOUT="$saved_layout"
     else
         case "${LANG:-}" in
@@ -124,162 +103,128 @@ if [ -z "${XKB_DEFAULT_LAYOUT:-}" ]; then
         esac
     fi
 fi
-if [ -z "${XKB_DEFAULT_OPTIONS:-}" ] && [[ "$XKB_DEFAULT_LAYOUT" == *,* ]]; then
+[[ -n ${XKB_DEFAULT_OPTIONS:-} || $XKB_DEFAULT_LAYOUT != *,* ]] || \
     export XKB_DEFAULT_OPTIONS=grp:alt_shift_toggle
-fi
-case "$saved_numlock" in
-    0|1) export LUNA_NUMLOCK="$saved_numlock" ;;
-esac
+case "$saved_numlock" in 0|1) export LUNA_NUMLOCK="$saved_numlock" ;; esac
 
-# Standard Wayland only. Do not preload the repository's experimental client
-# into GTK/Firefox/GLFW: Mesa and toolkits expect full system libwayland semantics.
-unset LD_PRELOAD LUNA_WAYLAND_CLIENT_PRELOAD LUNA_WAYLAND_CLIENT_LIBPATH
-
+# Native Wayland environment ------------------------------------------------
+unset LD_PRELOAD LUNA_WAYLAND_CLIENT_PRELOAD LUNA_WAYLAND_CLIENT_LIBPATH DISPLAY
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-Luna}"
 export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-luna}"
-export GDK_BACKEND=wayland
-export QT_QPA_PLATFORM=wayland
-export MOZ_ENABLE_WAYLAND=1
+export GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland MOZ_ENABLE_WAYLAND=1
 export MOZ_GTK_TITLEBAR_DECORATION="${MOZ_GTK_TITLEBAR_DECORATION:-client}"
-export GDK_SCALE="${LUNA_GDK_SCALE:-1}"
-export GDK_DPI_SCALE="${LUNA_GDK_DPI_SCALE:-1}"
-export QT_SCALE_FACTOR="${LUNA_QT_SCALE_FACTOR:-1}"
-export QT_AUTO_SCREEN_SCALE_FACTOR=0
-export LUNA_BACKEND="$BACKEND"
-export LUNA_OUTPUT_DPI="${LUNA_OUTPUT_DPI:-96}"
+export GDK_SCALE="${LUNA_GDK_SCALE:-1}" GDK_DPI_SCALE="${LUNA_GDK_DPI_SCALE:-1}"
+export QT_SCALE_FACTOR="${LUNA_QT_SCALE_FACTOR:-1}" QT_AUTO_SCREEN_SCALE_FACTOR=0
+export LUNA_BACKEND="$BACKEND" LUNA_OUTPUT_DPI="${LUNA_OUTPUT_DPI:-96}"
+# New monitor defaults to silent background sampling.  Set to 1 only when
+# deliberately benchmarking continuously ticking CPU/memory widgets.
+export LUNA_MONITOR_LIVE_NOTIFY="${LUNA_MONITOR_LIVE_NOTIFY:-0}"
 
-# Client rendering policy.
-# DRI: GPU/GL is the default. Software backend: Cairo/llvmpipe.
-# Override with LUNA_CLIENT_RENDERER=gpu|software.
-# Never leave GSK_RENDERER=vulkan — Luna has no Vulkan WSI for clients.
-client_renderer="${LUNA_CLIENT_RENDERER:-auto}"
-if [ "$client_renderer" = auto ]; then
-    [ "$BACKEND" = dri ] && client_renderer=gpu || client_renderer=software
-fi
-export LUNA_CLIENT_RENDERER="$client_renderer"
-case "$client_renderer" in
+renderer="${LUNA_CLIENT_RENDERER:-auto}"
+[[ $renderer != auto ]] || { [[ $BACKEND == dri ]] && renderer=gpu || renderer=software; }
+export LUNA_CLIENT_RENDERER="$renderer"
+case "$renderer" in
     gpu)
         unset LIBGL_ALWAYS_SOFTWARE MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER
-        case "${LUNA_GSK_RENDERER:-${GSK_RENDERER:-}}" in
-            vulkan|Vulkan|VULKAN|"") export GSK_RENDERER=gl ;;
-            *) export GSK_RENDERER="${LUNA_GSK_RENDERER:-$GSK_RENDERER}" ;;
+        gsk_renderer="${LUNA_GSK_RENDERER:-${GSK_RENDERER:-}}"
+        case "$gsk_renderer" in
+            ''|vulkan|Vulkan|VULKAN) export GSK_RENDERER=gl ;;
+            *) export GSK_RENDERER="$gsk_renderer" ;;
         esac
+        unset gsk_renderer
         ;;
     software)
         export LIBGL_ALWAYS_SOFTWARE=1
         export LP_NUM_THREADS="${LP_NUM_THREADS:-${LUNA_SOFTWARE_THREADS:-4}}"
         export GSK_RENDERER="${LUNA_GSK_RENDERER:-cairo}"
         ;;
-    *)
-        die "LUNA_CLIENT_RENDERER must be auto, gpu or software"
-        ;;
+    *) fail 'LUNA_CLIENT_RENDERER must be auto, gpu or software' ;;
 esac
 
-# GLFW's default libdecor choice prefers the GTK plugin.  On a bare VT it
-# repeatedly asks GTK for unavailable symbolic titlebar icons, which produces
-# NULL dereferences / abort during the first mapped frame of small GL clients.
-# Explicit LIBDECOR_PLUGIN_DIR wins; LUNA_LIBDECOR_CAIRO=0 restores auto mode.
+# Keep GLFW/libdecor stable on bare Wayland without making it a session loop.
 case "${LUNA_LIBDECOR_CAIRO:-1}" in
     0|no|false|off) unset LIBDECOR_PLUGIN_DIR ;;
     *)
-        if [ -z "${LIBDECOR_PLUGIN_DIR:-}" ]; then
-            for _decor in \
+        if [[ -z ${LIBDECOR_PLUGIN_DIR:-} ]]; then
+            for decor in \
                 /usr/lib64/libdecor/plugins-1/libdecor-cairo.so \
                 /usr/lib/x86_64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so \
                 /usr/lib/aarch64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so \
                 /usr/lib/libdecor/plugins-1/libdecor-cairo.so \
                 /usr/local/lib64/libdecor/plugins-1/libdecor-cairo.so \
-                /usr/local/lib/libdecor/plugins-1/libdecor-cairo.so
-            do
-                if [ -r "$_decor" ]; then
-                    _decor_dir="${XDG_RUNTIME_DIR:-/tmp}/luna-libdecor-cairo"
-                    mkdir -p -m 700 "$_decor_dir"
-                    ln -sfn "$_decor" "$_decor_dir/libdecor-cairo.so"
-                    export LIBDECOR_PLUGIN_DIR="$_decor_dir"
-                    break
-                fi
+                /usr/local/lib/libdecor/plugins-1/libdecor-cairo.so; do
+                [[ -r $decor ]] || continue
+                decor_dir="$XDG_RUNTIME_DIR/luna-libdecor-cairo"
+                install -d -m 700 "$decor_dir"
+                ln -sfn "$decor" "$decor_dir/libdecor-cairo.so"
+                export LIBDECOR_PLUGIN_DIR="$decor_dir"
+                break
             done
-            unset _decor _decor_dir
         fi
         ;;
 esac
 
-# Pure Wayland IME path.
 case "${LUNA_IM_WAYLAND:-1}" in
     0|no|false|off) ;;
-    *)
-        export GTK_IM_MODULE=wayland
-        unset QT_IM_MODULE QT4_IM_MODULE CLUTTER_IM_MODULE XMODIFIERS
-        ;;
+    *) export GTK_IM_MODULE=wayland; unset QT_IM_MODULE QT4_IM_MODULE CLUTTER_IM_MODULE XMODIFIERS ;;
 esac
-
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-launch >/dev/null 2>&1; then
+if [[ -z ${DBUS_SESSION_BUS_ADDRESS:-} ]] && command -v dbus-launch >/dev/null 2>&1; then
     eval "$(dbus-launch --sh-syntax)"
 fi
 
+# Compositor ---------------------------------------------------------------
 ARGS=(--socket "$SOCKET" --backend "$BACKEND")
-[ -n "${LUNA_TTY:-}" ] && [ "$BACKEND" = dri ] && ARGS+=(--tty "$LUNA_TTY")
+[[ -z ${LUNA_TTY:-} || $BACKEND != dri ]] || ARGS+=(--tty "$LUNA_TTY")
 case "${LUNA_PHYSICAL_INPUT:-1}" in 0|no|false|off) ARGS+=(--no-input) ;; esac
-[ -n "$SIZE" ] && ARGS+=(--size "$SIZE")
-[ "$BACKEND" = webgl ] && ARGS+=(--port "$PORT")
-if [ -z "$FBDEV" ] && [ -e /dev/fb0 ]; then
-    case "$BACKEND" in software|dri) FBDEV=/dev/fb0 ;; esac
+[[ -z ${LUNA_SIZE:-} ]] || ARGS+=(--size "$LUNA_SIZE")
+[[ $BACKEND != webgl ]] || ARGS+=(--port "$PORT")
+if [[ -n ${LUNA_FBDEV:-} ]]; then
+    ARGS+=(--fbdev "$LUNA_FBDEV")
+elif [[ -e /dev/fb0 && ( $BACKEND == dri || $BACKEND == software ) ]]; then
+    ARGS+=(--fbdev /dev/fb0)
 fi
-[ -n "$FBDEV" ] && ARGS+=(--fbdev "$FBDEV")
 
-echo "→ compositor: $COMPOSITOR (${ARGS[*]})"
-"$COMPOSITOR" "${ARGS[@]}" &
-COMPOSITOR_PID=$!
+printf '→ compositor: %s %s\n' "$COMPOSITOR" "${ARGS[*]}"
+"$COMPOSITOR" "${ARGS[@]}" & COMPOSITOR_PID=$!; PIDS+=("$COMPOSITOR_PID")
 
-# Wait for readiness, not an arbitrary startup sleep.
-ready=0
-for _ in {1..200}; do
-    is_running "$COMPOSITOR_PID" || {
-        wait "$COMPOSITOR_PID" || true
-        die "compositor exited before creating $SOCKET"
-    }
-    if [ -S "$XDG_RUNTIME_DIR/$SOCKET" ]; then ready=1; break; fi
+# Startup readiness is the only polling in this launcher.  It ends as soon as
+# the Wayland socket exists and is never part of steady-state rendering.
+for _ in {1..400}; do
+    alive "$COMPOSITOR_PID" || { wait "$COMPOSITOR_PID" || true; fail 'compositor exited during startup'; }
+    [[ -S $XDG_RUNTIME_DIR/$SOCKET ]] && break
     sleep 0.005
 done
-[ "$ready" = 1 ] || die "Wayland socket was not created: $XDG_RUNTIME_DIR/$SOCKET"
-
+[[ -S $XDG_RUNTIME_DIR/$SOCKET ]] || fail "Wayland socket not created: $SOCKET"
 export WAYLAND_DISPLAY="$SOCKET"
-unset DISPLAY
 export PATH="$BIN:$ROOT:$PATH"
 
-# Keep the shell on hardware GL on a DRI session even when application clients
-# are explicitly forced to software rendering.
-echo "→ shell: $SHELL_BIN"
-if [ "$BACKEND" = dri ]; then
+# Shell and optional helpers -----------------------------------------------
+printf '→ shell: %s\n' "$SHELL_BIN"
+if [[ $BACKEND == dri ]]; then
     env -u LIBGL_ALWAYS_SOFTWARE -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER \
         LUNA_NO_HELPERS=1 "$SHELL_BIN" --desktop &
 else
     LUNA_NO_HELPERS=1 "$SHELL_BIN" --desktop &
 fi
-SHELL_PID=$!
+SHELL_PID=$!; PIDS+=("$SHELL_PID")
 
-INPUT_METHOD="${LUNA_INPUT_METHOD:-whiz-im-wayland}"
-if [ "$INPUT_METHOD" != none ] && [ "$INPUT_METHOD" != 0 ] && command -v "$INPUT_METHOD" >/dev/null 2>&1; then
-    "$INPUT_METHOD" &
-    INPUT_METHOD_PID=$!
-fi
+start_optional() {
+    local exe="$1"; shift
+    [[ $exe != none && $exe != 0 ]] || return 0
+    command -v "$exe" >/dev/null 2>&1 || return 0
+    "$exe" "$@" & PIDS+=("$!")
+}
+start_optional "${LUNA_INPUT_METHOD:-whiz-im-wayland}"
+start_optional "${LUNA_CLIPBOARD:-luna-clipboard}"
 
-CLIPBOARD="${LUNA_CLIPBOARD:-luna-clipboard}"
-if [ "$CLIPBOARD" != none ] && [ "$CLIPBOARD" != 0 ] && command -v "$CLIPBOARD" >/dev/null 2>&1; then
-    "$CLIPBOARD" -v &
-    CLIPBOARD_PID=$!
-fi
-
-if [ -n "${LUNA_APPS:-}" ]; then
+if [[ -n ${LUNA_APPS:-} ]]; then
     for app in $LUNA_APPS; do
-        echo "→ app: $app"
-        $app &
-        APP_PIDS+=("$!")
+        printf '→ app: %s\n' "$app"
+        "$app" & PIDS+=("$!")
     done
 fi
+[[ $BACKEND != webgl ]] || printf '→ WebGL: http://localhost:%s/\n' "$PORT"
 
-[ "$BACKEND" = webgl ] && echo "→ WebGL: http://localhost:$PORT/"
-
-# No 100 ms supervisor poll. Block in the kernel until either core process exits.
+# Steady state: one blocking wait, zero supervisor timer wakeups.
 wait -n "$COMPOSITOR_PID" "$SHELL_PID" || true

@@ -1,3 +1,10 @@
 [workspace]
 members = ["wayland-client-rs", "wayland-server-rs", "hello-gtk"]
 resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
