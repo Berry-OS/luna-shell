@@ -127,7 +127,12 @@ export LUNA_CLIENT_RENDERER="$renderer"
 case "$renderer" in
     gpu)
         unset LIBGL_ALWAYS_SOFTWARE MESA_LOADER_DRIVER_OVERRIDE GALLIUM_DRIVER
-        [[ ${GSK_RENDERER:-} != vulkan && -n ${GSK_RENDERER:-} ]] || export GSK_RENDERER=gl
+        gsk_renderer="${LUNA_GSK_RENDERER:-${GSK_RENDERER:-}}"
+        case "$gsk_renderer" in
+            ''|vulkan|Vulkan|VULKAN) export GSK_RENDERER=gl ;;
+            *) export GSK_RENDERER="$gsk_renderer" ;;
+        esac
+        unset gsk_renderer
         ;;
     software)
         export LIBGL_ALWAYS_SOFTWARE=1
@@ -138,20 +143,27 @@ case "$renderer" in
 esac
 
 # Keep GLFW/libdecor stable on bare Wayland without making it a session loop.
-if [[ ${LUNA_LIBDECOR_CAIRO:-1} != 0 && -z ${LIBDECOR_PLUGIN_DIR:-} ]]; then
-    for decor in \
-        /usr/lib64/libdecor/plugins-1/libdecor-cairo.so \
-        /usr/lib/x86_64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so \
-        /usr/lib/aarch64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so \
-        /usr/lib/libdecor/plugins-1/libdecor-cairo.so; do
-        [[ -r $decor ]] || continue
-        decor_dir="$XDG_RUNTIME_DIR/luna-libdecor-cairo"
-        install -d -m 700 "$decor_dir"
-        ln -sfn "$decor" "$decor_dir/libdecor-cairo.so"
-        export LIBDECOR_PLUGIN_DIR="$decor_dir"
-        break
-    done
-fi
+case "${LUNA_LIBDECOR_CAIRO:-1}" in
+    0|no|false|off) unset LIBDECOR_PLUGIN_DIR ;;
+    *)
+        if [[ -z ${LIBDECOR_PLUGIN_DIR:-} ]]; then
+            for decor in \
+                /usr/lib64/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/lib/x86_64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/lib/aarch64-linux-gnu/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/lib/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/local/lib64/libdecor/plugins-1/libdecor-cairo.so \
+                /usr/local/lib/libdecor/plugins-1/libdecor-cairo.so; do
+                [[ -r $decor ]] || continue
+                decor_dir="$XDG_RUNTIME_DIR/luna-libdecor-cairo"
+                install -d -m 700 "$decor_dir"
+                ln -sfn "$decor" "$decor_dir/libdecor-cairo.so"
+                export LIBDECOR_PLUGIN_DIR="$decor_dir"
+                break
+            done
+        fi
+        ;;
+esac
 
 case "${LUNA_IM_WAYLAND:-1}" in
     0|no|false|off) ;;
