@@ -335,7 +335,13 @@ static void luna_monitor_publish_status(void) {
     int should_notify = luna_monitor_visible_change(&old, &snap);
 
     pthread_mutex_lock(&g_luna_monitor.mutex);
-    snap.generation = g_luna_monitor.status.generation + 1;
+    /* Silent samples refresh the worker cache without advancing the consumer
+     * generation.  This is important: luna-shell has other maintenance wakes,
+     * and treating every CPU sample as "fresh" would turn those unrelated
+     * wakes back into periodic widget/layout work. */
+    snap.generation = should_notify
+        ? g_luna_monitor.status.generation + 1
+        : g_luna_monitor.status.generation;
     g_luna_monitor.status = snap;
     pthread_mutex_unlock(&g_luna_monitor.mutex);
 
