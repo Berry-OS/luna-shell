@@ -10,6 +10,15 @@
  * Copyright © 2026 Yuichiro Nakada / Project Luna (Vespera) — MPL 2.0
  */
 
+/* Berry rpm %{optflags} is `-Os -ffast-math`.  Fast-math makes luna-ui's
+ * opacity/cull compares (eff_op <= 0.004, dw <= 0) collapse so luna_render
+ * draws nothing — glClear only, black wallpaper, invisible dock/menubar,
+ * but hit-testing and set_cursor still work.  The Makefile appends
+ * -fno-fast-math after optflags; this guard catches a raw gcc/rpmbuild. */
+#ifdef __FAST_MATH__
+#error "luna-shell requires IEEE floats; rebuild without -ffast-math (pass -fno-fast-math after %{optflags})"
+#endif
+
 #define LUNA_UI_IMPLEMENTATION
 /* Custom KMS / Wayland / X11 host — do not pull in luna_linux.h (GLFW). */
 #define LUNA_UI_NO_PLATFORM
@@ -785,6 +794,10 @@ typedef struct {
     char qt_qss[PATH_MAX];/* absolute path to style.qss, or empty */
     /* Compositor SSD chrome. titlebar_style < 0 → use Settings toggle. */
     int  titlebar_style;  /* -1 unset | 0 modern | 1 classic dots | 2 flat retro */
+    /* Single source of truth for titlebar height: pushed to the compositor as
+     * `wm_config titlebar_height` (SSD bar) *and* written into
+     * window-theme.conf (Luna UI client chrome), so both agree. 0 = unset. */
+    int  titlebar_height;
     unsigned int titlebar_active;   /* 0 = compositor default palette */
     unsigned int titlebar_inactive;
     unsigned int titlebar_frame;
@@ -838,6 +851,7 @@ static void skin_chrome_defaults(LunaSkin* skin) {
     skin->qt_style[0] = 0;
     skin->qt_qss[0] = 0;
     skin->titlebar_style = -1;
+    skin->titlebar_height = 0;
     skin->titlebar_active = 0;
     skin->titlebar_inactive = 0;
     skin->titlebar_frame = 0;
@@ -941,6 +955,10 @@ static void skin_add_dir(const char* root, const char* id) {
         } else if (!strcmp(key, "titlebar_style")) {
             int s = atoi(val);
             if (s >= 0 && s <= 2) skin.titlebar_style = s;
+        } else if (!strcmp(key, "titlebar_height")) {
+            int h = atoi(val);
+            if (h >= LUNA_TITLEBAR_H_MIN && h <= LUNA_TITLEBAR_H_MAX)
+                skin.titlebar_height = h;
         } else if (!strcmp(key, "titlebar_active")) {
             skin.titlebar_active = skin_parse_color(val);
         } else if (!strcmp(key, "titlebar_inactive")) {
@@ -1630,7 +1648,6 @@ static double   g_last_bg_paint = 0.0;
  * entirely instead of pushing an identical full-screen frame several times a
  * second.  Re-checked once a second because the answer scans the elements. */
 static int      g_bg_animated = 1;
-static double   g_last_bg_anim_check = 0.0;
 static int      g_wl_poll_timeout_ms = 0;
 /* Single-surface backends used to repaint the whole desktop unconditionally.
  * Keep a separate bit for them: g_surf_dirty describes Wayland layers, while
@@ -2778,6 +2795,17 @@ static void skin_apply_toolkit(int skin_idx) {
     }
 }
 
+/* Resolved titlebar height for a skin: the skin's own value when it declares
+ * one, otherwise the shared default.  Used for both the compositor SSD bar and
+ * the client chrome written to window-theme.conf so the two never diverge. */
+static int skin_titlebar_height(const LunaSkin* skin) {
+    int h = skin->titlebar_height > 0 ? skin->titlebar_height
+                                      : LUNA_TITLEBAR_H_DEFAULT;
+    if (h < LUNA_TITLEBAR_H_MIN) h = LUNA_TITLEBAR_H_MIN;
+    if (h > LUNA_TITLEBAR_H_MAX) h = LUNA_TITLEBAR_H_MAX;
+    return h;
+}
+
 static int skin_apply_wm_decoration(int skin_idx) {
     if (skin_idx < 0 || skin_idx >= g_skin_count) skin_idx = 0;
     const LunaSkin* skin = &g_skins[skin_idx];
@@ -2791,6 +2819,9 @@ static int skin_apply_wm_decoration(int skin_idx) {
     ok &= shell_send_cmd(cmd);
     snprintf(cmd, sizeof(cmd), "wm_config titlebar_colors %u %u %u",
              skin->titlebar_active, skin->titlebar_inactive, skin->titlebar_frame);
+    ok &= shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config titlebar_height %d",
+             skin_titlebar_height(skin));
     ok &= shell_send_cmd(cmd);
     snprintf(cmd, sizeof(cmd), "wm_config prefer_ssd %d", skin->prefer_ssd ? 1 : 0);
     ok &= shell_send_cmd(cmd);
@@ -2817,6 +2848,7 @@ static void skin_export_window_theme(int skin_idx) {
     if (style < 0) style = 0;
     if (style > 2) style = 2;
     theme.titlebar_style = style;
+    theme.titlebar_height = (float)skin_titlebar_height(skin);
     theme.controls_on_left = skin->controls_on_left;
     if (skin->titlebar_active) theme.titlebar_active = skin->titlebar_active;
     if (skin->titlebar_inactive) theme.titlebar_inactive = skin->titlebar_inactive;
@@ -6918,6 +6950,7 @@ static void kms_page_flip_handler(int fd, unsigned int frame, unsigned int sec, 
 }
 
 static void kms_swap_buffers(void) {
+    glFinish();
     if (!eglSwapBuffers(g_kms.dpy, g_kms.surf)) {
         fprintf(stderr, "[luna-shell/kms] eglSwapBuffers failed (EGL 0x%x)\n",
                 eglGetError());
@@ -7769,7 +7802,7 @@ static void egl_swap_damage_init(void) {
     /* Always track per-element damage: even without the EGL extension it lets
      * us skip commits that would post an identical buffer (clock/CPU widgets
      * that did not actually change a pixel).  Partial swaps are a bonus. */
-    luna_set_damage_tracking(1);
+    luna_redraw_track_damage(1);
     fprintf(stderr, "[luna-shell/wl] partial-swap damage %s\n",
             g_egl_swap_damage ? "enabled" : "unavailable (identical-frame skip only)");
 }
@@ -7778,7 +7811,7 @@ static void egl_swap_damage_init(void) {
  * Returns what eglSwapBuffers would have returned. */
 static EGLBoolean surf_swap(LunaSurface* s) {
     float dx, dy, dw, dh;
-    int has_dmg = luna_render_damage(&dx, &dy, &dw, &dh);
+    int has_dmg = luna_redraw_damage_region(&dx, &dy, &dw, &dh);
     if (!s->full_damage && !has_dmg)
         return EGL_TRUE;   /* identical frame — skip the commit entirely */
 
@@ -8166,9 +8199,9 @@ static void wl_surf_render(LunaSurface* s, int surf_idx) {
      * dirty even though every element's paint hash is unchanged.  Skipping the
      * clear/draw/swap removes the periodic hitch those timers produced. */
     if (!s->full_damage &&
-        !luna_probe_damage(s->root_idx, surf_buffer_w(s), surf_buffer_h(s),
-                           s->doc_x, s->doc_y,
-                           (float)s->surf_w, (float)s->surf_h)) {
+        !luna_redraw_probe_region(s->root_idx, surf_buffer_w(s), surf_buffer_h(s),
+                                  s->doc_x, s->doc_y,
+                                  (float)s->surf_w, (float)s->surf_h)) {
         if (surf_idx >= 0 && surf_idx < LUNA_SURF_COUNT)
             g_surf_dirty &= ~(1u << surf_idx);
         return;
@@ -8203,6 +8236,11 @@ static void wl_surf_render(LunaSurface* s, int surf_idx) {
         /* bg: no root filter, full-document render */
         luna_render(fw, fh);
     }
+    /* llvmpipe / mesa_glthread can still be writing the color buffer when
+     * eglSwapBuffers returns.  The compositor CPU-mmaps that wl_shm on
+     * commit; without a finish the first frame is only glClear, and the
+     * dirty-probe then skips every later swap — black wallpaper, cursor. */
+    glFinish();
     if (!surf_swap(s)) {
         EGLint err = eglGetError();
         fprintf(stderr, "[luna-shell/wl] eglSwapBuffers failed for '%s' (EGL 0x%x)\n",
@@ -9003,6 +9041,9 @@ static void setup_wayland_egl_env(void) {
         setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
         setenv("GALLIUM_DRIVER", "llvmpipe", 0);
         setenv("LP_NUM_THREADS", "4", 0);
+        /* mesa_glthread can return from eglSwapBuffers before llvmpipe has
+         * written the wl_shm pixels.  The compositor then presents glClear. */
+        setenv("mesa_glthread", "false", 0);
     }
 }
 
@@ -9021,6 +9062,22 @@ int main(int argc, char** argv) {
         snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
     if (!g_layout_path && startup_skin > 0 && g_skins[startup_skin].layout[0])
         g_layout_path = g_skins[startup_skin].layout;
+    /* Built-in "luna" skin has no layout.html of its own.  An installed
+     * session still has PREFIX/share/luna-desktop/shell/luna-shell.html;
+     * falling back to the embedded copy used cwd-relative "ui/" for CSS
+     * and painted only glClear — black wallpaper, invisible menubar/dock. */
+    {
+        static char layout_buf[PATH_MAX];
+        static char css_buf[PATH_MAX];
+        if (!g_layout_path &&
+            xdg_find_data_file(layout_buf, sizeof(layout_buf),
+                               "luna-desktop/shell/luna-shell.html"))
+            g_layout_path = layout_buf;
+        if (!g_css_path &&
+            xdg_find_data_file(css_buf, sizeof(css_buf),
+                               "luna-desktop/shell/luna-shell.css"))
+            g_css_path = css_buf;
+    }
     apply_xkb_session_env();
     shell_paths_init();
     setup_wayland_egl_env();
@@ -9083,8 +9140,11 @@ int main(int argc, char** argv) {
         loaded = luna_load_html_file(g_layout_path);
     }
     if (!loaded) {
+        fprintf(stderr, "[luna-shell] using embedded layout (no luna-desktop/shell/luna-shell.html)\n");
         luna_set_html_base_dir("ui");
         luna_parse_html(default_html);
+    } else {
+        fprintf(stderr, "[luna-shell] layout %s\n", g_layout_path);
     }
     /* Authoring contract: layout.html may <link> ../_base/luna-shell.css and
      * style.css so a browser preview matches the running shell.  When those
@@ -9266,13 +9326,15 @@ int main(int argc, char** argv) {
             int surf_roots[LUNA_SURF_COUNT];
             for (int i = 0; i < LUNA_SURF_COUNT; i++)
                 surf_roots[i] = surf_is_live(&g_surfs[i]) ? g_surfs[i].root_idx : INT_MAX;
-            unsigned settle_mask = 0;
-            int settling = luna_update_settling_mask(g_now, dt, surf_roots,
-                                                      LUNA_SURF_COUNT, &settle_mask);
-            if (!interaction_busy && g_now - g_last_bg_anim_check >= 1.0) {
-                g_last_bg_anim_check = g_now;
-                g_bg_animated = luna_css_anim_running_under(g_surfs[LUNA_SURF_BG].root_idx);
-            }
+            unsigned redraw_flags[LUNA_SURF_COUNT];
+            (void)luna_needs_redraw_mask(g_now, dt, surf_roots,
+                                         LUNA_SURF_COUNT, redraw_flags);
+            int settling = 0;
+            for (int i = 0; i < LUNA_SURF_COUNT; i++)
+                if ((redraw_flags[i] & (LUNA_REDRAW_ANIM | LUNA_REDRAW_PAINT)) ==
+                    (LUNA_REDRAW_ANIM | LUNA_REDRAW_PAINT)) settling = 1;
+            g_bg_animated =
+                (redraw_flags[LUNA_SURF_BG] & LUNA_REDRAW_ANIM) != 0;
             wl_surfs_update();
             /* Wallpaper aurora/stars: only damage the bg layer when the
              * desktop is empty. Continuous full-screen commits under open
@@ -9289,7 +9351,7 @@ int main(int argc, char** argv) {
              * meant a full element scan (with a parent-chain walk per element)
              * a dozen times on every single frame, idle or not. */
             for (int i = 0; i < LUNA_SURF_COUNT; i++) {
-                if (settle_mask & (1u << i))
+                if (redraw_flags[i] & LUNA_REDRAW_PAINT)
                     shell_request_repaint(i);
             }
             for (int i = 0; i < LUNA_SURF_COUNT; i++) {
@@ -9304,11 +9366,11 @@ int main(int argc, char** argv) {
                           ? g_last_bg_paint + LUNA_WL_BG_FRAME_SEC
                           : 0.0);
         } else {
-            int settling = luna_update_settling(g_now, dt);
-            if (!interaction_busy && g_now - g_last_bg_anim_check >= 1.0) {
-                g_last_bg_anim_check = g_now;
-                g_bg_animated = luna_css_anim_running_under(-1);
-            }
+            int redraw_flags = luna_needs_redraw(g_now, dt);
+            int settling =
+                (redraw_flags & (LUNA_REDRAW_ANIM | LUNA_REDRAW_PAINT)) ==
+                (LUNA_REDRAW_ANIM | LUNA_REDRAW_PAINT);
+            g_bg_animated = (redraw_flags & LUNA_REDRAW_ANIM) != 0;
             /* The integrated update result is also the complete redraw decision
              * for the single KMS/X11 framebuffer. */
             /* Pointer/hover easing runs at vblank cadence, while an idle CSS
@@ -9323,7 +9385,7 @@ int main(int argc, char** argv) {
                 : 0.0;
             if (idle_frame_deadline > 0.0 && g_now >= idle_frame_deadline)
                 g_frame_dirty = 1;
-            if (g_frame_dirty || settling) {
+            if (g_frame_dirty || (redraw_flags & LUNA_REDRAW_PAINT)) {
                 glViewport(0, 0, fbw, fbh);
                 glClearColor(0.04f, 0.05f, 0.12f, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT);

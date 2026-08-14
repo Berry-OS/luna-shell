@@ -192,12 +192,24 @@ pub struct Server {
   /// promote the implicit grab to WmGrab::Move.
   csd_press: Option<(RawFd, u32, i32, i32, i32, i32)>,
   /// Fingerprint of the last composited scene: which surfaces were drawn, in
-  /// what order, at what position and size, plus the chrome that depends on
-  /// them.  When it repeats, only the pixels a client reported as damaged can
-  /// have changed, and the composite is clipped to those.  Buffer *identity*
-  /// is deliberately not part of it — clients legitimately ping-pong between
-  /// buffers every frame, and that is exactly the case worth optimising.
+  /// what order, at what size, plus the chrome that depends on them.  When it
+  /// repeats, only the pixels a client reported as damaged — or a toplevel that
+  /// merely *moved* — can have changed, and the composite is clipped to those.
+  /// Buffer *identity* is deliberately not part of it — clients legitimately
+  /// ping-pong between buffers every frame, and that is exactly the case worth
+  /// optimising.  Toplevel screen *positions* are deliberately not part of it
+  /// either: they are tracked as rectangles in `prev_toplevel_rects` so a drag
+  /// repaints the window's old and new box instead of the whole desktop.
   scene_sig: u64,
+  /// Painted extent (surface tree ∪ server-side chrome) of every toplevel in
+  /// the last software composite, sorted by `(fd, surface_id)`.  Diffing it
+  /// against the current frame turns a window move into a two-rect repaint.
+  prev_toplevel_rects: Vec<(RawFd, u32, Rect)>,
+  /// Scratch buffer for this frame's toplevel extents; kept to reuse the
+  /// allocation across frames.
+  cur_toplevel_rects: Vec<(RawFd, u32, Rect)>,
+  /// `LUNA_FRAME_TRACE=1`: log per-frame composite time and clip rectangle.
+  frame_trace: bool,
   /// False whenever `self.fb` no longer matches what is on screen (first
   /// frame, resize, direct/GPU scanout, VT switch), forcing a full composite.
   fb_valid: bool,
@@ -299,6 +311,12 @@ pub struct Server {
   /// 0 = dynamic gradient chrome, 1 = original solid traffic-light chrome,
   /// 2 = flat retro titlebar (Win95-style).
   wm_titlebar_style: i32,
+  /// Server-side decoration titlebar height, in pixels.  Single source of
+  /// truth for `draw_ssd_titlebar` / `hit_ssd` / maximize tiling insets and
+  /// for the client-side chrome height Luna apps draw: luna-shell writes the
+  /// same skin value here (`wm_config titlebar_height`) and into
+  /// `window-theme.conf`, so SSD and CSD bars line up.
+  wm_ssd_bar_h: i32,
   /// Optional SSD palette from the active skin (0 = use style defaults).
   wm_titlebar_active: u32,
   wm_titlebar_inactive: u32,
@@ -334,17 +352,21 @@ pub struct Server {
 
 /// Client-side decoration strip treated as a draggable titlebar when the
 /// client never issues xdg_toplevel.move (typical of GLFW SetWindowPos apps).
-/// Tall enough for luna-window native titlebars (~42px) without covering the
-/// usual content toolbar row beneath.
-const CSD_MOVE_STRIP_PX: i32 = 48;
+/// Only reached by toplevels that never negotiated xdg-decoration at all; it
+/// is derived from the skin titlebar height so it tracks the SSD bar.
+const CSD_MOVE_STRIP_EXTRA_PX: i32 = 20;
 const CSD_MOVE_THRESHOLD_PX: i32 = 8;
 /// Left/right chrome reserved for client titlebar buttons (traffic lights /
 /// close-min-max).  Outside these zones the compositor owns the drag so
 /// move/snap no longer depend on a luna_wm.start_move round-trip.
 const CSD_BUTTON_ZONE_PX: i32 = 96;
-/// Server-side decoration titlebar height.  Must stay in sync with
-/// `draw_ssd_titlebar` / `hit_ssd` / maximize tiling insets.
-const SSD_BAR_H: i32 = 28;
+/// Default server-side decoration titlebar height, overridden per skin by
+/// `wm_config titlebar_height`.  See `Server::wm_ssd_bar_h`.
+const SSD_BAR_H_DEFAULT: i32 = 28;
+/// The retro 3-D bevel and the glyph metrics in `draw_ssd_titlebar` assume a
+/// bar in this range; clamp whatever the skin asks for.
+const SSD_BAR_H_MIN: i32 = 20;
+const SSD_BAR_H_MAX: i32 = 64;
 
 /// Toplevel state the compositor needs while drawing, flattened out of
 /// `Role::XdgToplevel`.
@@ -384,6 +406,9 @@ impl Server {
       retained_gpu_surfaces: Vec::new(),
       csd_press: None,
       scene_sig: 0,
+      prev_toplevel_rects: Vec::new(),
+      cur_toplevel_rects: Vec::new(),
+      frame_trace: env_flag("LUNA_FRAME_TRACE"),
       fb_valid: false,
       frame_done: Vec::new(),
       buffer_release: Vec::new(),
@@ -452,6 +477,7 @@ impl Server {
       wm_top_edge_maximize: false,
       wm_titlebar_double_click: true,
       wm_titlebar_style: 0,
+      wm_ssd_bar_h: SSD_BAR_H_DEFAULT,
       wm_titlebar_active: 0,
       wm_titlebar_inactive: 0,
       wm_titlebar_frame: 0,
@@ -1942,6 +1968,19 @@ impl Server {
                       self.wm_titlebar_style = value.clamp(0, 2);
                       self.dirty = true;
                     }
+                    "titlebar_height" => {
+                      let h = value.clamp(SSD_BAR_H_MIN, SSD_BAR_H_MAX);
+                      if h != self.wm_ssd_bar_h {
+                        self.wm_ssd_bar_h = h;
+                        // A taller bar can push an SSD titlebar under the top
+                        // exclusive zone, so re-run clearance for every window.
+                        let targets: Vec<(RawFd, u32)> = self.window_stack.clone();
+                        for (fd, sid) in targets {
+                          self.ensure_ssd_titlebar_clearance(fd, sid);
+                        }
+                        self.dirty = true;
+                      }
+                    }
                     "prefer_ssd" => self.set_prefer_ssd(value != 0),
                     "super_shortcuts" => self.wm_super_shortcuts = value != 0,
                     _ => {}
@@ -2669,7 +2708,7 @@ impl Server {
     if gw <= CSD_BUTTON_ZONE_PX * 2 {
       return false;
     }
-    if px < gx || px >= gx + gw || py < gy || py >= gy + CSD_MOVE_STRIP_PX {
+    if px < gx || px >= gx + gw || py < gy || py >= gy + self.csd_move_strip_px() {
       return false;
     }
     let rel = px - gx;
@@ -2693,7 +2732,7 @@ impl Server {
     let Some((gx, gy, gw, _)) = self.surface_geometry(fd, surface_id) else {
       return false;
     };
-    px >= gx && px < gx + gw && py >= gy && py < gy + CSD_MOVE_STRIP_PX
+    px >= gx && px < gx + gw && py >= gy && py < gy + self.csd_move_strip_px()
   }
 
   fn begin_move_grab(&mut self, fd: RawFd, surface_id: u32, grab_px: i32, grab_py: i32) {
@@ -4816,11 +4855,19 @@ impl Server {
     Self::toplevel_decoration_mode_in(client, surface_id)
   }
 
+  /// Draggable strip at the top of a toplevel that never negotiated
+  /// xdg-decoration.  Derived from the skin titlebar height so the heuristic
+  /// tracks the SSD bar instead of being a second hardcoded guess.
+  #[inline]
+  fn csd_move_strip_px(&self) -> i32 {
+    self.wm_ssd_bar_h + CSD_MOVE_STRIP_EXTRA_PX
+  }
+
   /// Height of compositor SSD chrome currently drawn for this toplevel.
   #[inline]
   fn ssd_chrome_height(&self, fd: RawFd, surface_id: u32) -> i32 {
     if Self::uses_ssd(self.toplevel_decoration_mode(fd, surface_id)) {
-      SSD_BAR_H
+      self.wm_ssd_bar_h
     } else {
       0
     }
@@ -4831,7 +4878,7 @@ impl Server {
   #[inline]
   fn ssd_chrome_height_in(&self, client: &Client, surface_id: u32) -> i32 {
     if Self::uses_ssd(Self::toplevel_decoration_mode_in(client, surface_id)) {
-      SSD_BAR_H
+      self.wm_ssd_bar_h
     } else {
       0
     }
@@ -4847,7 +4894,7 @@ impl Server {
     let Some((_, oy, _, _)) = Self::surface_geometry_in(client, surface_id) else {
       return;
     };
-    let min_y = uy + SSD_BAR_H;
+    let min_y = uy + self.wm_ssd_bar_h;
     if oy >= min_y {
       return;
     }
@@ -4871,7 +4918,7 @@ impl Server {
   }
 
   fn draw_ssd_titlebar(&mut self, win_x: i32, win_y: i32, win_w: i32, focused: bool) {
-    let bar_y = win_y - SSD_BAR_H;
+    let bar_y = win_y - self.wm_ssd_bar_h;
     // Chrome is drawn through Framebuffer::put so a damage-limited composite
     // leaves the parts of the titlebar nobody touched exactly as they were.
     let clip = self.fb.clip();
@@ -4888,7 +4935,7 @@ impl Server {
         0xff2a_2a32
       };
       let bar_hi: u32 = if focused { 0xff4d_8fd8 } else { 0xff3a_3a46 };
-      for y in bar_y.max(0).max(clip.y0)..(bar_y + SSD_BAR_H).min(fh).min(clip.y1) {
+      for y in bar_y.max(0).max(clip.y0)..(bar_y + self.wm_ssd_bar_h).min(fh).min(clip.y1) {
         let row_c = if y == bar_y { bar_hi } else { bar_color };
         for x in win_x.max(0).max(clip.x0)..(win_x + win_w).min(fw).min(clip.x1) {
           self.fb.put(x, y, row_c);
@@ -4903,7 +4950,7 @@ impl Server {
           }
         }
       };
-      let cy = bar_y + SSD_BAR_H / 2;
+      let cy = bar_y + self.wm_ssd_bar_h / 2;
       draw_dot(&mut self.fb, win_x + 16, cy, 0xffe8_4a4a);
       draw_dot(&mut self.fb, win_x + 36, cy, 0xffe8_c04a);
       draw_dot(&mut self.fb, win_x + 56, cy, 0xff4a_c86a);
@@ -4921,11 +4968,11 @@ impl Server {
       };
       let hi = 0xffdf_dfdf;
       let lo = 0xff80_8080;
-      for y in bar_y.max(0).max(clip.y0)..(bar_y + SSD_BAR_H).min(fh).min(clip.y1) {
+      for y in bar_y.max(0).max(clip.y0)..(bar_y + self.wm_ssd_bar_h).min(fh).min(clip.y1) {
         for x in win_x.max(0).max(clip.x0)..(win_x + win_w).min(fw).min(clip.x1) {
           let c = if y == bar_y {
             hi
-          } else if y == bar_y + SSD_BAR_H - 1 {
+          } else if y == bar_y + self.wm_ssd_bar_h - 1 {
             lo
           } else {
             bar_color
@@ -4935,7 +4982,7 @@ impl Server {
       }
       // Square system-menu / minimize / maximize / close affordances (left,
       // matching hit_ssd targets used by the other titlebar styles).
-      let cy = bar_y + SSD_BAR_H / 2;
+      let cy = bar_y + self.wm_ssd_bar_h / 2;
       let draw_box = |fb: &mut Framebuffer, cx: i32, fill: u32, ink: u32| {
         for dy in -6i32..=6 {
           for dx in -6i32..=6 {
@@ -4987,19 +5034,19 @@ impl Server {
     };
     let x0 = win_x.max(0).max(clip.x0);
     let x1 = (win_x + win_w).min(fw).min(clip.x1);
-    for y in bar_y.max(0).max(clip.y0)..(bar_y + SSD_BAR_H).min(fh).min(clip.y1) {
+    for y in bar_y.max(0).max(clip.y0)..(bar_y + self.wm_ssd_bar_h).min(fh).min(clip.y1) {
       for x in x0..x1 {
         let t = (((x - win_x).max(0) as i64 * 255) / win_w.max(1) as i64) as u32;
         let mut color = mix_rgb(left, right, t.min(255));
         if y == bar_y { color = mix_rgb(color, 0xffff_ffff, if focused { 42 } else { 24 }); }
-        if y == bar_y + SSD_BAR_H - 1 { color = mix_rgb(color, 0xff00_0000, 48); }
+        if y == bar_y + self.wm_ssd_bar_h - 1 { color = mix_rgb(color, 0xff00_0000, 48); }
         self.fb.put(x, y, color);
       }
     }
 
     // Compact translucent controls; their hit targets intentionally remain
     // identical to the classic style.
-    let cy = bar_y + SSD_BAR_H / 2;
+    let cy = bar_y + self.wm_ssd_bar_h / 2;
     let draw_control = |fb: &mut Framebuffer, cx: i32, glyph: u8, danger: bool| {
       for dy in -6i32..=6 {
         for dx in -6i32..=6 {
@@ -5041,7 +5088,7 @@ impl Server {
     } else {
       0xff48_4b58
     };
-    let top = if ssd { win_y - SSD_BAR_H } else { win_y };
+    let top = if ssd { win_y - self.wm_ssd_bar_h } else { win_y };
     let left = win_x - FRAME;
     let right = win_x + win_w + FRAME;
     let bottom = win_y + win_h + FRAME;
@@ -5085,7 +5132,7 @@ impl Server {
       let Some((ox, oy, w, h)) = self.surface_geometry(fd, sid) else { continue };
       let ssd = Self::uses_ssd(self.toplevel_decoration_mode(fd, sid));
       if ssd {
-        let bar_y = oy - SSD_BAR_H;
+        let bar_y = oy - self.wm_ssd_bar_h;
         // Ignore the portion buried under the top exclusive zone; those clicks
         // belong to the menubar.  `ensure_ssd_titlebar_clearance` normally
         // keeps the whole bar below `uy`.
@@ -5116,7 +5163,7 @@ impl Server {
         continue;
       };
       if ssd {
-        let top = oy - SSD_BAR_H;
+        let top = oy - self.wm_ssd_bar_h;
         if px >= ox && px < ox + w && py >= top && py < oy + h {
           return None;
         }
@@ -5179,7 +5226,7 @@ impl Server {
       // so it still cannot steal clicks from the actual client contents.
       let Some((ox, oy, w, h)) = self.surface_geometry(fd, sid) else { continue };
       // SSD titlebar sits above the buffer — treat it as part of the window.
-      let top_extra = if ssd { SSD_BAR_H } else { 0 };
+      let top_extra = if ssd { self.wm_ssd_bar_h } else { 0 };
       let inner_l = ox;
       let inner_r = ox + w;
       let inner_t = oy - top_extra;
@@ -5260,6 +5307,26 @@ impl Server {
     }
   }
 
+  /// Effective decoration mode for a toplevel, given what its client asked for.
+  ///
+  /// `requested` is the client's own `set_mode` (0 = it called `unset_mode` or
+  /// never chose).  A skin that declares `prefer_ssd=1` wins outright: the
+  /// desktop's look is a property of the session, not of whichever application
+  /// happens to prefer drawing its own bar, and letting the client win is how a
+  /// window ends up with a compositor titlebar *and* its own.  With
+  /// `prefer_ssd=0` the client's request is honoured, which is right — an app
+  /// with tabs in its titlebar cannot delegate that to the compositor.
+  #[inline]
+  fn effective_decoration_mode(&self, requested: u32) -> u32 {
+    if self.wm_prefer_ssd {
+      2
+    } else if requested == 0 {
+      1
+    } else {
+      requested
+    }
+  }
+
   fn req_toplevel_decoration(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
       0 => {
@@ -5267,8 +5334,10 @@ impl Server {
       }
       1 => {
         // set_mode(mode) 1=client 2=server
-        let mode = args.get(0).map(|a| a.as_uint()).unwrap_or(1);
-        let mode = if mode == 2 { 2 } else { 1 };
+        let requested = args.get(0).map(|a| a.as_uint()).unwrap_or(1);
+        let requested = if requested == 2 { 2 } else { 1 };
+        // Remember the request, but configure with what the skin allows.
+        let mode = self.effective_decoration_mode(requested);
         let toplevel = match client.objects.get(&id) {
           Some(Object {
             role: Role::ToplevelDecoration { toplevel_id, .. },
@@ -5281,7 +5350,9 @@ impl Server {
           ..
         }) = client.objects.get_mut(&id)
         {
-          *m = mode;
+          // Store the *request*, not the effective mode: set_prefer_ssd needs
+          // it to restore the client's own choice when SSD is turned back off.
+          *m = requested;
         }
         if let Some(Object {
           role: Role::XdgToplevel {
@@ -5338,42 +5409,52 @@ impl Server {
     }
   }
 
-  /// Change the compositor decoration preference and renegotiate only the
-  /// toplevels whose client left the mode unset.  This is a settings event,
-  /// so the scan never touches the frame/input hot paths.
+  /// Change the compositor decoration preference and renegotiate every toplevel
+  /// that has an xdg-decoration object.
+  ///
+  /// This deliberately reconfigures clients that made an explicit `set_mode`
+  /// too.  Every luna-window.h application asks for client-side chrome, so
+  /// skipping them made `prefer_ssd=1` a no-op for exactly the windows the skin
+  /// was meant to restyle — and left them drawing their own titlebar under the
+  /// compositor's.  The client's request is remembered, so turning SSD back off
+  /// restores it rather than flattening everyone to CSD.
+  ///
+  /// This is a settings event, so the scan never touches the frame/input hot
+  /// paths.
   fn set_prefer_ssd(&mut self, prefer: bool) {
     if self.wm_prefer_ssd == prefer {
       return;
     }
     self.wm_prefer_ssd = prefer;
-    let effective = if prefer { 2 } else { 1 };
 
     for client in self.clients.values_mut() {
-      let explicit: HashSet<u32> = client.objects.values().filter_map(|obj| match obj.role {
-        Role::ToplevelDecoration { toplevel_id, mode } if mode != 0 => Some(toplevel_id),
-        _ => None,
-      }).collect();
-      for (&object_id, obj) in client.objects.iter_mut() {
-        if explicit.contains(&object_id) {
-          continue;
-        }
-        if let Role::XdgToplevel { decoration_mode, .. } = &mut obj.role {
-          *decoration_mode = effective;
-        }
-      }
-      let following: Vec<(u32, u32)> = client.objects.iter().filter_map(|(&decoration_id, obj)| {
-        match obj.role {
-          Role::ToplevelDecoration { toplevel_id, mode: 0 } => Some((decoration_id, toplevel_id)),
+      let decorated: Vec<(u32, u32, u32)> = client
+        .objects
+        .iter()
+        .filter_map(|(&decoration_id, obj)| match obj.role {
+          Role::ToplevelDecoration { toplevel_id, mode } => {
+            Some((decoration_id, toplevel_id, mode))
+          }
           _ => None,
-        }
-      }).collect();
-      if following.is_empty() {
+        })
+        .collect();
+      if decorated.is_empty() {
         continue;
       }
-      for (decoration_id, toplevel_id) in following {
+      for (decoration_id, toplevel_id, requested) in decorated {
+        let effective = if prefer {
+          2
+        } else if requested == 0 {
+          1
+        } else {
+          requested
+        };
         if let Some(Object {
           role: Role::XdgToplevel { decoration_mode, .. }, ..
         }) = client.objects.get_mut(&toplevel_id) {
+          if *decoration_mode == effective {
+            continue;
+          }
           *decoration_mode = effective;
         }
         client.send(decoration_id, 0, &[Arg::Uint(effective)]);
@@ -7005,12 +7086,15 @@ impl Server {
         if surface_id == 0 || !Self::surface_is_xdg_toplevel_in(client, surface_id) {
           return;
         }
-        // Match xdg_toplevel.move: serial proves the implicit grab.  If the
-        // button is already up, ignore — never start-then-end (that ate snap).
+        // Match xdg_toplevel.move exactly (opcode 5 above): the serial proves
+        // the implicit grab and is *not* cleared by the release, so requiring
+        // the button to still be down races with release events already queued
+        // in evdev.  That extra condition made frameless Luna clients — the
+        // only users of this request — see a dead titlebar under console input.
         if self.last_button_serial == 0 || self.last_button_code != 0x110 {
           return;
         }
-        if !self.last_button_pressed || !matches!(self.wm_grab, WmGrab::None) {
+        if !matches!(self.wm_grab, WmGrab::None) {
           return;
         }
         let fd = client.conn.fd;
@@ -7459,6 +7543,49 @@ impl Server {
     }
   }
 
+  /// Screen-space bounding box of everything `blit_surface_tree` would paint
+  /// for this tree.  Subsurface offsets may be negative (client shadows,
+  /// tooltips anchored above their parent), so this walks the tree rather than
+  /// reusing `surface_tree_size`, which only reports a width/height.
+  fn paint_extent_tree(
+    client: &Client,
+    subs: &[SubsurfacePlacement],
+    fd: RawFd,
+    sid: u32,
+    ox: i32,
+    oy: i32,
+    depth: u32,
+    out: &mut Rect,
+  ) {
+    if depth > 8 {
+      return;
+    }
+    if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&sid) {
+      if s.mapped {
+        if let Some(buf) = &s.current_buffer {
+          *out = out.union(&Rect::new(
+            ox,
+            oy,
+            ox.saturating_add(buf.width),
+            oy.saturating_add(buf.height),
+          ));
+        }
+      }
+    }
+    for &(_, _, _, child, x, y) in Self::subsurface_children(subs, fd, sid) {
+      Self::paint_extent_tree(
+        client,
+        subs,
+        fd,
+        child,
+        ox.saturating_add(x),
+        oy.saturating_add(y),
+        depth + 1,
+        out,
+      );
+    }
+  }
+
   /// Union the damage a surface tree reported, translated to screen space, and
   /// consume it.  Damage is always consumed, even for a full composite, so a
   /// stale rect can never leak into a later frame.
@@ -7600,6 +7727,11 @@ impl Server {
   }
 
   fn composite_and_present(&mut self) {
+    // `LUNA_FRAME_TRACE=1` prints one line per composited frame: how long the
+    // frame took and how much of the screen it had to redraw.  A drag that
+    // still reports `full` on every frame is doing whole-desktop work and will
+    // hitch; the damage-clipped path should report a box the size of the window.
+    let trace_at = self.frame_trace.then(std::time::Instant::now);
     let (w, h) = self.backend.size();
     if self.fb.width != w || self.fb.height != h {
       self.fb = Framebuffer::new(w, h);
@@ -7897,6 +8029,7 @@ impl Server {
       sig = Self::sig_mix(sig, occluder.map(|i| i as u64 + 1).unwrap_or(0));
       sig = Self::sig_mix(sig, ((w as u64) << 32) | h as u64);
       sig = Self::sig_mix(sig, self.wm_titlebar_style as u64);
+      sig = Self::sig_mix(sig, self.wm_ssd_bar_h as u64);
       for group in [&layers[0], &layers[1]] {
         for &(fd, sid, dx, dy) in group {
           if let Some(c) = self.clients.get(&fd) {
@@ -7904,22 +8037,46 @@ impl Server {
           }
         }
       }
+      // Toplevels contribute their *shape*, never their screen position: a
+      // plain move must not invalidate the whole frame.  `sig_surface_tree` is
+      // therefore given a (0,0) origin so only subsurface offsets — which are
+      // relative — reach the hash, and the window's box is tracked separately
+      // in `cur_toplevel_rects` below.
+      let mut cur_rects = std::mem::take(&mut self.cur_toplevel_rects);
+      cur_rects.clear();
       for &(fd, sid, dx, dy) in &toplevels[occluder.unwrap_or(0)..] {
+        let mut rect = Rect::EMPTY;
         if let Some(c) = self.clients.get(&fd) {
-          Self::sig_surface_tree(c, &subs, fd, sid, dx, dy, 0, &mut sig);
+          Self::sig_surface_tree(c, &subs, fd, sid, 0, 0, 0, &mut sig);
+          Self::paint_extent_tree(c, &subs, fd, sid, dx, dy, 0, &mut rect);
         }
         // Server-side chrome is not client pixels and carries no damage, so
         // everything it depends on has to live in the fingerprint.
-        sig = Self::sig_mix(sig, Self::uses_ssd(flags_of(&self.clients, fd, sid).decoration_mode) as u64);
-        sig = Self::sig_mix(
-          sig,
-          (self.focused_client_fd == fd && self.focused_surface_id == sid) as u64,
-        );
+        let tl = flags_of(&self.clients, fd, sid);
+        let ssd = Self::uses_ssd(tl.decoration_mode);
+        let focused = self.focused_client_fd == fd && self.focused_surface_id == sid;
+        sig = Self::sig_mix(sig, ssd as u64);
+        sig = Self::sig_mix(sig, focused as u64);
         if let Some((gx, gy, gw, gh)) = self.surface_geometry(fd, sid) {
-          sig = Self::sig_mix(sig, ((gx as u32) as u64) << 32 | (gy as u32) as u64);
-          sig = Self::sig_mix(sig, ((gw as u32) as u64) << 32 | (gh as u32) as u64);
+          // The geometry *inset* into the buffer changes what the chrome frames
+          // even when the window has not moved, so it stays in the hash; the
+          // absolute origin does not.
+          sig = Self::sig_mix(sig, (((gx - dx) as u32) as u64) << 32 | ((gy - dy) as u32) as u64);
+          sig = Self::sig_mix(sig, ((gw as u32) as u64) << 32 | ((gh as u32) as u64));
+          // `draw_window_frame` reaches 3 px outside the geometry box and
+          // `draw_ssd_titlebar` sits `wm_ssd_bar_h` above it; 4 px of slack keeps the
+          // tracked rect a superset of every pixel the chrome touches.
+          let maxed_or_full = tl.maximized || tl.fullscreen;
+          if ssd || (focused && !maxed_or_full) {
+            let top = if ssd { gy - self.wm_ssd_bar_h } else { gy };
+            rect = rect.union(&Rect::new(gx - 4, top - 4, gx + gw + 4, gy + gh + 4));
+          }
+        }
+        if !rect.is_empty() {
+          cur_rects.push((fd, sid, rect));
         }
       }
+      cur_rects.sort_unstable_by_key(|&(fd, sid, _)| (fd, sid));
       for group in [&layers[2], &popups, &layers[3]] {
         for &(fd, sid, dx, dy) in group {
           if let Some(c) = self.clients.get(&fd) {
@@ -7931,6 +8088,16 @@ impl Server {
       let full_rect = self.fb.full_rect();
       let reuse = self.fb_valid && self.last_present_software && self.scene_sig == sig;
       self.scene_sig = sig;
+
+      // A matching fingerprint with a different set of boxes means toplevels
+      // moved and nothing else.  Repainting each window's old and new box —
+      // instead of the desktop — is what keeps a drag at display cadence; the
+      // full-screen composite it replaces was the hitch during window moves.
+      let moved = if reuse {
+        moved_damage(&self.prev_toplevel_rects, &cur_rects)
+      } else {
+        Rect::EMPTY
+      };
 
       let mut clip = full_rect;
       if reuse {
@@ -7952,7 +8119,7 @@ impl Server {
         drain(self, &layers[2], &mut dmg);
         drain(self, &popups, &mut dmg);
         drain(self, &layers[3], &mut dmg);
-        clip = dmg.intersect(&full_rect);
+        clip = dmg.union(&moved).intersect(&full_rect);
       }
 
       // Clients often commit solely to receive a frame callback (or attach an
@@ -8045,6 +8212,22 @@ impl Server {
         self.backend.present_damage(&self.fb, clip.union(&old_cursor).union(&new_cursor));
         self.fb_valid = true;
       }
+      if let Some(t0) = trace_at {
+        eprintln!(
+          "[luna-frame] {:>6.2}ms clip={}x{}@{},{} {} {}",
+          t0.elapsed().as_secs_f64() * 1000.0,
+          (clip.x1 - clip.x0).max(0),
+          (clip.y1 - clip.y0).max(0),
+          clip.x0,
+          clip.y0,
+          if clip == full_rect { "full" } else { "partial" },
+          if moved.is_empty() { "" } else { "moved" },
+        );
+      }
+      // Swap rather than assign: the outgoing vector becomes next frame's
+      // scratch, so the drag path allocates nothing.
+      std::mem::swap(&mut self.prev_toplevel_rects, &mut cur_rects);
+      self.cur_toplevel_rects = cur_rects;
     }
     self.last_present_software = !direct_scanout && !gpu_scanout;
     if self.last_present_software {
@@ -8059,6 +8242,7 @@ impl Server {
       // Scanning out a client buffer or a GPU-composed one leaves `self.fb`
       // describing something other than what the display shows.
       self.fb_valid = false;
+      self.prev_toplevel_rects.clear();
       self.clear_all_damage();
     }
     // Hand every scratch buffer back so the next composite reuses its
@@ -8411,7 +8595,7 @@ impl Server {
         let ssd = Self::uses_ssd(Self::toplevel_decoration_mode_in(client, surf_id));
         if let Some((gx, gy, gw, _gh)) = Self::surface_geometry_in(client, surf_id) {
           if ssd {
-            let bar_y = gy - SSD_BAR_H;
+            let bar_y = gy - self.wm_ssd_bar_h;
             let hit_top = bar_y.max(uy);
             if px >= gx && px < gx + gw && py >= hit_top && py < gy {
               // SSD titlebar — compositor chrome, not a client surface.
@@ -9702,6 +9886,46 @@ fn detect_drm_device(backend_dev: Option<u64>) -> Option<u64> {
   None
 }
 
+/// Damage implied by comparing two frames' toplevel boxes, both sorted by
+/// `(fd, surface_id)`.  A window that moved contributes the box it vacated and
+/// the box it now occupies; one that appeared or disappeared contributes its
+/// single box.  Callers only reach this when the scene fingerprint matched, so
+/// a difference here means geometry and nothing else changed.
+fn moved_damage(prev: &[(RawFd, u32, Rect)], cur: &[(RawFd, u32, Rect)]) -> Rect {
+  let mut moved = Rect::EMPTY;
+  let (mut i, mut j) = (0usize, 0usize);
+  while i < prev.len() && j < cur.len() {
+    let (pf, ps, pr) = prev[i];
+    let (cf, cs, cr) = cur[j];
+    match (pf, ps).cmp(&(cf, cs)) {
+      std::cmp::Ordering::Equal => {
+        if pr != cr {
+          moved = moved.union(&pr).union(&cr);
+        }
+        i += 1;
+        j += 1;
+      }
+      // Present last frame, gone now: repaint what it vacated.
+      std::cmp::Ordering::Less => {
+        moved = moved.union(&pr);
+        i += 1;
+      }
+      // New this frame: repaint where it landed.
+      std::cmp::Ordering::Greater => {
+        moved = moved.union(&cr);
+        j += 1;
+      }
+    }
+  }
+  for &(_, _, r) in &prev[i..] {
+    moved = moved.union(&r);
+  }
+  for &(_, _, r) in &cur[j..] {
+    moved = moved.union(&r);
+  }
+  moved
+}
+
 fn env_flag(name: &str) -> bool {
   match std::env::var(name) {
     Ok(v) => !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"),
@@ -9731,6 +9955,49 @@ fn create_signal_fd() -> std::io::Result<RawFd> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn r(x0: i32, y0: i32, x1: i32, y1: i32) -> Rect {
+    Rect::new(x0, y0, x1, y1)
+  }
+
+  #[test]
+  fn an_unchanged_scene_reports_no_moved_damage() {
+    let frame = [(3, 10, r(100, 100, 400, 400)), (3, 20, r(0, 0, 50, 50))];
+    assert_eq!(moved_damage(&frame, &frame), Rect::EMPTY);
+  }
+
+  #[test]
+  fn a_dragged_window_reports_the_box_it_left_and_the_box_it_entered() {
+    let prev = [(3, 10, r(100, 100, 400, 400))];
+    let cur = [(3, 10, r(108, 104, 408, 404))];
+    // Union of old and new — a few pixels wider than the window, not the screen.
+    assert_eq!(moved_damage(&prev, &cur), r(100, 100, 408, 404));
+  }
+
+  #[test]
+  fn a_still_window_beside_a_dragged_one_contributes_nothing() {
+    let prev = [(3, 10, r(0, 0, 50, 50)), (7, 10, r(100, 100, 400, 400))];
+    let cur = [(3, 10, r(0, 0, 50, 50)), (7, 10, r(120, 100, 420, 400))];
+    assert_eq!(moved_damage(&prev, &cur), r(100, 100, 420, 400));
+  }
+
+  #[test]
+  fn an_appearing_or_vanishing_window_damages_its_own_box() {
+    let gone = [(3, 10, r(10, 10, 20, 20)), (3, 20, r(30, 30, 40, 40))];
+    let left = [(3, 20, r(30, 30, 40, 40))];
+    assert_eq!(moved_damage(&gone, &left), r(10, 10, 20, 20));
+    assert_eq!(moved_damage(&left, &gone), r(10, 10, 20, 20));
+  }
+
+  #[test]
+  fn trailing_entries_on_either_side_are_not_dropped() {
+    // The merge must drain both tails; a window appended after the last common
+    // id would otherwise move without being repainted.
+    let prev = [(3, 10, r(0, 0, 10, 10))];
+    let cur = [(3, 10, r(0, 0, 10, 10)), (9, 99, r(500, 500, 600, 600))];
+    assert_eq!(moved_damage(&prev, &cur), r(500, 500, 600, 600));
+    assert_eq!(moved_damage(&cur, &prev), r(500, 500, 600, 600));
+  }
 
   #[test]
   fn numlock_uses_the_standard_locked_mod2_mask() {

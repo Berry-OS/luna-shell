@@ -153,3 +153,869 @@ html, body { background: var(--w95-teal); color: var(--w95-ink); }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 1ms; transition-duration: 1ms; }
 }
+
+/* -------------------------------------------------------------------------
+ * Windows 95 fidelity pass
+ * Keeps Luna Shell IDs intact while replacing modern spacing, glass and
+ * rounded controls with the compact 1995 shell language.
+ * ------------------------------------------------------------------------- */
+
+:root {
+  --w95-button-face: #c0c0c0;
+  --w95-button-light: #ffffff;
+  --w95-button-highlight: #dfdfdf;
+  --w95-button-shadow: #808080;
+  --w95-button-dark: #000000;
+  --w95-selection: #000080;
+  --w95-desktop: #008080;
+  --w95-window: #ffffff;
+  --w95-disabled: #808080;
+  --w95-taskbar-height: 30px;
+}
+
+html,
+body,
+button,
+input,
+select,
+textarea {
+  font-family: "MS Sans Serif", "Microsoft Sans Serif", Tahoma, Geneva, sans-serif !important;
+  font-size: 11px !important;
+  font-smooth: never;
+  -webkit-font-smoothing: none;
+  text-rendering: geometricPrecision;
+}
+
+html,
+body {
+  overflow: hidden;
+  background: var(--w95-desktop) !important;
+  color: #000 !important;
+  cursor: default;
+}
+
+* {
+  border-radius: 0 !important;
+  transition: none !important;
+  animation: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-sizing: border-box;
+}
+
+.hidden { display: none !important; }
+
+#bg_layer,
+#wallpaper,
+#wallpaper.night,
+#wallpaper.ocean,
+#wallpaper.forest,
+#wallpaper.sunset {
+  background: var(--w95-desktop) !important;
+  filter: none !important;
+}
+
+#wp_aurora1,
+#wp_aurora2,
+#wp_moon,
+#wp_moon_halo,
+.star { display: none !important; }
+
+/* Desktop icons --------------------------------------------------------- */
+#w95_desktop_icons {
+  position: fixed;
+  z-index: 2;
+  top: 10px;
+  left: 8px;
+  bottom: calc(var(--w95-taskbar-height) + 8px);
+  width: 78px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.w95_desktop_icon {
+  width: 76px;
+  min-height: 70px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  color: #fff;
+  text-align: center;
+  line-height: 13px;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.w95_pixel_icon {
+  position: relative;
+  display: block;
+  width: 34px;
+  height: 34px;
+  image-rendering: pixelated;
+}
+
+.w95_icon_computer::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 27px;
+  height: 20px;
+  background: #c0c0c0;
+  border: 2px solid #000;
+  box-shadow: inset 2px 2px #fff, inset -2px -2px #808080;
+}
+.w95_icon_computer::after {
+  content: "";
+  position: absolute;
+  left: 7px;
+  top: 6px;
+  width: 17px;
+  height: 11px;
+  background: #000080;
+  border: 1px solid #808080;
+  box-shadow: 7px 18px 0 -5px #000, 7px 16px 0 -3px #c0c0c0;
+}
+
+.w95_icon_documents::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 8px;
+  width: 29px;
+  height: 22px;
+  background: #ffff00;
+  border: 2px solid #000;
+  box-shadow: inset 2px 2px #fff, inset -2px -2px #808000;
+}
+.w95_icon_documents::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 4px;
+  width: 14px;
+  height: 7px;
+  background: #ffff00;
+  border: 2px solid #000;
+  border-bottom: 0;
+}
+
+.w95_icon_network::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 3px;
+  width: 20px;
+  height: 15px;
+  background: #c0c0c0;
+  border: 2px solid #000;
+  box-shadow: inset 2px 2px #fff, 13px 12px 0 -2px #c0c0c0, 13px 12px 0 0 #000;
+}
+.w95_icon_network::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 7px;
+  width: 12px;
+  height: 7px;
+  background: #000080;
+  box-shadow: 13px 12px 0 #008080, 9px 23px 0 -4px #000;
+}
+
+.w95_icon_recycle::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 6px;
+  width: 20px;
+  height: 25px;
+  background: repeating-linear-gradient(90deg, #fff 0 3px, #c0c0c0 3px 6px);
+  border: 2px solid #000;
+  transform: skewY(-3deg);
+}
+.w95_icon_recycle::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 3px;
+  width: 24px;
+  height: 5px;
+  background: #c0c0c0;
+  border: 2px solid #000;
+}
+
+/* Taskbar --------------------------------------------------------------- */
+#menubar,
+#menubar.edge_bottom {
+  z-index: 10000 !important;
+  position: fixed !important;
+  left: 0 !important;
+  right: 0 !important;
+  top: auto !important;
+  bottom: 0 !important;
+  width: 100% !important;
+  height: var(--w95-taskbar-height) !important;
+  min-height: var(--w95-taskbar-height) !important;
+  padding: 2px !important;
+  display: flex !important;
+  align-items: stretch !important;
+  gap: 2px !important;
+  background: var(--w95-button-face) !important;
+  border: 0 !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  box-shadow: inset 0 1px var(--w95-button-highlight) !important;
+}
+
+#mb_left,
+#mb_center,
+#mb_right {
+  position: static !important;
+  top: auto !important;
+  bottom: auto !important;
+  height: 24px !important;
+  min-height: 24px !important;
+  display: flex !important;
+  align-items: stretch !important;
+}
+
+#mb_left { flex: 0 0 auto !important; }
+#mb_center { flex: 1 1 auto !important; min-width: 0 !important; }
+
+#mb_logo {
+  position: relative !important;
+  min-width: 58px !important;
+  width: 58px !important;
+  height: 24px !important;
+  padding: 2px 5px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 4px !important;
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+  font-weight: 700 !important;
+  line-height: 18px !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important;
+  border-bottom: 2px solid var(--w95-button-dark) !important;
+  box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight) !important;
+}
+
+#mb_logo:active,
+#mb_logo.active,
+#mb_logo[aria-expanded="true"] {
+  padding: 3px 4px 1px 6px !important;
+  border-top-color: var(--w95-button-dark) !important;
+  border-left-color: var(--w95-button-dark) !important;
+  border-right-color: var(--w95-button-light) !important;
+  border-bottom-color: var(--w95-button-light) !important;
+  box-shadow: inset 1px 1px var(--w95-button-shadow) !important;
+}
+
+#mb_logo_glyph {
+  flex: 0 0 auto;
+  width: 17px !important;
+  height: 16px !important;
+  font-size: 0 !important;
+  background:
+    linear-gradient(#f00000, #f00000) 1px 1px / 7px 6px no-repeat,
+    linear-gradient(#00a000, #00a000) 9px 1px / 7px 6px no-repeat,
+    linear-gradient(#0000d8, #0000d8) 1px 9px / 7px 6px no-repeat,
+    linear-gradient(#f0d000, #f0d000) 9px 9px / 7px 6px no-repeat !important;
+  transform: skewY(-7deg);
+}
+
+#mb_start_label { display: inline !important; color: #000 !important; }
+#mb_app { display: none !important; }
+
+#win_list {
+  width: 100% !important;
+  height: 24px !important;
+  display: flex !important;
+  align-items: stretch !important;
+  gap: 2px !important;
+  overflow: hidden !important;
+}
+
+.win_item {
+  flex: 0 1 160px !important;
+  min-width: 72px !important;
+  max-width: 180px !important;
+  height: 24px !important;
+  padding: 2px 7px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  overflow: hidden !important;
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important;
+  border-bottom: 2px solid var(--w95-button-dark) !important;
+  box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight) !important;
+}
+
+.win_item.active {
+  padding: 3px 6px 1px 8px !important;
+  background:
+    repeating-linear-gradient(135deg, #fff 0 1px, #c0c0c0 1px 2px) !important;
+  border-top-color: var(--w95-button-dark) !important;
+  border-left-color: var(--w95-button-dark) !important;
+  border-right-color: var(--w95-button-light) !important;
+  border-bottom-color: var(--w95-button-light) !important;
+  box-shadow: inset 1px 1px var(--w95-button-shadow) !important;
+  font-weight: 700 !important;
+}
+
+.win_item.minimized { color: #404040 !important; }
+.win_label {
+  display: block !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
+  text-overflow: ellipsis !important;
+  color: inherit !important;
+  line-height: 16px !important;
+}
+
+#mb_right {
+  flex: 0 0 auto !important;
+  margin-left: 0 !important;
+  padding: 1px 3px !important;
+  gap: 1px !important;
+  align-items: center !important;
+  background: var(--w95-button-face) !important;
+  border-top: 2px solid var(--w95-button-shadow) !important;
+  border-left: 2px solid var(--w95-button-shadow) !important;
+  border-right: 2px solid var(--w95-button-light) !important;
+  border-bottom: 2px solid var(--w95-button-light) !important;
+  box-shadow: inset 1px 1px var(--w95-button-dark), inset -1px -1px var(--w95-button-highlight) !important;
+}
+
+#tray_area {
+  display: flex !important;
+  align-items: center !important;
+  height: 18px !important;
+  gap: 0 !important;
+}
+
+.tray_item,
+.mb_status,
+#mb_clock {
+  height: 18px !important;
+  min-height: 18px !important;
+  padding: 0 3px !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: #000 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  line-height: 18px !important;
+  box-shadow: none !important;
+}
+
+.tray_item { width: 19px !important; padding: 0 !important; }
+.tray_glyph,
+.mb_status .luna_icon { color: #000 !important; font-size: 11px !important; }
+
+#mb_clip,
+#mb_cc,
+#mb_weather { display: none !important; }
+
+#mb_wifi,
+#mb_bat {
+  width: 20px !important;
+  min-width: 20px !important;
+  max-width: 20px !important;
+  padding: 0 !important;
+  font-size: 0 !important;
+  overflow: hidden !important;
+}
+#mb_wifi .luna_icon,
+#mb_bat .luna_icon { font-size: 11px !important; }
+
+#mb_clock {
+  min-width: 64px !important;
+  max-width: 88px !important;
+  padding: 0 3px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: clip !important;
+  font-size: 11px !important;
+}
+
+/* Menus ----------------------------------------------------------------- */
+.menu_panel {
+  position: fixed !important;
+  top: auto !important;
+  bottom: var(--w95-taskbar-height) !important;
+  min-width: 190px !important;
+  padding: 2px !important;
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important;
+  border-bottom: 2px solid var(--w95-button-dark) !important;
+  box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight), 2px 2px 0 rgba(0,0,0,.45) !important;
+  color-scheme: light;
+}
+
+.menu_section_label {
+  display: block !important;
+  min-height: 20px !important;
+  padding: 4px 6px !important;
+  color: #000 !important;
+  font-weight: 700 !important;
+}
+
+.menu_item {
+  min-height: 22px !important;
+  padding: 3px 6px !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  color: #000 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+.menu_item:hover,
+.menu_item:focus,
+.menu_item.selected {
+  background: var(--w95-selection) !important;
+  color: #fff !important;
+}
+.menu_item:hover .mi_label,
+.menu_item:hover .mi_sym,
+.menu_item:hover .mi_key,
+.menu_item:focus .mi_label,
+.menu_item:focus .mi_sym,
+.menu_item:focus .mi_key {
+  color: #fff !important;
+}
+.mi_sym {
+  flex: 0 0 22px !important;
+  width: 22px !important;
+  text-align: center !important;
+  color: #000 !important;
+}
+.mi_label { flex: 1 1 auto !important; color: #000 !important; }
+.mi_key { color: #404040 !important; }
+.menu_sep {
+  height: 2px !important;
+  margin: 3px 2px !important;
+  border-top: 1px solid var(--w95-button-shadow) !important;
+  border-bottom: 1px solid var(--w95-button-light) !important;
+  background: transparent !important;
+}
+
+#luna_menu {
+  left: 2px !important;
+  right: auto !important;
+  bottom: var(--w95-taskbar-height) !important;
+  width: 252px !important;
+  min-width: 252px !important;
+  padding: 2px 2px 2px 29px !important;
+}
+
+#luna_menu::before {
+  content: "Windows 95";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  bottom: 2px;
+  width: 25px;
+  padding: 6px 2px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  background: #808080;
+  color: #c0c0c0;
+  font-family: Arial, sans-serif !important;
+  font-size: 18px !important;
+  font-weight: 700;
+  line-height: 20px;
+  letter-spacing: -1px;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  text-shadow: 1px 1px #000;
+}
+
+#luna_menu > .menu_section_label { display: none !important; }
+#luna_menu .menu_item { min-height: 34px !important; padding: 4px 7px !important; }
+#luna_menu .mi_sym { font-size: 18px !important; flex-basis: 26px !important; width: 26px !important; }
+#luna_menu .mi_key { display: none !important; }
+
+#wifi_menu,
+#clip_menu,
+#control_center,
+#weather_menu,
+#win_menu { max-height: calc(100vh - 36px) !important; overflow: auto !important; }
+
+/* Remove modern desktop furniture -------------------------------------- */
+#dock,
+#dock.hidden,
+#widget_clock,
+#widget_stats,
+#widget_weather { display: none !important; }
+
+/* Classic dialogs and utility windows ---------------------------------- */
+.modal_backdrop {
+  background: transparent !important;
+  opacity: 1 !important;
+}
+
+.sheet_box,
+#settings_sheet.sheet_box,
+#about_box.about_box,
+#confirm_box.dialog_alert,
+#switcher_strip,
+#toast {
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important;
+  border-bottom: 2px solid var(--w95-button-dark) !important;
+  box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight), 3px 3px 0 rgba(0,0,0,.45) !important;
+}
+
+#settings_title {
+  position: relative !important;
+  height: 20px !important;
+  min-height: 20px !important;
+  margin: 2px !important;
+  padding: 2px 24px 2px 4px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  background: var(--w95-selection) !important;
+  color: #fff !important;
+  font-weight: 700 !important;
+  text-align: left !important;
+  border: 0 !important;
+}
+
+#settings_drag,
+#about_drag,
+#confirm_drag {
+  position: absolute !important;
+  left: 4px !important;
+  right: 4px !important;
+  top: 4px !important;
+  height: 18px !important;
+  background: var(--w95-selection) !important;
+  z-index: 2 !important;
+}
+
+#about_drag::after,
+#confirm_drag::after {
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  color: #fff;
+  font-weight: 700;
+  line-height: 14px;
+  pointer-events: none;
+}
+#about_drag::after { content: "About Luna OS"; }
+#confirm_drag::after { content: "Shut Down Windows"; }
+
+#about_box,
+#confirm_box { padding-top: 24px !important; }
+#about_content,
+#confirm_content { color: #000 !important; }
+
+.tl {
+  z-index: 5 !important;
+  position: absolute !important;
+  top: 6px !important;
+  width: 16px !important;
+  height: 14px !important;
+  background: var(--w95-button-face) !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important;
+  border-bottom: 2px solid var(--w95-button-dark) !important;
+  box-shadow: inset -1px -1px var(--w95-button-shadow) !important;
+}
+.tl::after {
+  content: "×";
+  position: absolute;
+  inset: -4px 0 0 0;
+  color: #000;
+  font-family: Arial, sans-serif !important;
+  font-size: 15px !important;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+}
+.tl_red { right: 6px !important; left: auto !important; }
+.tl_yellow,
+.tl_green { display: none !important; }
+
+#settings_body,
+#settings_sidebar,
+#settings_content,
+#settings_btns,
+#confirm_btns {
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+}
+
+#settings_sidebar {
+  border-right: 2px groove var(--w95-button-light) !important;
+}
+
+.panel_heading,
+.pref_section,
+.cc_section {
+  color: #000 !important;
+  font-weight: 700 !important;
+}
+
+.stab,
+.skin_card,
+.cur_card,
+.kb_card,
+.wm_pref,
+.wm_choice,
+.cc_cell,
+.wf_day {
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+}
+
+.stab:hover,
+.skin_card:hover,
+.cur_card:hover,
+.kb_card:hover,
+.wm_pref:hover,
+.wm_choice:hover {
+  background: var(--w95-button-highlight) !important;
+  color: #000 !important;
+}
+
+.stab.active,
+.skin_card.selected,
+.cur_card.selected,
+.kb_card.selected,
+.wm_choice.selected,
+.switcher_item.active,
+.switcher_item.selected {
+  background: var(--w95-selection) !important;
+  color: #fff !important;
+  border: 1px dotted #fff !important;
+  box-shadow: none !important;
+}
+
+.stab.active *,
+.skin_card.selected *,
+.cur_card.selected *,
+.kb_card.selected * { color: #fff !important; }
+
+.pref_input,
+.pref_input_full,
+#wifi_password,
+#weather_city_input,
+#lp_search,
+input[type="text"],
+input[type="password"] {
+  min-height: 21px !important;
+  padding: 2px 3px !important;
+  background: var(--w95-window) !important;
+  color: #000 !important;
+  border-top: 2px solid var(--w95-button-shadow) !important;
+  border-left: 2px solid var(--w95-button-shadow) !important;
+  border-right: 2px solid var(--w95-button-light) !important;
+  border-bottom: 2px solid var(--w95-button-light) !important;
+  box-shadow: inset 1px 1px var(--w95-button-dark) !important;
+  outline: none !important;
+}
+
+.dlg_btn,
+button,
+input[type="button"],
+input[type="submit"] {
+  min-width: 72px !important;
+  min-height: 23px !important;
+  padding: 3px 9px !important;
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important;
+  border-bottom: 2px solid var(--w95-button-dark) !important;
+  box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight) !important;
+  font-weight: 400 !important;
+}
+
+.dlg_btn.primary,
+.dlg_btn.danger { background: var(--w95-button-face) !important; color: #000 !important; }
+.dlg_btn:active,
+button:active {
+  padding: 4px 8px 2px 10px !important;
+  border-top-color: var(--w95-button-dark) !important;
+  border-left-color: var(--w95-button-dark) !important;
+  border-right-color: var(--w95-button-light) !important;
+  border-bottom-color: var(--w95-button-light) !important;
+  box-shadow: inset 1px 1px var(--w95-button-shadow) !important;
+}
+.dlg_btn:focus-visible,
+button:focus-visible,
+input:focus-visible,
+.skin_card:focus-visible {
+  outline: 1px dotted #000 !important;
+  outline-offset: -4px !important;
+}
+
+.cc_toggle,
+.wm_switch {
+  width: 34px !important;
+  height: 16px !important;
+  background: #fff !important;
+  border-top: 2px solid var(--w95-button-shadow) !important;
+  border-left: 2px solid var(--w95-button-shadow) !important;
+  border-right: 2px solid var(--w95-button-light) !important;
+  border-bottom: 2px solid var(--w95-button-light) !important;
+  box-shadow: inset 1px 1px #000 !important;
+}
+.cc_knob,
+.wm_switch_knob {
+  width: 12px !important;
+  height: 12px !important;
+  top: 0 !important;
+  left: 0 !important;
+  background: var(--w95-button-face) !important;
+  border-top: 1px solid #fff !important;
+  border-left: 1px solid #fff !important;
+  border-right: 1px solid #000 !important;
+  border-bottom: 1px solid #000 !important;
+}
+.cc_toggle.on .cc_knob,
+.wm_pref.on .wm_switch_knob { left: 18px !important; }
+
+.cc_track,
+.cc_bar,
+.st_bar {
+  background: #fff !important;
+  border-top: 2px solid var(--w95-button-shadow) !important;
+  border-left: 2px solid var(--w95-button-shadow) !important;
+  border-right: 2px solid var(--w95-button-light) !important;
+  border-bottom: 2px solid var(--w95-button-light) !important;
+  box-shadow: inset 1px 1px #000 !important;
+}
+.cc_fill,
+.cc_bar_fill,
+.st_fill { background: var(--w95-selection) !important; }
+
+/* Alt+Tab --------------------------------------------------------------- */
+#switcher {
+  background: transparent !important;
+}
+#switcher_strip {
+  padding: 8px !important;
+  gap: 4px !important;
+}
+.switcher_item {
+  padding: 6px !important;
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+  border: 1px solid transparent !important;
+}
+.sw_app,
+.sw_title { color: inherit !important; }
+
+/* Launchpad becomes a classic Programs window -------------------------- */
+#launchpad {
+  position: fixed !important;
+  z-index: 9000 !important;
+  left: 50% !important;
+  top: 50% !important;
+  width: min(520px, calc(100vw - 24px)) !important;
+  height: min(380px, calc(100vh - 58px)) !important;
+  transform: translate(-50%, -50%) !important;
+  padding: 30px 8px 8px !important;
+  background: var(--w95-button-face) !important;
+  color: #000 !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important;
+  border-bottom: 2px solid var(--w95-button-dark) !important;
+  box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight), 3px 3px 0 rgba(0,0,0,.45) !important;
+}
+#launchpad::before {
+  content: "Programs";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  top: 3px;
+  height: 20px;
+  padding: 3px 5px;
+  background: var(--w95-selection);
+  color: #fff;
+  font-weight: 700;
+}
+#lp_grid {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(86px, 1fr)) !important;
+  gap: 6px !important;
+  overflow: auto !important;
+  background: #fff !important;
+  border-top: 2px solid var(--w95-button-shadow) !important;
+  border-left: 2px solid var(--w95-button-shadow) !important;
+  border-right: 2px solid var(--w95-button-light) !important;
+  border-bottom: 2px solid var(--w95-button-light) !important;
+  box-shadow: inset 1px 1px #000 !important;
+}
+.lp_app {
+  padding: 6px !important;
+  color: #000 !important;
+  background: transparent !important;
+}
+.lp_app:hover { background: var(--w95-selection) !important; color: #fff !important; }
+.lp_label { color: inherit !important; }
+#lp_hint { color: #000 !important; }
+
+/* Toast ----------------------------------------------------------------- */
+#toast {
+  right: 8px !important;
+  bottom: calc(var(--w95-taskbar-height) + 8px) !important;
+  padding: 8px !important;
+}
+#toast_title,
+#toast_msg,
+#toast_close { color: #000 !important; }
+
+/* Classic selection and scrollbars ------------------------------------- */
+::selection { background: var(--w95-selection); color: #fff; }
+* { scrollbar-color: #c0c0c0 #dfdfdf; scrollbar-width: auto; }
+
+@media (max-width: 760px) {
+  #tray_area { display: none !important; }
+  #mb_wifi, #mb_bat { display: none !important; }
+  #mb_clock { min-width: 52px !important; max-width: 64px !important; }
+  .win_item { min-width: 54px !important; }
+  #w95_desktop_icons { transform: scale(.9); transform-origin: top left; }
+}
+
+/* Keep the draggable settings title bar readable above the base overlay. */
+#settings_drag::after {
+  content: "System Settings";
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  color: #fff;
+  font-weight: 700;
+  line-height: 14px;
+  pointer-events: none;
+}

@@ -1,0 +1,4 @@
+# luna-compositor opens evdev nodes directly (no logind TakeDevice).
+KERNEL=="event*", SUBSYSTEM=="input", GROUP="input", MODE="0660", TAG+="uaccess"
+KERNEL=="card[0-9]*", SUBSYSTEM=="drm", GROUP="video", MODE="0660", TAG+="uaccess"
+KERNEL=="renderD*", SUBSYSTEM=="drm", GROUP="render", MODE="0666"

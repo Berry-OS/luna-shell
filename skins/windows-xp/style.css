@@ -1,175 +1,1012 @@
-/* Hallmark · macrostructure: Catalogue · tone: playful-classic · anchor hue: blue
- * theme: Windows XP · enrichment: Tier A CSS wallpaper · chrome: shell-native
- * audience: general desktop users · use: live desktop skin switching
+/* Windows XP Luna skin for Luna Shell
+ * High-fidelity CSS-only recreation: Bliss-style wallpaper, Luna taskbar,
+ * two-column Start menu, classic controls, notification area and dialogs.
  */
-/* Hallmark · pre-emit critique: P4 H5 E4 S5 R4 V5 */
 
 :root {
+  --xp-blue-top: #3f8cf3;
   --xp-blue: #245edb;
-  --xp-blue-hi: #3c8cf3;
-  --xp-blue-lo: #1536a0;
+  --xp-blue-mid: #1f57d0;
+  --xp-blue-dark: #163c9f;
+  --xp-blue-edge: #0b2f8f;
+  --xp-blue-light: #6ca9ff;
+  --xp-green-top: #7dcc58;
   --xp-green: #3c9b26;
-  --xp-green-hi: #69bd45;
-  --xp-sky: #6fbbf0;
-  --xp-hill: #66ad3a;
-  --xp-hill-dark: #318132;
+  --xp-green-dark: #287514;
+  --xp-tray-top: #22a6f2;
+  --xp-tray: #0b8bd7;
+  --xp-tray-dark: #0876bd;
+  --xp-orange: #ff8b29;
   --xp-paper: #ece9d8;
-  --xp-paper-hi: #fffef5;
-  --xp-rule: #7f9db9;
-  --xp-ink: #10213b;
-  --xp-muted: #52657d;
+  --xp-paper-light: #fffef5;
+  --xp-paper-dark: #d4d0c8;
+  --xp-border: #7f9db9;
+  --xp-border-dark: #003c74;
+  --xp-ink: #000000;
+  --xp-muted: #555555;
   --xp-white: #ffffff;
-  --xp-shadow: #16356899;
-  --xp-clear: #00000000;
-  --xp-overlay: #ffffff24;
+  --xp-shadow: rgba(0, 24, 86, 0.42);
+  --xp-highlight: #316ac5;
+
   --color-accent: var(--xp-blue);
   --color-accent-ink: var(--xp-white);
   --color-paper: var(--xp-paper);
   --color-ink: var(--xp-ink);
   --color-muted: var(--xp-muted);
-  --color-focus: var(--xp-blue-lo);
+  --color-focus: #000080;
   --luna-accent: var(--xp-blue);
-  --luna-accent-2: var(--xp-blue-hi);
-  --luna-accent-dark: var(--xp-blue-lo);
-  --luna-gold: var(--xp-green-hi);
+  --luna-accent-2: var(--xp-blue-light);
+  --luna-accent-dark: var(--xp-blue-dark);
+  --luna-gold: var(--xp-orange);
   --luna-glass: var(--xp-paper);
-  --luna-glass-card: var(--xp-paper-hi);
-  --luna-glass-edge: var(--xp-rule);
+  --luna-glass-card: var(--xp-paper-light);
+  --luna-glass-edge: var(--xp-border);
   --luna-text: var(--xp-ink);
   --luna-text-dim: var(--xp-muted);
   --luna-text-muted: var(--xp-muted);
   --dialog-surface: var(--xp-paper);
   --dialog-footer: var(--xp-paper);
-  --dialog-divider: var(--xp-rule);
+  --dialog-divider: #aca899;
   --about-surface: var(--xp-paper);
-  --about-card: var(--xp-paper-hi);
-  --about-card-hover: var(--xp-white);
+  --about-card: var(--xp-white);
+  --about-card-hover: #f4f8ff;
   --about-icon: var(--xp-blue);
-  --about-border: var(--xp-rule);
+  --about-border: var(--xp-border);
   --radius-xl: 8px;
   --radius-lg: 6px;
-  --radius-md: 4px;
-  --radius-sm: 3px;
+  --radius-md: 3px;
+  --radius-sm: 2px;
 }
 
-html, body { background: var(--xp-sky); color: var(--xp-ink); }
+* {
+  box-sizing: border-box;
+  font-family: Tahoma, "MS Sans Serif", Arial, sans-serif !important;
+}
+
+html,
+body {
+  background: #69b7ef;
+  color: var(--xp-ink);
+  font-size: 11px;
+  overflow: hidden;
+}
+
+/* -------------------------------------------------------------------------
+   Bliss-style desktop wallpaper
+   ------------------------------------------------------------------------- */
+#bg_layer,
 #wallpaper,
+#wallpaper.night,
 #wallpaper.ocean,
 #wallpaper.forest,
 #wallpaper.sunset {
-  background: linear-gradient(165deg, var(--xp-sky) 0%, var(--xp-sky) 58%, var(--xp-hill) 59%, var(--xp-hill-dark) 100%);
+  position: fixed;
+  inset: 0 0 30px 0;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse 95% 42% at 19% 101%, #5fad35 0 49%, transparent 50%),
+    radial-gradient(ellipse 100% 48% at 78% 108%, #70ba42 0 50%, transparent 51%),
+    linear-gradient(180deg, #3c9de7 0%, #76c6f2 52%, #9edafa 67%, #55a832 68%, #3d8c28 100%);
 }
-#wp_aurora1 {
-  background: radial-gradient(ellipse at 82% 73%, var(--xp-green-hi), var(--xp-clear));
-  opacity: 0.82;
-  animation: none;
+
+#wallpaper::before,
+#wallpaper::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
 }
-#wp_aurora2 {
-  background: radial-gradient(ellipse at 30% 76%, var(--xp-hill), var(--xp-clear));
+
+#wallpaper::before {
+  width: 300px;
+  height: 82px;
+  left: 7%;
+  top: 10%;
   opacity: 0.9;
-  animation: none;
+  filter: blur(0.2px);
+  background:
+    radial-gradient(ellipse at 17% 62%, rgba(255,255,255,.93) 0 24%, transparent 25%),
+    radial-gradient(ellipse at 36% 48%, rgba(255,255,255,.95) 0 29%, transparent 30%),
+    radial-gradient(ellipse at 57% 58%, rgba(255,255,255,.92) 0 25%, transparent 26%),
+    radial-gradient(ellipse at 76% 69%, rgba(255,255,255,.86) 0 21%, transparent 22%);
 }
-#wp_moon, #wp_moon_halo, .star { display: none; }
 
-#menubar {
-  top: auto; bottom: 0; height: 34px;
-  padding: 0 5px;
-  background: linear-gradient(180deg, var(--xp-blue-hi), var(--xp-blue) 48%, var(--xp-blue-lo));
-  border: 0; border-top: 1px solid var(--xp-blue-hi);
-  border-radius: 0; box-shadow: 0 -2px 8px var(--xp-shadow);
+#wallpaper::after {
+  width: 210px;
+  height: 62px;
+  right: 8%;
+  top: 20%;
+  opacity: 0.76;
+  background:
+    radial-gradient(ellipse at 19% 64%, rgba(255,255,255,.9) 0 23%, transparent 24%),
+    radial-gradient(ellipse at 42% 49%, rgba(255,255,255,.92) 0 29%, transparent 30%),
+    radial-gradient(ellipse at 68% 66%, rgba(255,255,255,.88) 0 24%, transparent 25%);
 }
-#mb_left, #mb_center, #mb_right { height: 34px; }
+
+#wp_aurora1,
+#wp_aurora2 {
+  display: block !important;
+  position: absolute;
+  animation: none !important;
+  filter: none !important;
+}
+
+#wp_aurora1 {
+  z-index: 2;
+  left: -13%;
+  bottom: -31%;
+  width: 76%;
+  height: 77%;
+  opacity: 1;
+  border-radius: 50% 55% 0 0;
+  transform: rotate(-5deg);
+  background:
+    radial-gradient(ellipse at 56% 31%, rgba(154, 212, 96, .83) 0 22%, transparent 49%),
+    linear-gradient(155deg, #7ec34f 0%, #5eac3c 48%, #38862b 100%);
+  box-shadow: inset -28px 38px 65px rgba(255,255,255,.11);
+}
+
+#wp_aurora2 {
+  z-index: 1;
+  right: -18%;
+  bottom: -32%;
+  width: 90%;
+  height: 75%;
+  opacity: 1;
+  border-radius: 60% 50% 0 0;
+  transform: rotate(5deg);
+  background:
+    radial-gradient(ellipse at 42% 24%, rgba(173, 224, 107, .62) 0 18%, transparent 48%),
+    linear-gradient(205deg, #72bd44 0%, #55a438 50%, #2f7c26 100%);
+}
+
+#wp_moon,
+#wp_moon_halo,
+.star { display: none !important; }
+
+/* Decorative XP desktop icons. */
+#xp_desktop_icons {
+  position: fixed;
+  z-index: 5;
+  top: 12px;
+  left: 10px;
+  width: 88px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  user-select: none;
+}
+
+.xp_desktop_icon {
+  width: 78px;
+  min-height: 66px;
+  padding: 2px 3px;
+  text-align: center;
+  color: white;
+  text-shadow: 1px 1px 2px #143b74;
+  border: 1px solid transparent;
+}
+
+.xp_desktop_icon:hover,
+.xp_desktop_icon:focus-visible {
+  background: rgba(49,106,197,.42);
+  border-color: rgba(255,255,255,.55);
+}
+
+.xp_desktop_glyph {
+  position: relative;
+  display: block;
+  width: 34px;
+  height: 34px;
+  margin: 0 auto 3px;
+  border: 1px solid rgba(0,0,0,.35);
+  border-radius: 2px;
+  background: linear-gradient(145deg, #f5fbff 0 18%, #69b5f3 19% 60%, #164a9f 61% 100%);
+  box-shadow: inset 1px 1px rgba(255,255,255,.8), 1px 2px 2px rgba(0,0,0,.3);
+}
+
+.xp_desktop_glyph::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  bottom: -5px;
+  height: 5px;
+  background: #aeb7bd;
+  border: 1px solid #59646c;
+  border-top: 0;
+}
+
+.xp_icon_documents .xp_desktop_glyph {
+  background: linear-gradient(145deg, #fff 0 52%, #c9d9ea 53% 100%);
+}
+.xp_icon_documents .xp_desktop_glyph::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 7px;
+  width: 20px;
+  height: 3px;
+  background: #5c92cd;
+  box-shadow: 0 6px #5c92cd, 0 12px #5c92cd;
+}
+.xp_icon_documents .xp_desktop_glyph::after { display: none; }
+
+.xp_icon_network .xp_desktop_glyph {
+  border-radius: 50%;
+  background:
+    linear-gradient(90deg, transparent 45%, rgba(255,255,255,.8) 46% 54%, transparent 55%),
+    linear-gradient(0deg, transparent 45%, rgba(255,255,255,.8) 46% 54%, transparent 55%),
+    radial-gradient(circle, #78d7f4 0 36%, #2275bf 37% 66%, #0c397f 67% 100%);
+}
+.xp_icon_network .xp_desktop_glyph::after { display: none; }
+
+.xp_icon_bin .xp_desktop_glyph {
+  width: 28px;
+  border-radius: 2px 2px 5px 5px;
+  background: repeating-linear-gradient(90deg, #d9e5eb 0 4px, #9eb4bf 5px 7px);
+}
+.xp_icon_bin .xp_desktop_glyph::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: -5px;
+  width: 32px;
+  height: 5px;
+  background: #c7d5dc;
+  border: 1px solid #687b84;
+}
+.xp_icon_bin .xp_desktop_glyph::after { display: none; }
+
+.xp_desktop_label {
+  display: inline;
+  padding: 1px 2px;
+  line-height: 14px;
+}
+
+/* -------------------------------------------------------------------------
+   Windows XP taskbar
+   ------------------------------------------------------------------------- */
+#menubar,
+#menubar.edge_bottom {
+  position: fixed !important;
+  z-index: 1000;
+  top: auto !important;
+  right: 0;
+  bottom: 0 !important;
+  left: 0;
+  height: 30px !important;
+  min-height: 30px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-top: 1px solid #5fa2ff !important;
+  border-radius: 0 !important;
+  background:
+    linear-gradient(180deg, #3c8cf3 0, #2f7ee7 8%, #245edb 46%, #1b4fc7 82%, #1943aa 100%) !important;
+  box-shadow: 0 -1px 3px rgba(1,35,100,.45) !important;
+}
+
+#mb_left,
+#mb_center,
+#mb_right {
+  height: 30px !important;
+  min-height: 30px !important;
+  align-items: center !important;
+}
+
+#mb_left { flex: 0 0 auto; }
+#mb_center { min-width: 0; padding: 2px 3px 2px 5px; }
+#mb_right {
+  flex: 0 0 auto;
+  min-width: 140px;
+  padding: 0 5px 0 9px !important;
+  gap: 1px !important;
+  background: linear-gradient(180deg, var(--xp-tray-top), var(--xp-tray) 45%, var(--xp-tray-dark));
+  border-left: 1px solid #0b65b2;
+  box-shadow: inset 1px 0 rgba(111,211,255,.75);
+}
+
 #mb_logo {
-  width: 62px; height: 30px; border-radius: 0 15px 15px 0;
-  background: linear-gradient(180deg, var(--xp-green-hi), var(--xp-green));
-  border: 1px solid var(--xp-green-hi);
-  box-shadow: inset 0 1px var(--xp-overlay);
+  position: relative;
+  flex: 0 0 auto;
+  width: 100px !important;
+  min-width: 100px !important;
+  height: 30px !important;
+  margin: 0 !important;
+  padding: 0 15px 0 8px !important;
+  gap: 7px !important;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  cursor: default;
+  color: white !important;
+  border: 0 !important;
+  border-right: 1px solid #1f6d11 !important;
+  border-radius: 0 13px 13px 0 !important;
+  background:
+    radial-gradient(ellipse at 50% 0, rgba(255,255,255,.48) 0, transparent 50%),
+    linear-gradient(180deg, var(--xp-green-top), #48ae32 35%, var(--xp-green) 67%, var(--xp-green-dark)) !important;
+  box-shadow:
+    inset 0 1px rgba(255,255,255,.72),
+    inset 0 -1px rgba(16,78,8,.75),
+    1px 0 2px rgba(0,36,82,.35) !important;
 }
-#mb_logo_glyph { color: var(--xp-white); }
-#mb_app, .mb_app_name, .mb_item, .mb_status, .tray_glyph, .win_label { color: var(--xp-white); }
-.mb_item { border-radius: 2px; }
-.mb_item:hover, .tray_item:hover { background-color: var(--xp-overlay); color: var(--xp-white); }
+
+#mb_logo:hover {
+  filter: brightness(1.08);
+  background:
+    radial-gradient(ellipse at 50% 0, rgba(255,255,255,.58) 0, transparent 52%),
+    linear-gradient(180deg, #8cd96a, #55ba3b 40%, #42a42c 70%, #2b7d18) !important;
+}
+
+#mb_logo:active {
+  filter: brightness(.93);
+  padding-top: 1px !important;
+}
+
+#mb_logo_glyph {
+  display: block !important;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  color: transparent !important;
+  font-size: 0 !important;
+}
+
+.xp_flag {
+  position: relative;
+  display: block;
+  width: 20px;
+  height: 18px;
+  transform: skewY(-5deg);
+  filter: drop-shadow(1px 1px 0 rgba(0,0,0,.35));
+}
+
+.xp_flag i {
+  position: absolute;
+  width: 9px;
+  height: 8px;
+  border-radius: 1px;
+  box-shadow: inset 1px 1px rgba(255,255,255,.38);
+}
+.xp_flag i:nth-child(1) { left: 0; top: 0; background: #f35325; }
+.xp_flag i:nth-child(2) { right: 0; top: 0; background: #81bc06; }
+.xp_flag i:nth-child(3) { left: 0; bottom: 0; background: #05a6f0; }
+.xp_flag i:nth-child(4) { right: 0; bottom: 0; background: #ffba08; }
+
+.mb_start_label {
+  color: #fff !important;
+  font-family: Tahoma, Arial, sans-serif !important;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  font-style: italic !important;
+  letter-spacing: -.3px !important;
+  line-height: 30px;
+  text-shadow: 1px 1px 1px #1c6611;
+}
+
+#mb_app,
+.mb_app_name { display: none !important; }
+
+#win_list {
+  display: flex !important;
+  align-items: center !important;
+  height: 26px !important;
+  gap: 3px !important;
+}
+
 .win_item {
-  height: 26px; border-radius: 2px;
-  background-color: var(--xp-blue-hi); border: 1px solid var(--xp-blue-lo);
+  min-width: 112px;
+  max-width: 170px;
+  height: 25px !important;
+  padding: 0 8px !important;
+  display: flex !important;
+  align-items: center !important;
+  color: white !important;
+  border: 1px solid #133d9d !important;
+  border-top-color: #619bf0 !important;
+  border-left-color: #619bf0 !important;
+  border-radius: 2px !important;
+  background: linear-gradient(180deg, #3b83e4, #2b6bd7 48%, #2155bd) !important;
+  box-shadow: inset 1px 1px rgba(255,255,255,.18) !important;
 }
-.win_item.active { background: var(--xp-blue-lo); border-color: var(--xp-white); box-shadow: none; }
 
-.menu_panel {
-  top: auto; bottom: 38px;
-  background: var(--xp-paper); color: var(--xp-ink);
-  border: 1px solid var(--xp-blue-lo); border-radius: 2px;
-  box-shadow: 4px 5px 12px var(--xp-shadow); animation: none;
+.win_item:hover {
+  background: linear-gradient(180deg, #5598ee, #3679df 50%, #245cc7) !important;
 }
-.menu_item { border-radius: 0; }
-.menu_item:hover { background: var(--xp-blue); box-shadow: none; }
-.menu_section_label, .mi_label, .mi_sym, .mi_key { color: var(--xp-ink); }
-.menu_sep { background-color: var(--xp-rule); }
 
-#dock {
-  left: 72px; bottom: 37px; margin-left: 0;
-  width: 478px; height: 58px; padding: 5px 8px; gap: 5px;
-  background: var(--xp-paper); border: 1px solid var(--xp-rule);
-  border-radius: 3px; box-shadow: 3px 4px 10px var(--xp-shadow);
+.win_item.active {
+  background: linear-gradient(180deg, #1a48a5, #1f57bd 48%, #2866cf) !important;
+  border-color: #0b2b78 !important;
+  box-shadow: inset 1px 2px 3px rgba(0,22,80,.6) !important;
 }
-.dock_item { width: 46px; flex-basis: 46px; }
-.dock_icon { width: 42px; height: 42px; padding-top: 10px; border-radius: 5px; box-shadow: 1px 2px 4px var(--xp-shadow); }
-.dock_dot { background-color: var(--xp-green); box-shadow: none; }
-.dock_sep { background: var(--xp-rule); }
 
-.widget, #toast, #switcher_strip {
-  background: var(--xp-paper); color: var(--xp-ink);
-  border: 1px solid var(--xp-blue-lo); border-radius: 4px;
-  box-shadow: 3px 4px 10px var(--xp-shadow);
+.win_item.minimized { opacity: .72; }
+.win_label {
+  overflow: hidden;
+  color: white !important;
+  font-size: 11px !important;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-shadow: 1px 1px rgba(0,0,0,.28);
 }
-#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, #toast_msg, .sw_title, .sw_app { color: var(--xp-ink); }
 
-.sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
-  background: var(--xp-paper); color: var(--xp-ink);
-  border: 3px solid var(--xp-blue); border-radius: 6px 6px 2px 2px;
-  box-shadow: 5px 7px 18px var(--xp-shadow);
+#tray_area {
+  height: 29px !important;
+  gap: 0 !important;
+  align-items: center !important;
 }
+
+.tray_item,
+#mb_right .mb_item,
+#mb_right .mb_status {
+  min-width: 22px !important;
+  height: 26px !important;
+  padding: 0 4px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: white !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-size: 10px !important;
+}
+
+.tray_item:hover,
+#mb_right .mb_item:hover,
+#mb_right .mb_status:hover {
+  background: rgba(255,255,255,.13) !important;
+}
+
+.tray_glyph,
+#mb_right .luna_icon { color: white !important; font-size: 11px !important; }
+#mb_wifi { gap: 3px; }
+#mb_bat { gap: 3px; }
+#mb_weather { gap: 3px; }
+#mb_clock {
+  min-width: 52px !important;
+  padding: 0 4px 0 6px !important;
+  font-size: 11px !important;
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------------------
+   XP Start menu
+   ------------------------------------------------------------------------- */
+#luna_menu.menu_panel {
+  position: fixed !important;
+  z-index: 1100 !important;
+  left: 0 !important;
+  right: auto !important;
+  top: auto !important;
+  bottom: 30px !important;
+  width: 390px !important;
+  min-height: 360px;
+  padding: 0 !important;
+  overflow: hidden;
+  color: #111 !important;
+  border: 2px solid var(--xp-blue) !important;
+  border-bottom: 0 !important;
+  border-radius: 7px 7px 0 0 !important;
+  background: #fff !important;
+  box-shadow: 4px -3px 12px rgba(0,25,75,.55) !important;
+  animation: none !important;
+}
+
+#xp_start_header {
+  height: 64px;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: white;
+  background: linear-gradient(180deg, #73adf6 0, #2f73dd 18%, #2863cb 68%, #1550b8 100%);
+  border-bottom: 2px solid #ef9e35;
+  box-shadow: inset 0 1px rgba(255,255,255,.65);
+}
+
+#xp_user_picture {
+  width: 48px;
+  height: 48px;
+  border: 2px solid white;
+  border-radius: 4px;
+  position: relative;
+  background:
+    radial-gradient(circle at 50% 34%, #ffd3a1 0 17%, transparent 18%),
+    radial-gradient(ellipse at 50% 87%, #e7f0ff 0 35%, transparent 36%),
+    linear-gradient(145deg, #8ed4ff, #296bc0);
+  box-shadow: 1px 2px 3px rgba(0,0,0,.35);
+}
+
+#xp_user_name {
+  font-size: 14px;
+  font-weight: 700;
+  text-shadow: 1px 1px #163d89;
+}
+
+#xp_start_body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 248px;
+}
+
+#xp_start_left,
+#xp_start_right {
+  padding: 6px 5px;
+}
+
+#xp_start_left {
+  background: #fff;
+  border-right: 1px solid #9ab8df;
+}
+
+#xp_start_right {
+  background: #d8e8fa;
+  border-left: 1px solid #fff;
+}
+
+#luna_menu .menu_section_label {
+  display: block;
+  height: auto;
+  margin: 2px 4px 5px;
+  padding: 2px 4px 5px;
+  color: #6b6b6b !important;
+  font-weight: 700;
+  border-bottom: 1px solid #d8d8d8;
+}
+
+#luna_menu .menu_item {
+  min-height: 39px;
+  margin: 1px 0;
+  padding: 5px 6px !important;
+  gap: 8px;
+  display: flex;
+  align-items: center;
+  color: #111 !important;
+  border: 0 !important;
+  border-radius: 2px !important;
+  background: transparent !important;
+}
+
+#luna_menu .menu_item:hover {
+  color: white !important;
+  background: var(--xp-highlight) !important;
+}
+
+#luna_menu .menu_item:hover .mi_label,
+#luna_menu .menu_item:hover .mi_sym,
+#luna_menu .menu_item:hover .mi_key { color: white !important; }
+
+#luna_menu .mi_sym {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  color: #1b59ad !important;
+  font-size: 18px !important;
+  border: 1px solid rgba(43,92,151,.2);
+  border-radius: 4px;
+  background: linear-gradient(145deg, white, #bcd8f4);
+  box-shadow: inset 1px 1px white;
+}
+
+#luna_menu .mi_label {
+  flex: 1;
+  color: #111 !important;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+#luna_menu .mi_key {
+  color: #555 !important;
+  font-size: 10px;
+}
+
+#luna_menu .menu_sep {
+  height: 1px;
+  margin: 4px 7px;
+  background: #a9bfdc !important;
+  border-bottom: 1px solid white;
+}
+
+#xp_start_footer {
+  height: 47px;
+  padding: 7px 10px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  color: white;
+  background: linear-gradient(180deg, #3a7ce1, #1d5cc7 58%, #164aaf);
+  border-top: 1px solid #0c419c;
+}
+
+#xp_start_footer .menu_item {
+  min-height: 30px;
+  width: auto;
+  padding: 3px 7px !important;
+  color: white !important;
+  background: transparent !important;
+}
+#xp_start_footer .menu_item:hover { background: rgba(255,255,255,.16) !important; }
+#xp_start_footer .mi_sym {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  color: white !important;
+  background: linear-gradient(145deg, #f89b45, #cc3e18);
+  border: 1px solid #7b2a13;
+}
+#xp_start_footer .mi_label { color: white !important; font-weight: 400; }
+
+/* -------------------------------------------------------------------------
+   Popup menus and classic widgets
+   ------------------------------------------------------------------------- */
+.menu_panel:not(#luna_menu) {
+  top: auto !important;
+  bottom: 32px !important;
+  padding: 2px !important;
+  color: var(--xp-ink) !important;
+  border: 1px solid #777 !important;
+  border-radius: 0 !important;
+  background: var(--xp-paper) !important;
+  box-shadow: 2px 2px 5px rgba(0,0,0,.4) !important;
+  animation: none !important;
+}
+
+.menu_panel:not(#luna_menu) .menu_item {
+  min-height: 22px;
+  padding: 3px 18px 3px 5px !important;
+  color: black !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+}
+
+.menu_panel:not(#luna_menu) .menu_item:hover {
+  color: white !important;
+  background: var(--xp-highlight) !important;
+  box-shadow: none !important;
+}
+
+.menu_panel:not(#luna_menu) .menu_item:hover .mi_label,
+.menu_panel:not(#luna_menu) .menu_item:hover .mi_sym,
+.menu_panel:not(#luna_menu) .menu_item:hover .mi_key { color: white !important; }
+
+.menu_section_label,
+.mi_label,
+.mi_sym,
+.mi_key { color: var(--xp-ink) !important; }
+.menu_sep { background: #aca899 !important; }
+
+/* XP did not have desktop gadgets; hiding these makes the desktop read correctly. */
+#widget_clock,
+#widget_stats,
+#widget_weather,
+#dock,
+#dock.hidden { display: none !important; }
+
+#toast {
+  right: 8px !important;
+  bottom: 38px !important;
+  width: 285px !important;
+  min-height: 72px;
+  padding: 8px !important;
+  color: black !important;
+  border: 1px solid #003c74 !important;
+  border-radius: 0 !important;
+  background: #ffffe1 !important;
+  box-shadow: 2px 3px 7px rgba(0,0,0,.45) !important;
+}
+#toast::after {
+  content: "";
+  position: absolute;
+  right: 25px;
+  bottom: -8px;
+  width: 14px;
+  height: 14px;
+  transform: rotate(45deg);
+  background: #ffffe1;
+  border-right: 1px solid #003c74;
+  border-bottom: 1px solid #003c74;
+}
+#toast_title { color: #003399 !important; font-weight: 700; }
+#toast_msg { color: #111 !important; }
+#toast_close { color: #4a4a4a !important; }
+
+#switcher_strip {
+  padding: 8px !important;
+  color: black !important;
+  border: 2px solid var(--xp-blue) !important;
+  border-radius: 3px !important;
+  background: var(--xp-paper) !important;
+  box-shadow: 4px 5px 12px rgba(0,0,0,.45) !important;
+}
+.switcher_item { border-radius: 0 !important; }
+.switcher_item.active,
+.switcher_item:hover { background: var(--xp-highlight) !important; }
+.sw_title, .sw_app { color: black !important; }
+.switcher_item.active .sw_title,
+.switcher_item.active .sw_app { color: white !important; }
+
+/* -------------------------------------------------------------------------
+   XP-style dialogs and controls
+   ------------------------------------------------------------------------- */
+.modal_backdrop { background: transparent !important; backdrop-filter: none !important; }
+
+.sheet_box,
+#settings_sheet.sheet_box,
+#about_box.about_box,
+#confirm_box.dialog_alert {
+  color: black !important;
+  border: 3px solid var(--xp-blue) !important;
+  border-top-width: 0 !important;
+  border-radius: 7px 7px 1px 1px !important;
+  background: var(--xp-paper) !important;
+  box-shadow: 5px 7px 14px rgba(0,0,0,.48) !important;
+}
+
+#settings_title,
+#settings_drag,
+#about_drag,
+#confirm_drag {
+  height: 30px !important;
+  min-height: 30px !important;
+  border-radius: 6px 6px 0 0;
+  background:
+    radial-gradient(ellipse at 50% 0, rgba(255,255,255,.48), transparent 55%),
+    linear-gradient(180deg, #5ea0f7 0, #2d72da 18%, #245edb 55%, #1646ad 100%) !important;
+  border: 1px solid #0d3d9d !important;
+  box-shadow: inset 1px 1px rgba(255,255,255,.6) !important;
+}
+
 #settings_title {
-  background: linear-gradient(90deg, var(--xp-blue-lo), var(--xp-blue-hi));
-  color: var(--xp-white); text-align: left; padding-left: 88px;
-  border-bottom: 1px solid var(--xp-blue-lo);
+  padding: 0 86px 0 8px !important;
+  display: flex;
+  align-items: center;
+  color: white !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  text-align: left !important;
+  text-shadow: 1px 1px #0b337e;
 }
-#settings_sidebar, #settings_btns, #confirm_btns { background: var(--xp-paper); }
-.panel_heading { color: var(--xp-blue-lo); }
-.stab, .pref_label, .pref_hint, .pref_section, .wm_pref_name, .wm_pref_desc,
-.skin_name, .skin_desc, .cur_name, .cur_desc, .kb_name, .kb_desc { color: var(--xp-ink); }
-.stab:hover, .skin_card:hover, .cur_card:hover, .kb_card:hover, .wm_pref:hover { background-color: var(--xp-paper-hi); color: var(--xp-ink); }
-.stab.active, .skin_card.selected, .cur_card.selected, .kb_card.selected, .wm_choice.selected {
-  background: var(--xp-blue); color: var(--xp-white); border-color: var(--xp-blue-lo); box-shadow: none;
+
+#settings_sidebar,
+#settings_btns,
+#confirm_btns { background: var(--xp-paper) !important; }
+
+/* Replace traffic lights with Windows XP caption buttons. */
+.tl {
+  z-index: 20 !important;
+  top: 5px !important;
+  width: 21px !important;
+  height: 21px !important;
+  border: 1px solid white !important;
+  border-radius: 3px !important;
+  background: linear-gradient(145deg, #5da3fa, #2f6fda 60%, #1745a9) !important;
+  box-shadow: inset 1px 1px rgba(255,255,255,.55), 0 0 0 1px #0b348f !important;
 }
-.stab.active .stab_icon, .skin_card.selected .skin_name, .skin_card.selected .skin_desc { color: var(--xp-white); }
-.pref_input, .pref_input_full, #wifi_password {
-  background: var(--xp-white); color: var(--xp-ink); border-color: var(--xp-rule); border-radius: 1px;
+.tl::before,
+.tl::after {
+  content: "";
+  position: absolute;
+  display: block;
+  pointer-events: none;
 }
+.tl_red {
+  right: 5px !important;
+  left: auto !important;
+  background: linear-gradient(145deg, #ff9f82, #e34b2d 58%, #b52a18) !important;
+  box-shadow: inset 1px 1px rgba(255,255,255,.6), 0 0 0 1px #7b1c0f !important;
+}
+.tl_yellow { right: 55px !important; left: auto !important; }
+.tl_green { right: 30px !important; left: auto !important; }
+
+.tl_red::before,
+.tl_red::after {
+  left: 4px;
+  top: 9px;
+  width: 11px;
+  height: 2px;
+  background: white;
+  border-radius: 1px;
+}
+.tl_red::before { transform: rotate(45deg); }
+.tl_red::after { transform: rotate(-45deg); }
+
+.tl_yellow::before {
+  left: 4px;
+  top: 13px;
+  width: 11px;
+  height: 2px;
+  background: white;
+  box-shadow: 0 1px #17418e;
+}
+
+.tl_green::before {
+  left: 4px;
+  top: 4px;
+  width: 10px;
+  height: 9px;
+  border: 1px solid white;
+  box-shadow: 2px 2px 0 -1px #2c6cd2, 3px 3px 0 -1px white;
+}
+
+.panel_heading {
+  color: #003399 !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+}
+
+.stab,
+.pref_label,
+.pref_hint,
+.pref_section,
+.wm_pref_name,
+.wm_pref_desc,
+.skin_name,
+.skin_desc,
+.cur_name,
+.cur_desc,
+.kb_name,
+.kb_desc { color: #111 !important; }
+
+.stab,
+.skin_card,
+.cur_card,
+.kb_card,
+.wm_pref,
+.wm_choice {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+.stab:hover,
+.skin_card:hover,
+.cur_card:hover,
+.kb_card:hover,
+.wm_pref:hover { background: #f5f8fc !important; color: #111 !important; }
+
+.stab.active,
+.skin_card.selected,
+.cur_card.selected,
+.kb_card.selected,
+.wm_choice.selected {
+  color: white !important;
+  border-color: #003c74 !important;
+  background: var(--xp-highlight) !important;
+  box-shadow: none !important;
+}
+
+.stab.active .stab_icon,
+.skin_card.selected .skin_name,
+.skin_card.selected .skin_desc { color: white !important; }
+
+.pref_input,
+.pref_input_full,
+#wifi_password,
+#weather_city_input,
+#lp_search {
+  color: black !important;
+  border: 1px solid #7f9db9 !important;
+  border-radius: 0 !important;
+  background: white !important;
+  box-shadow: inset 1px 1px 2px rgba(0,0,0,.15) !important;
+}
+
 .dlg_btn {
-  background: var(--xp-paper); color: var(--xp-ink); border-color: var(--xp-rule);
-  border-radius: 2px; box-shadow: inset 1px 1px var(--xp-white);
+  min-width: 75px;
+  min-height: 23px;
+  padding: 2px 10px !important;
+  color: black !important;
+  border: 1px solid #003c74 !important;
+  border-radius: 3px !important;
+  background: linear-gradient(180deg, white 0 10%, #f7f7f2 45%, #e8e4d5 100%) !important;
+  box-shadow: inset 1px 1px white, inset -1px -1px #aca899 !important;
 }
-.dlg_btn.primary { background: var(--xp-blue); color: var(--xp-white); border-color: var(--xp-blue-lo); }
-.dlg_btn:hover { background: var(--xp-paper-hi); color: var(--xp-ink); }
-.dlg_btn.primary:hover { background: var(--xp-blue-hi); color: var(--xp-white); }
-.dlg_btn:focus-visible, .skin_card:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
+
+.dlg_btn:hover,
+.dlg_btn.primary:hover,
+.dlg_btn.danger:hover {
+  color: black !important;
+  background: linear-gradient(180deg, #fff 0 8%, #fff4d5 48%, #ead9aa 100%) !important;
+}
+
+.dlg_btn.primary,
+.dlg_btn.danger {
+  color: black !important;
+  border: 2px solid #003c74 !important;
+  background: linear-gradient(180deg, white 0 10%, #f7f7f2 45%, #e8e4d5 100%) !important;
+}
+
+.dlg_btn:focus-visible,
+.skin_card:focus-visible,
+.menu_item:focus-visible,
+.xp_desktop_icon:focus-visible {
+  outline: 1px dotted black !important;
+  outline-offset: -4px !important;
+}
+
+.cc_toggle,
+.wm_switch {
+  width: 15px !important;
+  height: 15px !important;
+  border: 1px solid #7f9db9 !important;
+  border-radius: 0 !important;
+  background: white !important;
+}
+.cc_knob,
+.wm_switch_knob { display: none !important; }
+.cc_toggle.on::after,
+.wm_pref.on .wm_switch::after {
+  content: "✓";
+  display: block;
+  color: #003399;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 13px;
+  text-align: center;
+}
+
+.cc_track,
+.st_bar,
+.cc_bar {
+  border: 1px solid #7f9db9 !important;
+  border-radius: 0 !important;
+  background: white !important;
+}
+.cc_fill,
+.st_fill,
+.cc_bar_fill {
+  border-radius: 0 !important;
+  background: repeating-linear-gradient(90deg, #2b63d7 0 5px, transparent 5px 7px) !important;
+}
+
+/* Launchpad becomes an XP-style Programs window rather than a glass overlay. */
+#launchpad {
+  background: var(--xp-paper) !important;
+  border: 3px solid var(--xp-blue) !important;
+  border-radius: 6px 6px 2px 2px !important;
+  box-shadow: 5px 7px 18px rgba(0,0,0,.48) !important;
+  backdrop-filter: none !important;
+}
+.lp_app { border-radius: 0 !important; }
+.lp_app:hover { background: var(--xp-highlight) !important; }
+.lp_label { color: black !important; }
+.lp_app:hover .lp_label { color: white !important; }
+
+/* About and confirmation copy. */
+#about_content,
+#confirm_content { color: black !important; }
+#about_title,
+#confirm_title { color: #003399 !important; }
+#about_ver,
+#confirm_msg,
+.spec_label,
+.spec_value { color: #111 !important; }
+.about_spec {
+  border-radius: 0 !important;
+  border-color: #aca899 !important;
+  background: white !important;
+}
+#about_icon {
+  border-radius: 0 !important;
+  color: white !important;
+  background: linear-gradient(145deg, #5ca2f4, #245edb) !important;
+}
+
+.hidden { display: none !important; }
+
+@media (max-width: 760px) {
+  #luna_menu.menu_panel { width: min(390px, 94vw) !important; }
+  #mb_wifi,
+  #mb_bat,
+  #mb_weather { display: none !important; }
+  .win_item { min-width: 72px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 1ms; transition-duration: 1ms; }
-}
-
-/* Taskbar chrome: Start button + hide the macOS-style dock (apps live in #win_list). */
-#mb_logo {
-  width: auto; min-width: 62px; padding: 0 12px 0 8px; gap: 6px;
-  display: flex; flex-direction: row; align-items: center;
-}
-.mb_start_label {
-  color: var(--xp-white); font-size: 13px; font-weight: 700;
-  font-style: italic; letter-spacing: 0.02em;
-}
-#mb_logo_glyph { color: var(--xp-white); font-size: 12px; }
-#dock, #dock.hidden { display: none !important; }
-#menubar.edge_bottom, #menubar {
-  top: auto; bottom: 0; height: 34px;
+  * { animation-duration: 1ms !important; transition-duration: 1ms !important; }
 }

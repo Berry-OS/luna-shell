@@ -227,7 +227,7 @@ pub struct DriBackend {
   saved_crtc: ModeCrtc,
   active: bool,
   master: bool,
-  vt: VtSession,
+  vt: Option<VtSession>,
   input: Option<EvdevInput>,
   /// `dev_t` of the render node (`/dev/dri/renderD*`) that belongs to the very
   /// card this backend drives, or `None` when the card exposes no usable render
@@ -381,18 +381,36 @@ impl DriBackend {
       }
     }
     let vt = match VtSession::open(tty) {
-      Ok(vt) => vt,
+      Ok(vt) => Some(vt),
       Err(e) => {
-        eprintln!("[luna-compositor] vt: failed to acquire {}: {}", tty.unwrap_or("/dev/tty"), e);
+        eprintln!(
+          "[luna-compositor] vt: {} ({}); continuing without VT control",
+          tty.unwrap_or("/dev/tty"),
+          e
+        );
+        None
+      }
+    };
+    let mut master = unsafe { ioctl(fd, io(0x1e)) } == 0;
+    if !master {
+      let err = std::io::Error::last_os_error();
+      if err.raw_os_error() == Some(libc::EBUSY) {
+        for _ in 0..20 {
+          std::thread::sleep(std::time::Duration::from_millis(100));
+          master = unsafe { ioctl(fd, io(0x1e)) } == 0;
+          if master {
+            break;
+          }
+        }
+      }
+      if !master {
+        eprintln!(
+          "[luna-compositor] dri: failed to acquire DRM master: {}",
+          std::io::Error::last_os_error()
+        );
         unsafe { libc::close(fd) };
         return None;
       }
-    };
-    let master = unsafe { ioctl(fd, io(0x1e)) } == 0;
-    if !master {
-      eprintln!("[luna-compositor] dri: failed to acquire DRM master: {}", std::io::Error::last_os_error());
-      unsafe { libc::close(fd) };
-      return None;
     }
     let input = if with_input {
       match EvdevInput::start() {
@@ -425,7 +443,7 @@ impl DriBackend {
     }
   }
 
-  unsafe fn setup(fd: i32, vt: VtSession, input: Option<EvdevInput>) -> Option<Self> {
+  unsafe fn setup(fd: i32, vt: Option<VtSession>, input: Option<EvdevInput>) -> Option<Self> {
     let mut res = ModeCardRes::default();
     if ioctl(fd, iowr::<ModeCardRes>(0xA0), &mut res) != 0 {
       return None;
@@ -811,7 +829,7 @@ impl Backend for DriBackend {
       }
     }
     self.active = false;
-    self.vt.release();
+    self.vt.as_ref().map(VtSession::release);
     eprintln!("[luna-compositor] VT released");
   }
 
@@ -819,7 +837,9 @@ impl Backend for DriBackend {
     if self.active {
       return;
     }
-    self.vt.acknowledge_acquire();
+    if let Some(vt) = &self.vt {
+      vt.acknowledge_acquire();
+    }
     unsafe {
       self.master = ioctl(self.fd, io(0x1e)) == 0;
       if self.master && self.set_luna_crtc() {
@@ -840,9 +860,11 @@ impl Backend for DriBackend {
     }
   }
 
-  fn switch_vt(&mut self, vt: u8) {
-    if let Err(e) = self.vt.switch_to(vt) {
-      eprintln!("[luna-compositor] VT_ACTIVATE({}) failed: {}", vt, e);
+  fn switch_vt(&mut self, vt_no: u8) {
+    if let Some(vt) = &self.vt {
+      if let Err(e) = vt.switch_to(vt_no) {
+        eprintln!("[luna-compositor] VT_ACTIVATE({}) failed: {}", vt_no, e);
+      }
     }
   }
 
@@ -1094,7 +1116,9 @@ impl Drop for DriBackend {
         ioctl(self.fd, io(0x1f));
         self.master = false;
       }
-      self.vt.restore();
+      if let Some(vt) = self.vt.as_mut() {
+        vt.restore();
+      }
       libc::close(self.fd);
     }
   }
