@@ -19,6 +19,10 @@
 #error "luna-shell requires IEEE floats; rebuild without -ffast-math (pass -fno-fast-math after %{optflags})"
 #endif
 
+/* Skins grew with Network/Bluetooth/Sound panels; toast sits at the end of
+ * layout.html and was the first thing dropped when this cap was 800.
+ * Launchpad XDG slots add ~150 nodes on top of the chrome DOM. */
+#define LUNA_UI_MAX_ELEMENTS 2000
 #define LUNA_UI_IMPLEMENTATION
 /* Custom KMS / Wayland / X11 host — do not pull in luna_linux.h (GLFW). */
 #define LUNA_UI_NO_PLATFORM
@@ -44,6 +48,11 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <poll.h>
+#include <spawn.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <net/if.h>
 #include <dlfcn.h>
 #include <strings.h>
 #include <sys/mman.h>
@@ -118,10 +127,20 @@
 #define MAX_TRAY_SLOTS 8
 #define MAX_SWITCHER_SLOTS 12
 #define MAX_WIFI_NETWORKS 8
+#define MAX_ETHERNET_LINKS 4
+#define MAX_BT_DEVICES 8
 
 #define LUNA_WIFI_MAX_NETWORKS MAX_WIFI_NETWORKS
 #define LUNA_WIFI_IMPLEMENTATION
 #include "luna-wifi.h"
+
+#define LUNA_ETHERNET_MAX_LINKS MAX_ETHERNET_LINKS
+#define LUNA_ETHERNET_IMPLEMENTATION
+#include "luna-ethernet.h"
+
+#define LUNA_BLUETOOTH_MAX_DEVICES MAX_BT_DEVICES
+#define LUNA_BLUETOOTH_IMPLEMENTATION
+#include "luna-bluetooth.h"
 
 #define LUNA_MONITOR_IMPLEMENTATION
 #include "luna-monitor.h"
@@ -545,16 +564,17 @@ typedef struct {
     const char* env;
     const char* default_cmd;
     char        cmd[256];
+    int         dock_visible;
     pid_t       pid;
 } LunaApp;
 
 static LunaApp g_apps[] = {
-    { .key = "files",    .name = "Files",     .env = "LUNA_APP_FILES",    .default_cmd = "pcmanfm"              },
-    { .key = "terminal", .name = "Terminal",  .env = "LUNA_APP_TERMINAL", .default_cmd = "sakura"               },
-    { .key = "browser",  .name = "Browser",   .env = "LUNA_APP_BROWSER",  .default_cmd = "firefox"              },
-    { .key = "editor",   .name = "Editor",    .env = "LUNA_APP_EDITOR",   .default_cmd = "gedit"                },
-    { .key = "music",    .name = "Music",     .env = "LUNA_APP_MUSIC",    .default_cmd = "aplay+ui"             },
-    { .key = "settings", .name = "Settings",  .env = "LUNA_APP_SETTINGS", .default_cmd = "gnome-control-center" },
+    { .key = "files",    .name = "Files",     .env = "LUNA_APP_FILES",    .default_cmd = "pcmanfm",              .dock_visible = 1 },
+    { .key = "terminal", .name = "Terminal",  .env = "LUNA_APP_TERMINAL", .default_cmd = "sakura",               .dock_visible = 1 },
+    { .key = "browser",  .name = "Browser",   .env = "LUNA_APP_BROWSER",  .default_cmd = "firefox",              .dock_visible = 1 },
+    { .key = "editor",   .name = "Editor",    .env = "LUNA_APP_EDITOR",   .default_cmd = "gedit",                .dock_visible = 1 },
+    { .key = "music",    .name = "Music",     .env = "LUNA_APP_MUSIC",    .default_cmd = "aplay+ui",             .dock_visible = 1 },
+    { .key = "settings", .name = "Settings",  .env = "LUNA_APP_SETTINGS", .default_cmd = "gnome-control-center", .dock_visible = 1 },
     { .key = "demo",     .name = "GTK Demo",  .env = "LUNA_APP_DEMO",     .default_cmd = "gtk4-demo"            },
     { .key = "hello",    .name = "Hello GTK", .env = "LUNA_APP_HELLO",    .default_cmd = "hello-gtk"            },
 };
@@ -564,7 +584,7 @@ static LunaApp g_apps[] = {
 
 typedef struct {
     char wallpaper[32]; /* "night" | "ocean" | "forest" | "sunset" */
-    char skin[64];      /* "luna" | discovered skin directory name */
+    char skin[64];      /* "default" | discovered skin directory name */
     char hostname[64];
     char cursor_theme[64]; /* "aero" | "miku" | custom theme dir name */
     char kb_layout[64];    /* XKB layout, e.g. "jp,us" | "us" | "de,us" */
@@ -577,9 +597,21 @@ typedef struct {
     int  classic_titlebar;
     int  super_shortcuts;
     int  dock_magnification;
+    int  wallpaper_animation; /* animate aurora/stars only while enabled */
     int  session_restore;
     int  wifi_enabled;     /* desired Wi-Fi radio state, persisted across boots */
+    int  bluetooth_enabled; /* desired Bluetooth radio state, persisted across boots */
     char weather_city[64]; /* Open-Meteo city name, default Tokyo */
+    char audio_backend[16]; /* "auto" | "wpctl" | "pactl" | "alsa" */
+    char alsa_card[32];     /* "" / "default" / card index ("0") */
+    char alsa_control[64];  /* simple mixer control, usually "Master" */
+    char brightness_backend[16]; /* "auto" | "sysfs" | "brightnessctl" | "xrandr" */
+    /* Toolkit scale for apps launched from Luna (see apply_toolkit_session_env).
+     * LUNA_GDK_* / LUNA_QT_* / LUNA_XCURSOR_SIZE still override when set. */
+    char gdk_scale[8];       /* integer buffer scale: "1" | "2" */
+    char gdk_dpi_scale[8];   /* fractional text scale: "1" | "1.25" | … */
+    char qt_scale_factor[8]; /* Qt scale, same values as gdk_dpi_scale */
+    char xcursor_size[8];    /* "24" | "32" | "48" */
 } LunaSettings;
 
 static LunaSettings g_settings;
@@ -616,7 +648,7 @@ static void init_app_cmds(void) {
 
 static void settings_defaults(void) {
     snprintf(g_settings.wallpaper, sizeof(g_settings.wallpaper), "night");
-    snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+    snprintf(g_settings.skin, sizeof(g_settings.skin), "default");
     snprintf(g_settings.hostname, sizeof(g_settings.hostname), "Luna Desktop");
     snprintf(g_settings.cursor_theme, sizeof(g_settings.cursor_theme), "aero");
     g_settings.window_gap = 8;
@@ -626,10 +658,20 @@ static void settings_defaults(void) {
     g_settings.classic_titlebar = 0;
     g_settings.super_shortcuts = 1;
     g_settings.dock_magnification = 1;
+    g_settings.wallpaper_animation = 1;
     g_settings.session_restore = 1;
     g_settings.wifi_enabled = 1;
+    g_settings.bluetooth_enabled = 1;
     g_settings.numlock_on = 1;
     snprintf(g_settings.weather_city, sizeof(g_settings.weather_city), "Tokyo");
+    snprintf(g_settings.audio_backend, sizeof(g_settings.audio_backend), "auto");
+    snprintf(g_settings.alsa_card, sizeof(g_settings.alsa_card), "default");
+    snprintf(g_settings.alsa_control, sizeof(g_settings.alsa_control), "Master");
+    snprintf(g_settings.brightness_backend, sizeof(g_settings.brightness_backend), "auto");
+    snprintf(g_settings.gdk_scale, sizeof(g_settings.gdk_scale), "1");
+    snprintf(g_settings.gdk_dpi_scale, sizeof(g_settings.gdk_dpi_scale), "1");
+    snprintf(g_settings.qt_scale_factor, sizeof(g_settings.qt_scale_factor), "1");
+    snprintf(g_settings.xcursor_size, sizeof(g_settings.xcursor_size), "24");
     {
         const char* lang = getenv("LC_ALL");
         if (!lang || !*lang) lang = getenv("LANG");
@@ -674,6 +716,10 @@ static void settings_load(void) {
             for (int i = 0; i < APP_COUNT; i++)
                 if (!strcmp(g_apps[i].key, key))
                     snprintf(g_apps[i].cmd, sizeof(g_apps[i].cmd), "%s", val);
+        } else if (!strcmp(section, "dock")) {
+            for (int i = 0; i < APP_COUNT; i++)
+                if (!strcmp(g_apps[i].key, key))
+                    g_apps[i].dock_visible = atoi(val) != 0;
         } else if (!strcmp(section, "shell")) {
             if (!strcmp(key, "wallpaper"))
                 snprintf(g_settings.wallpaper, sizeof(g_settings.wallpaper), "%s", val);
@@ -706,12 +752,32 @@ static void settings_load(void) {
                 g_settings.super_shortcuts = atoi(val) != 0;
             else if (!strcmp(key, "dock_magnification"))
                 g_settings.dock_magnification = atoi(val) != 0;
+            else if (!strcmp(key, "wallpaper_animation"))
+                g_settings.wallpaper_animation = atoi(val) != 0;
             else if (!strcmp(key, "session_restore"))
                 g_settings.session_restore = atoi(val) != 0;
             else if (!strcmp(key, "wifi_enabled"))
                 g_settings.wifi_enabled = atoi(val) != 0;
+            else if (!strcmp(key, "bluetooth_enabled"))
+                g_settings.bluetooth_enabled = atoi(val) != 0;
             else if (!strcmp(key, "weather_city"))
                 snprintf(g_settings.weather_city, sizeof(g_settings.weather_city), "%s", val);
+            else if (!strcmp(key, "audio_backend") && val[0])
+                snprintf(g_settings.audio_backend, sizeof(g_settings.audio_backend), "%s", val);
+            else if (!strcmp(key, "alsa_card") && val[0])
+                snprintf(g_settings.alsa_card, sizeof(g_settings.alsa_card), "%s", val);
+            else if (!strcmp(key, "alsa_control") && val[0])
+                snprintf(g_settings.alsa_control, sizeof(g_settings.alsa_control), "%s", val);
+            else if (!strcmp(key, "brightness_backend") && val[0])
+                snprintf(g_settings.brightness_backend, sizeof(g_settings.brightness_backend), "%s", val);
+            else if (!strcmp(key, "gdk_scale") && val[0])
+                snprintf(g_settings.gdk_scale, sizeof(g_settings.gdk_scale), "%s", val);
+            else if (!strcmp(key, "gdk_dpi_scale") && val[0])
+                snprintf(g_settings.gdk_dpi_scale, sizeof(g_settings.gdk_dpi_scale), "%s", val);
+            else if (!strcmp(key, "qt_scale_factor") && val[0])
+                snprintf(g_settings.qt_scale_factor, sizeof(g_settings.qt_scale_factor), "%s", val);
+            else if (!strcmp(key, "xcursor_size") && val[0])
+                snprintf(g_settings.xcursor_size, sizeof(g_settings.xcursor_size), "%s", val);
         }
     }
     fclose(f);
@@ -736,6 +802,9 @@ static void settings_save(void) {
     fprintf(f, "[apps]\n");
     for (int i = 0; i < APP_COUNT; i++)
         fprintf(f, "%s=%s\n", g_apps[i].key, g_apps[i].cmd);
+    fprintf(f, "\n[dock]\n");
+    for (int i = 0; i < APP_COUNT; i++)
+        fprintf(f, "%s=%d\n", g_apps[i].key, g_apps[i].dock_visible);
     fprintf(f, "\n[shell]\n");
     fprintf(f, "wallpaper=%s\n", g_settings.wallpaper);
     fprintf(f, "skin=%s\n", g_settings.skin);
@@ -751,23 +820,33 @@ static void settings_save(void) {
     fprintf(f, "classic_titlebar=%d\n", g_settings.classic_titlebar);
     fprintf(f, "super_shortcuts=%d\n", g_settings.super_shortcuts);
     fprintf(f, "dock_magnification=%d\n", g_settings.dock_magnification);
+    fprintf(f, "wallpaper_animation=%d\n", g_settings.wallpaper_animation);
     fprintf(f, "session_restore=%d\n", g_settings.session_restore);
     fprintf(f, "wifi_enabled=%d\n", g_settings.wifi_enabled);
+    fprintf(f, "bluetooth_enabled=%d\n", g_settings.bluetooth_enabled);
     fprintf(f, "weather_city=%s\n", g_settings.weather_city);
+    fprintf(f, "audio_backend=%s\n", g_settings.audio_backend);
+    fprintf(f, "alsa_card=%s\n", g_settings.alsa_card);
+    fprintf(f, "alsa_control=%s\n", g_settings.alsa_control);
+    fprintf(f, "brightness_backend=%s\n", g_settings.brightness_backend);
+    fprintf(f, "gdk_scale=%s\n", g_settings.gdk_scale);
+    fprintf(f, "gdk_dpi_scale=%s\n", g_settings.gdk_dpi_scale);
+    fprintf(f, "qt_scale_factor=%s\n", g_settings.qt_scale_factor);
+    fprintf(f, "xcursor_size=%s\n", g_settings.xcursor_size);
     fclose(f);
 }
 
 /* ── Desktop skins ────────────────────────────────────────────────────────
  * A skin is a directory containing skin.conf + style.css and, optionally,
  * layout.html.  layout.html is the authoring surface: open it in a browser
- * (with <link> to ../_base/luna-shell.css and style.css) to preview the look,
+ * (with <link> to ../default/style.css and style.css) to preview the look,
  * then run the same file as the shell layout — no export step.
  *
  * CSS is replaceable without rebuilding the shared DOM; a custom layout is
  * selected at startup (and when switching skins, if the HTML file is present)
  * and must retain the shell's documented element IDs so the native handlers
- * can bind to it.  Directories whose names start with '_' (e.g. _base) are
- * shared assets, not skins.
+ * can bind to it.  The default skin is also the shared visual base; directories
+ * whose names start with '_' remain reserved for non-skin assets.
  *
  * Chrome placement (menubar edge, dock visibility) is also declared in
  * skin.conf and applied live to the Wayland layer-shell surfaces — CSS alone
@@ -837,6 +916,9 @@ static int skin_join(char* out, size_t n, const char* dir, const char* leaf) {
 
 static int skin_find(const char* id) {
     if (!id || !*id) return 0;
+    /* Compatibility with settings written before the built-in skin moved to
+     * skins/default. */
+    if (!strcmp(id, "luna")) return 0;
     for (int i = 0; i < g_skin_count; i++)
         if (!strcmp(g_skins[i].id, id)) return i;
     return 0;
@@ -1060,7 +1142,7 @@ static void skin_discover(void) {
     memset(g_skins, 0, sizeof(g_skins));
     g_skin_count = 1;
     skin_chrome_defaults(&g_skins[0]);
-    snprintf(g_skins[0].id, sizeof(g_skins[0].id), "luna");
+    snprintf(g_skins[0].id, sizeof(g_skins[0].id), "default");
     snprintf(g_skins[0].name, sizeof(g_skins[0].name), "Luna Moonlight");
     snprintf(g_skins[0].description, sizeof(g_skins[0].description), "The built-in Luna desktop");
 
@@ -1138,11 +1220,13 @@ static int g_settings_panel_apps   = -1;
 static int g_settings_panel_disp   = -1;
 static int g_settings_panel_lang   = -1;
 static int g_settings_panel_kb     = -1;
+static int g_settings_panel_sound  = -1;
 static int g_settings_panel_wm     = -1;
 static int g_stab_apps_idx         = -1;
 static int g_stab_disp_idx         = -1;
 static int g_stab_lang_idx         = -1;
 static int g_stab_kb_idx           = -1;
+static int g_stab_sound_idx        = -1;
 static int g_stab_wm_idx           = -1;
 static int g_win_menu_idx  = -1;
 static int g_clip_menu_idx = -1;
@@ -1154,8 +1238,18 @@ static int g_mb_cc_idx    = -1;
 static int g_mb_wifi_idx  = -1;
 static int g_wifi_menu_idx = -1;
 static int g_wifi_selected = -1;
+static int g_bt_menu_idx = -1;
 static int g_mb_weather_idx = -1;
 static int g_weather_menu_idx = -1;
+static int g_calendar_menu_idx = -1;
+static int g_mb_clock_idx = -1;
+static int g_net_detail_idx = -1;
+static int g_net_detail_box_idx = -1;
+static int g_net_detail_kind = -1;  /* 0=wifi 1=ethernet */
+static int g_net_detail_index = -1;
+static int g_cal_year = 0;
+static int g_cal_month = 0; /* 0-11 */
+static int g_cal_selected_day = 0;
 
 /* ── Per-frame child element cache (populated once in bind_indices) ──
  * Eliminates O(n) element scans from update_window_list_ui,
@@ -1200,6 +1294,19 @@ static int g_ui_idx[UI_CACHE_COUNT];
 static int g_lp_app_idx[APP_COUNT];
 static int g_sw_slot_idx[MAX_SWITCHER_SLOTS];
 
+/* Extra Launchpad tiles filled from XDG .desktop application entries. */
+#define MAX_LP_XDG 48
+typedef struct {
+    char id[NAME_MAX + 1];
+    char name[256];
+    char path[PATH_MAX];
+} LunaLpXdgApp;
+static LunaLpXdgApp g_lp_xdg[MAX_LP_XDG];
+static int g_lp_xdg_count = 0;
+static int g_lp_xdg_idx[MAX_LP_XDG];
+static int g_lp_xdg_label_idx[MAX_LP_XDG];
+static int g_lp_xdg_ready = 0;
+
 typedef LunaWifiBackend WifiBackend;
 typedef LunaWifiNetwork WifiNetwork;
 #define WIFI_NONE    LUNA_WIFI_NONE
@@ -1214,6 +1321,36 @@ static int g_wifi_busy = 1;
 static char g_wifi_error[96];
 static unsigned long long g_wifi_generation = 0;
 static double g_last_wifi_request = -1e9;
+
+typedef LunaEthernetBackend EthernetBackend;
+typedef LunaEthernetLink EthernetLink;
+#define ETH_NONE    LUNA_ETHERNET_NONE
+#define ETH_CONNMAN LUNA_ETHERNET_CONNMAN
+#define ETH_NMCLI   LUNA_ETHERNET_NMCLI
+static EthernetBackend g_eth_backend = ETH_NONE;
+static EthernetLink g_eth_links[MAX_ETHERNET_LINKS];
+static int g_eth_count = 0;
+static int g_eth_powered = 1;
+static int g_eth_service_available = 0;
+static int g_eth_busy = 1;
+static char g_eth_error[96];
+static unsigned long long g_eth_generation = 0;
+static double g_last_eth_request = -1e9;
+
+typedef LunaBluetoothBackend BluetoothBackend;
+typedef LunaBluetoothDevice BluetoothDevice;
+#define BT_NONE    LUNA_BLUETOOTH_NONE
+#define BT_BLUEZ   LUNA_BLUETOOTH_BLUEZ
+#define BT_CONNMAN LUNA_BLUETOOTH_CONNMAN
+static BluetoothBackend g_bt_backend = BT_NONE;
+static BluetoothDevice g_bt_devices[MAX_BT_DEVICES];
+static int g_bt_count = 0;
+static int g_bt_powered = 0;
+static int g_bt_service_available = 0;
+static int g_bt_busy = 1;
+static char g_bt_error[96];
+static unsigned long long g_bt_generation = 0;
+static double g_last_bt_request = -1e9;
 
 /* ── Weather widget snapshot (network work lives in luna-weather.h) ── */
 #define WEATHER_REFRESH_SEC 1800.0
@@ -1274,16 +1411,9 @@ static int           g_tray_slot_idx[MAX_TRAY_SLOTS];  /* element index for tray
 static uint64_t      g_win_slot_id[MAX_WIN_SLOTS];    /* compositor window handle shown in slot */
 static char          g_tray_slot_key[MAX_TRAY_SLOTS][64];
 
-/* ── Dock magnification (macOS-style fisheye) ──
- * Cached at bind time: element indices of every .dock_icon square. Each frame
- * dock_magnify_tick() sets their transform_scale from the cursor's horizontal
- * distance so the hovered icon grows and its neighbours taper off, exactly
- * like the macOS Dock. The Luna UI engine already eases cur_scale toward
- * transform_scale, so the motion comes out smooth for free. */
-#define MAX_DOCK_ICONS 16
-static int g_dock_icon_idx[MAX_DOCK_ICONS];
-static int g_dock_icon_count = 0;
-static int g_dock_root_idx = -1;
+/* Dock magnification is CSS-only (#dock.dock_animated).  The shell never
+ * interpolates icon transforms per frame — that work belongs in the stylesheet. */
+
 static int g_about_sheet_max = 0;
 static int g_settings_sheet_max = 0;
 
@@ -2248,6 +2378,29 @@ static void wire_subtree(int root, LunaEventHandler fn) {
 }
 
 static void wifi_update_ui(void);
+static void eth_update_ui(void);
+static void bt_update_ui(void);
+static void network_update_ui(void);
+static void center_element(int idx);
+static void dismiss_popovers(void);
+static void dismiss_luna_menu(int trap_idx);
+static void dismiss_cc(int trap_idx);
+static void dismiss_win_menu(void);
+static void dismiss_clip_menu(void);
+static void dismiss_wifi_menu(void);
+static void dismiss_bt_menu(void);
+static void dismiss_weather_menu(void);
+static void dismiss_calendar_menu(void);
+static void on_launch_app(LunaElement* e);
+static int  wifi_row_number(LunaElement* e);
+static int  eth_row_number(LunaElement* e);
+static void net_tip_update(void);
+static void net_detail_open(int is_eth, int index);
+static void net_detail_close(LunaElement* e);
+static void position_menu_near(int menu_idx, int anchor_idx, float fallback_x);
+static int  menu_anchor_from(LunaElement* e, int fallback_idx);
+static void position_menu_near(int menu_idx, int anchor_idx, float fallback_x);
+static int  menu_anchor_from(LunaElement* e, int fallback_idx);
 
 /* Wi-Fi backend operations are compiled into luna-shell through luna-wifi.h.
  * The module owns one worker thread; this render/UI thread only queues work and
@@ -2279,6 +2432,52 @@ static int wifi_request_powered(int powered) {
     return ok;
 }
 
+static void eth_refresh(void) {
+    if (luna_ethernet_request_refresh()) {
+        g_eth_service_available = 1;
+        g_eth_busy = 1;
+        g_last_eth_request = g_now;
+    }
+}
+
+static int eth_request_connect(const char* id) {
+    int ok = luna_ethernet_request_connect(id);
+    if (ok) { g_eth_busy = 1; g_last_eth_request = g_now; }
+    return ok;
+}
+
+static int eth_request_disconnect(const char* id) {
+    int ok = luna_ethernet_request_disconnect(id);
+    if (ok) { g_eth_busy = 1; g_last_eth_request = g_now; }
+    return ok;
+}
+
+static void bt_refresh(void) {
+    if (luna_bluetooth_request_refresh()) {
+        g_bt_service_available = 1;
+        g_bt_busy = 1;
+        g_last_bt_request = g_now;
+    }
+}
+
+static int bt_request_powered(int powered) {
+    int ok = luna_bluetooth_request_set_powered(powered != 0);
+    if (ok) { g_bt_busy = 1; g_last_bt_request = g_now; }
+    return ok;
+}
+
+static int bt_request_connect(const char* id) {
+    int ok = luna_bluetooth_request_connect(id);
+    if (ok) { g_bt_busy = 1; g_last_bt_request = g_now; }
+    return ok;
+}
+
+static int bt_request_disconnect(const char* id) {
+    int ok = luna_bluetooth_request_disconnect(id);
+    if (ok) { g_bt_busy = 1; g_last_bt_request = g_now; }
+    return ok;
+}
+
 static void wifi_consume_snapshot(void) {
     LunaWifiSnapshot snapshot;
     if (!luna_wifi_consume(&snapshot, &g_wifi_generation)) return;
@@ -2295,16 +2494,69 @@ static void wifi_consume_snapshot(void) {
     g_wifi_service_available = snapshot.available;
     g_wifi_busy = snapshot.busy;
     snprintf(g_wifi_error, sizeof(g_wifi_error), "%s", snapshot.error);
-    if (is_shown(g_wifi_menu_idx)) wifi_update_ui();
+    if (is_shown(g_wifi_menu_idx)) network_update_ui();
+}
+
+static void eth_consume_snapshot(void) {
+    LunaEthernetSnapshot snapshot;
+    if (!luna_ethernet_consume(&snapshot, &g_eth_generation)) return;
+    g_eth_backend = snapshot.backend;
+    g_eth_count = snapshot.count;
+    if (g_eth_count < 0) g_eth_count = 0;
+    if (g_eth_count > MAX_ETHERNET_LINKS) g_eth_count = MAX_ETHERNET_LINKS;
+    memcpy(g_eth_links, snapshot.links,
+           (size_t)g_eth_count * sizeof(g_eth_links[0]));
+    if (g_eth_count < MAX_ETHERNET_LINKS)
+        memset(g_eth_links + g_eth_count, 0,
+               (size_t)(MAX_ETHERNET_LINKS - g_eth_count) * sizeof(g_eth_links[0]));
+    g_eth_powered = snapshot.powered;
+    g_eth_service_available = snapshot.available;
+    g_eth_busy = snapshot.busy;
+    snprintf(g_eth_error, sizeof(g_eth_error), "%s", snapshot.error);
+    if (is_shown(g_wifi_menu_idx)) network_update_ui();
+}
+
+static void bt_consume_snapshot(void) {
+    LunaBluetoothSnapshot snapshot;
+    if (!luna_bluetooth_consume(&snapshot, &g_bt_generation)) return;
+    g_bt_backend = snapshot.backend;
+    g_bt_count = snapshot.count;
+    if (g_bt_count < 0) g_bt_count = 0;
+    if (g_bt_count > MAX_BT_DEVICES) g_bt_count = MAX_BT_DEVICES;
+    memcpy(g_bt_devices, snapshot.devices,
+           (size_t)g_bt_count * sizeof(g_bt_devices[0]));
+    if (g_bt_count < MAX_BT_DEVICES)
+        memset(g_bt_devices + g_bt_count, 0,
+               (size_t)(MAX_BT_DEVICES - g_bt_count) * sizeof(g_bt_devices[0]));
+    g_bt_powered = snapshot.powered;
+    g_bt_service_available = snapshot.available;
+    g_bt_busy = snapshot.busy;
+    snprintf(g_bt_error, sizeof(g_bt_error), "%s", snapshot.error);
+    int cc = luna_get_element_by_id("cc_bt");
+    if (cc >= 0) luna_update_classes(cc, "on", g_bt_powered ? "on" : NULL);
+    if (is_shown(g_bt_menu_idx)) {
+        bt_update_ui();
+        luna_mark_layout_dirty();
+    }
 }
 
 static void wifi_tick(void) {
     wifi_consume_snapshot();
+    eth_consume_snapshot();
+    bt_consume_snapshot();
     /* Refresh a visible network list without ever performing the scan/read on
      * the render thread.  Coalescing in luna-wifi.h keeps this bounded. */
     if (is_shown(g_wifi_menu_idx) && !g_wifi_busy &&
         g_now - g_last_wifi_request >= 5.0)
         wifi_refresh();
+    if (is_shown(g_wifi_menu_idx) && !g_eth_busy &&
+        g_now - g_last_eth_request >= 5.0)
+        eth_refresh();
+    if (is_shown(g_bt_menu_idx) && !g_bt_busy &&
+        g_now - g_last_bt_request >= 5.0)
+        bt_refresh();
+    if (is_shown(g_wifi_menu_idx))
+        net_tip_update();
 }
 
 static int command_available(const char* name) {
@@ -2367,6 +2619,645 @@ static void wifi_update_ui(void) {
             }
         }
     }
+}
+
+static void eth_update_ui(void) {
+    int section = luna_get_element_by_id("eth_section");
+    int sep = luna_get_element_by_id("eth_sep");
+    int st = luna_get_element_by_id("eth_status");
+    int has_backend = g_eth_service_available && g_eth_backend != ETH_NONE;
+    int show_section = has_backend || g_eth_count > 0 || g_eth_busy || g_eth_error[0];
+    if (section >= 0) set_hidden(section, !show_section);
+    if (sep >= 0) set_hidden(sep, !show_section);
+    if (st >= 0) {
+        set_hidden(st, !show_section);
+        luna_set_text(st,
+            !g_eth_service_available ? "Ethernet backend unavailable" :
+            (g_eth_busy ? "Updating…" :
+            (g_eth_error[0] ? g_eth_error :
+            (!g_eth_powered ? "Ethernet is turned off" :
+             (g_eth_count ? "Wired connections" : "No Ethernet interfaces")))));
+    }
+    for (int i = 0; i < MAX_ETHERNET_LINKS; i++) {
+        char id[24]; snprintf(id, sizeof(id), "eth_%d", i);
+        int row = luna_get_element_by_id(id);
+        if (row < 0) continue;
+        if (!show_section || i >= g_eth_count) { set_hidden(row, 1); continue; }
+        set_hidden(row, 0);
+        luna_update_classes(row, "connected",
+                            g_eth_links[i].connected ? "connected" : NULL);
+        for (int j = 0; j < luna_element_count(); j++) {
+            LunaElement* child = luna_element_at(j);
+            if (child->parent_idx != row) continue;
+            if (strstr(child->class_name, "mi_label")) luna_set_text(j, g_eth_links[i].name);
+            if (strstr(child->class_name, "eth_state")) {
+                char sig[32];
+                if (g_eth_links[i].connected) snprintf(sig, sizeof(sig), "Connected");
+                else if (g_eth_links[i].available) snprintf(sig, sizeof(sig), "Cable");
+                else snprintf(sig, sizeof(sig), "Unplugged");
+                luna_set_text(j, sig);
+            }
+        }
+    }
+}
+
+/* ── Interface address helpers (hover tip + detail dialog) ── */
+
+typedef struct {
+    char iface[32];
+    char ipv4[48];
+    char ipv6[64];
+    char gateway[48];
+    char dns[96];
+    char mac[24];
+} NetIfaceInfo;
+
+static int net_iface_is_wireless(const char* name) {
+    char path[256];
+    struct stat st;
+    if (!name || !*name) return 0;
+    snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", name);
+    return stat(path, &st) == 0;
+}
+
+static int net_iface_is_up(const char* name) {
+    char path[256], state[24] = {0};
+    FILE* f;
+    if (!name || !*name) return 0;
+    snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", name);
+    f = fopen(path, "r");
+    if (!f) return 0;
+    (void)fgets(state, sizeof(state), f);
+    fclose(f);
+    return strncmp(state, "up", 2) == 0;
+}
+
+static void net_read_mac(const char* iface, char* out, size_t n) {
+    char path[256];
+    FILE* f;
+    out[0] = 0;
+    if (!iface || !*iface || n < 2) return;
+    snprintf(path, sizeof(path), "/sys/class/net/%s/address", iface);
+    f = fopen(path, "r");
+    if (!f) return;
+    if (fgets(out, (int)n, f)) {
+        size_t len = strlen(out);
+        while (len && (out[len - 1] == '\n' || out[len - 1] == '\r'))
+            out[--len] = 0;
+    }
+    fclose(f);
+}
+
+static void net_read_gateway(char* out, size_t n) {
+    FILE* f = fopen("/proc/net/route", "r");
+    char line[256];
+    out[0] = 0;
+    if (!f) return;
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return; } /* header */
+    while (fgets(line, sizeof(line), f)) {
+        char iface[64];
+        unsigned long dest = 0, gateway = 0;
+        int flags = 0;
+        if (sscanf(line, "%63s %lx %lx %X", iface, &dest, &gateway, &flags) < 4)
+            continue;
+        if (dest != 0 || !(flags & 0x2) || gateway == 0) continue;
+        struct in_addr addr;
+        addr.s_addr = (uint32_t)gateway;
+        inet_ntop(AF_INET, &addr, out, (socklen_t)n);
+        break;
+    }
+    fclose(f);
+}
+
+static void net_read_dns(char* out, size_t n) {
+    FILE* f = fopen("/etc/resolv.conf", "r");
+    char line[256];
+    size_t used = 0;
+    out[0] = 0;
+    if (!f) return;
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (strncmp(p, "nameserver", 10) != 0) continue;
+        p += 10;
+        while (*p && isspace((unsigned char)*p)) p++;
+        char* end = p;
+        while (*end && !isspace((unsigned char)*end)) end++;
+        *end = 0;
+        if (!*p) continue;
+        size_t len = strlen(p);
+        if (used && used + 2 < n) { out[used++] = ','; out[used++] = ' '; out[used] = 0; }
+        if (used + len + 1 > n) break;
+        memcpy(out + used, p, len + 1);
+        used += len;
+        if (used > 40) break; /* keep the tip/dialog short */
+    }
+    fclose(f);
+}
+
+static void net_pick_iface(int want_wifi, const char* prefer, char* out, size_t n) {
+    DIR* d;
+    struct dirent* de;
+    out[0] = 0;
+    if (prefer && *prefer && strcmp(prefer, "lo") &&
+        net_iface_is_wireless(prefer) == want_wifi &&
+        net_iface_is_up(prefer)) {
+        snprintf(out, n, "%s", prefer);
+        return;
+    }
+    d = opendir("/sys/class/net");
+    if (!d) return;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.' || !strcmp(de->d_name, "lo")) continue;
+        if (net_iface_is_wireless(de->d_name) != want_wifi) continue;
+        if (!net_iface_is_up(de->d_name)) continue;
+        snprintf(out, n, "%s", de->d_name);
+        break;
+    }
+    closedir(d);
+}
+
+static void net_collect_iface(int want_wifi, const char* prefer, NetIfaceInfo* info) {
+    struct ifaddrs* ifa_list = NULL;
+    memset(info, 0, sizeof(*info));
+    snprintf(info->ipv4, sizeof(info->ipv4), "—");
+    snprintf(info->ipv6, sizeof(info->ipv6), "—");
+    snprintf(info->gateway, sizeof(info->gateway), "—");
+    snprintf(info->dns, sizeof(info->dns), "—");
+    snprintf(info->mac, sizeof(info->mac), "—");
+    net_pick_iface(want_wifi, prefer, info->iface, sizeof(info->iface));
+    if (!info->iface[0]) {
+        snprintf(info->iface, sizeof(info->iface), "—");
+        return;
+    }
+    net_read_mac(info->iface, info->mac, sizeof(info->mac));
+    if (!info->mac[0]) snprintf(info->mac, sizeof(info->mac), "—");
+    {
+        char gw[48] = {0};
+        net_read_gateway(gw, sizeof(gw));
+        if (gw[0]) snprintf(info->gateway, sizeof(info->gateway), "%s", gw);
+    }
+    {
+        char dns[96] = {0};
+        net_read_dns(dns, sizeof(dns));
+        if (dns[0]) snprintf(info->dns, sizeof(info->dns), "%s", dns);
+    }
+    if (getifaddrs(&ifa_list) != 0) return;
+    for (struct ifaddrs* ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
+        char buf[INET6_ADDRSTRLEN];
+        if (!ifa->ifa_addr || !ifa->ifa_name) continue;
+        if (strcmp(ifa->ifa_name, info->iface) != 0) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in* sa = (struct sockaddr_in*)ifa->ifa_addr;
+            if (inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf)))
+                snprintf(info->ipv4, sizeof(info->ipv4), "%s", buf);
+        } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+            struct sockaddr_in6* sa = (struct sockaddr_in6*)ifa->ifa_addr;
+            if (IN6_IS_ADDR_LINKLOCAL(&sa->sin6_addr)) continue;
+            if (inet_ntop(AF_INET6, &sa->sin6_addr, buf, sizeof(buf)))
+                snprintf(info->ipv6, sizeof(info->ipv6), "%s", buf);
+        }
+    }
+    freeifaddrs(ifa_list);
+}
+
+static const char* eth_prefer_iface(const EthernetLink* n) {
+    if (!n) return NULL;
+    if (!strncmp(n->id, "iface:", 6)) return n->id + 6;
+    /* nmcli stores the device name in id */
+    if (g_eth_backend == ETH_NMCLI && n->id[0] && strchr(n->id, '_') == NULL)
+        return n->id;
+    return NULL;
+}
+
+static void net_format_tip(int is_eth, int index, char* out, size_t n) {
+    NetIfaceInfo info;
+    out[0] = 0;
+    if (is_eth) {
+        if (index < 0 || index >= g_eth_count) return;
+        EthernetLink* link = &g_eth_links[index];
+        net_collect_iface(0, eth_prefer_iface(link), &info);
+        if (link->connected)
+            snprintf(out, n, "%s\nIPv4 %s · %s", link->name, info.ipv4, info.iface);
+        else
+            snprintf(out, n, "%s\n%s · %s", link->name,
+                     link->available ? "Cable present" : "Unplugged",
+                     info.iface[0] && strcmp(info.iface, "—") ? info.iface : "no address");
+        return;
+    }
+    if (index < 0 || index >= g_wifi_count) return;
+    WifiNetwork* w = &g_wifi_networks[index];
+    net_collect_iface(1, NULL, &info);
+    if (w->connected)
+        snprintf(out, n, "%s\nIPv4 %s · %s · %s", w->name, info.ipv4, info.iface,
+                 w->secure ? "Secured" : "Open");
+    else if (w->signal >= 0)
+        snprintf(out, n, "%s\nSignal %d%% · %s%s", w->name, w->signal,
+                 w->secure ? "Secured" : "Open",
+                 w->saved ? " · Saved" : "");
+    else
+        snprintf(out, n, "%s\n%s%s", w->name,
+                 w->secure ? "Secured" : "Open",
+                 w->saved ? " · Saved" : "");
+}
+
+static void net_tip_update(void) {
+    int tip = luna_get_element_by_id("net_tip");
+    int line = luna_get_element_by_id("net_tip_line");
+    int found = -1, is_eth = 0;
+    int was_shown;
+    char text[192];
+    if (tip < 0) return;
+    was_shown = is_shown(tip);
+    if (!is_shown(g_wifi_menu_idx)) {
+        if (was_shown) {
+            set_hidden(tip, 1);
+            luna_mark_layout_dirty();
+        }
+        return;
+    }
+    for (int i = 0; i < luna_element_count(); i++) {
+        LunaElement* e = luna_element_at(i);
+        int row;
+        if (!e || !e->is_hovered) continue;
+        row = wifi_row_number(e);
+        if (row >= 0 && row < g_wifi_count) { found = row; is_eth = 0; break; }
+        row = eth_row_number(e);
+        if (row >= 0 && row < g_eth_count) { found = row; is_eth = 1; break; }
+    }
+    if (found < 0) {
+        if (was_shown) {
+            set_hidden(tip, 1);
+            luna_mark_layout_dirty();
+        }
+        return;
+    }
+    net_format_tip(is_eth, found, text, sizeof(text));
+    if (line >= 0) luna_set_text(line, text);
+    set_hidden(tip, 0);
+    if (!was_shown) luna_mark_layout_dirty();
+}
+
+static void net_detail_close(LunaElement* e) {
+    (void)e;
+    g_net_detail_kind = -1;
+    g_net_detail_index = -1;
+    if (g_net_detail_idx >= 0) set_hidden(g_net_detail_idx, 1);
+}
+
+static void net_detail_fill(int is_eth, int index) {
+    NetIfaceInfo info;
+    char title[96], status[96], extra[96];
+    int icon = luna_get_element_by_id("net_detail_icon");
+    int action = luna_get_element_by_id("net_detail_action");
+    g_net_detail_kind = is_eth ? 1 : 0;
+    g_net_detail_index = index;
+    title[0] = status[0] = extra[0] = 0;
+
+    if (!is_eth && index >= 0 && index < g_wifi_count) {
+        WifiNetwork* w = &g_wifi_networks[index];
+        snprintf(title, sizeof(title), "%s", w->name);
+        if (w->connected) snprintf(status, sizeof(status), "Connected");
+        else if (w->saved) snprintf(status, sizeof(status), "Saved network");
+        else snprintf(status, sizeof(status), "Available");
+        net_collect_iface(1, NULL, &info);
+        if (w->signal >= 0)
+            snprintf(extra, sizeof(extra), "%s · Signal %d%%",
+                     info.mac[0] ? info.mac : "—", w->signal);
+        else
+            snprintf(extra, sizeof(extra), "%s · %s",
+                     info.mac[0] ? info.mac : "—",
+                     w->secure ? "Secured" : "Open");
+        if (icon >= 0) {
+            for (int j = 0; j < luna_element_count(); j++) {
+                LunaElement* child = luna_element_at(j);
+                if (child->parent_idx == icon && strstr(child->class_name, "luna_icon"))
+                    luna_set_text(j, "\uf1eb");
+            }
+        }
+        if (action >= 0) {
+            set_hidden(action, 0);
+            luna_set_text(action, w->connected ? "Disconnect" : "Connect");
+            luna_update_classes(action, "danger primary",
+                                w->connected ? "danger" : "primary");
+        }
+    } else if (is_eth && index >= 0 && index < g_eth_count) {
+        EthernetLink* link = &g_eth_links[index];
+        snprintf(title, sizeof(title), "%s", link->name);
+        if (link->connected) snprintf(status, sizeof(status), "Connected");
+        else if (link->available) snprintf(status, sizeof(status), "Cable present");
+        else snprintf(status, sizeof(status), "Unplugged");
+        net_collect_iface(0, eth_prefer_iface(link), &info);
+        snprintf(extra, sizeof(extra), "%s", info.mac[0] ? info.mac : "—");
+        if (icon >= 0) {
+            for (int j = 0; j < luna_element_count(); j++) {
+                LunaElement* child = luna_element_at(j);
+                if (child->parent_idx == icon && strstr(child->class_name, "luna_icon"))
+                    luna_set_text(j, "\uf6ff");
+            }
+        }
+        if (action >= 0) {
+            set_hidden(action, 0);
+            luna_set_text(action, link->connected ? "Disconnect" : "Connect");
+            luna_update_classes(action, "danger primary",
+                                link->connected ? "danger" : "primary");
+        }
+    } else {
+        snprintf(title, sizeof(title), "Network");
+        snprintf(status, sizeof(status), "Unavailable");
+        net_collect_iface(1, NULL, &info);
+        snprintf(extra, sizeof(extra), "%s", info.mac);
+        if (action >= 0) set_hidden(action, 1);
+    }
+
+    {
+        int t = luna_get_element_by_id("net_detail_title");
+        int s = luna_get_element_by_id("net_detail_status");
+        int a = luna_get_element_by_id("nd_iface");
+        int v4 = luna_get_element_by_id("nd_ipv4");
+        int v6 = luna_get_element_by_id("nd_ipv6");
+        int gw = luna_get_element_by_id("nd_gateway");
+        int dns = luna_get_element_by_id("nd_dns");
+        int ex = luna_get_element_by_id("nd_extra");
+        if (t >= 0) luna_set_text(t, title);
+        if (s >= 0) luna_set_text(s, status);
+        if (a >= 0) luna_set_text(a, info.iface);
+        if (v4 >= 0) luna_set_text(v4, info.ipv4);
+        if (v6 >= 0) luna_set_text(v6, info.ipv6);
+        if (gw >= 0) luna_set_text(gw, info.gateway);
+        if (dns >= 0) luna_set_text(dns, info.dns);
+        if (ex >= 0) luna_set_text(ex, extra);
+    }
+}
+
+static void net_detail_open(int is_eth, int index) {
+    dismiss_popovers();
+    net_detail_fill(is_eth, index);
+    if (g_net_detail_idx < 0) return;
+    set_hidden(g_net_detail_idx, 0);
+    center_element(g_net_detail_box_idx >= 0 ? g_net_detail_box_idx : g_net_detail_idx);
+}
+
+static void on_net_detail_action(LunaElement* e) {
+    (void)e;
+    if (g_net_detail_kind == 0 && g_net_detail_index >= 0 &&
+        g_net_detail_index < g_wifi_count) {
+        WifiNetwork* n = &g_wifi_networks[g_net_detail_index];
+        if (n->connected) {
+            if (!wifi_request_disconnect(n->id))
+                toast_show("Wi-Fi", "Wi-Fi worker is unavailable", 2.5);
+            else
+                toast_show("Wi-Fi", "Disconnecting...", 2.0);
+        } else if (n->saved || !n->secure) {
+            if (!wifi_request_connect(n->id, ""))
+                toast_show("Wi-Fi", "Wi-Fi worker is unavailable", 2.5);
+            else
+                toast_show("Wi-Fi", "Connecting...", 2.0);
+        } else {
+            /* Need passphrase — reopen Wi-Fi menu credentials. */
+            int saved = g_net_detail_index;
+            WifiNetwork* need = &g_wifi_networks[saved];
+            net_detail_close(NULL);
+            g_wifi_selected = saved;
+            {
+                int label = luna_get_element_by_id("wifi_selected");
+                if (label >= 0) {
+                    char text[150];
+                    snprintf(text, sizeof(text), "Connect to %s", need->name);
+                    luna_set_text(label, text);
+                }
+            }
+            set_hidden(luna_get_element_by_id("wifi_credentials"), 0);
+            set_hidden(g_wifi_menu_idx, 0);
+            luna_mark_layout_dirty();
+            return;
+        }
+        net_detail_close(NULL);
+        return;
+    }
+    if (g_net_detail_kind == 1 && g_net_detail_index >= 0 &&
+        g_net_detail_index < g_eth_count) {
+        EthernetLink* n = &g_eth_links[g_net_detail_index];
+        if (n->connected) {
+            if (!eth_request_disconnect(n->id))
+                toast_show("Ethernet", "Ethernet worker is unavailable", 2.5);
+            else
+                toast_show("Ethernet", "Disconnecting...", 2.0);
+        } else {
+            if (!eth_request_connect(n->id))
+                toast_show("Ethernet", "Ethernet worker is unavailable", 2.5);
+            else
+                toast_show("Ethernet", "Connecting...", 2.0);
+        }
+        net_detail_close(NULL);
+    }
+}
+
+/* ── Calendar popover ── */
+
+static int calendar_days_in_month(int year, int month) {
+    static const int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (month == 1) {
+        int leap = ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
+        return leap ? 29 : 28;
+    }
+    if (month < 0 || month > 11) return 30;
+    return mdays[month];
+}
+
+static void calendar_fill(void) {
+    static const char* months[] = {
+        "January","February","March","April","May","June",
+        "July","August","September","October","November","December"
+    };
+    time_t now = time(NULL);
+    struct tm tm_now;
+    char label[64];
+    int first_wday, dim, prev_dim, today_y, today_m, today_d;
+    if (!localtime_r(&now, &tm_now)) return;
+    today_y = tm_now.tm_year + 1900;
+    today_m = tm_now.tm_mon;
+    today_d = tm_now.tm_mday;
+    if (g_cal_year < 1970) {
+        g_cal_year = today_y;
+        g_cal_month = today_m;
+        g_cal_selected_day = today_d;
+    }
+    {
+        struct tm first = {0};
+        first.tm_year = g_cal_year - 1900;
+        first.tm_mon = g_cal_month;
+        first.tm_mday = 1;
+        first.tm_isdst = -1;
+        if (mktime(&first) == (time_t)-1) first_wday = 0;
+        else first_wday = first.tm_wday;
+    }
+    dim = calendar_days_in_month(g_cal_year, g_cal_month);
+    prev_dim = calendar_days_in_month(
+        g_cal_month == 0 ? g_cal_year - 1 : g_cal_year,
+        g_cal_month == 0 ? 11 : g_cal_month - 1);
+    snprintf(label, sizeof(label), "%s %d", months[g_cal_month], g_cal_year);
+    {
+        int lab = luna_get_element_by_id("cal_month_label");
+        if (lab >= 0) luna_set_text(lab, label);
+    }
+    for (int i = 0; i < 42; i++) {
+        char id[16], text[16];
+        int day, other = 0, is_today = 0, is_sel = 0;
+        int idx;
+        snprintf(id, sizeof(id), "cal_d%d", i);
+        idx = luna_get_element_by_id(id);
+        if (idx < 0) continue;
+        if (i < first_wday) {
+            day = prev_dim - first_wday + i + 1;
+            other = 1;
+        } else if (i - first_wday + 1 > dim) {
+            day = i - first_wday + 1 - dim;
+            other = 1;
+        } else {
+            day = i - first_wday + 1;
+            if (g_cal_year == today_y && g_cal_month == today_m && day == today_d)
+                is_today = 1;
+            if (day == g_cal_selected_day) is_sel = 1;
+        }
+        snprintf(text, sizeof(text), "%d", day);
+        luna_set_text(idx, text);
+        luna_update_classes(idx, "other today selected",
+                            other ? "other" :
+                            (is_today ? "today" : (is_sel ? "selected" : NULL)));
+        if (!other && is_today && is_sel)
+            luna_update_classes(idx, "other today selected", "today selected");
+        else if (!other && is_today)
+            luna_update_classes(idx, "other today selected", "today");
+        else if (!other && is_sel)
+            luna_update_classes(idx, "other today selected", "selected");
+        else if (other)
+            luna_update_classes(idx, "other today selected", "other");
+        else
+            luna_update_classes(idx, "other today selected", NULL);
+    }
+}
+
+static void dismiss_calendar_menu(void) {
+    if (is_shown(g_calendar_menu_idx)) set_hidden(g_calendar_menu_idx, 1);
+}
+
+static void on_calendar_menu(LunaElement* e) {
+    dismiss_luna_menu(g_luna_menu_idx);
+    dismiss_cc(g_cc_idx);
+    dismiss_win_menu();
+    dismiss_clip_menu();
+    dismiss_wifi_menu();
+    dismiss_bt_menu();
+    dismiss_weather_menu();
+    if (is_shown(g_calendar_menu_idx)) { dismiss_calendar_menu(); return; }
+    {
+        time_t now = time(NULL);
+        struct tm tm_now;
+        if (localtime_r(&now, &tm_now)) {
+            g_cal_year = tm_now.tm_year + 1900;
+            g_cal_month = tm_now.tm_mon;
+            g_cal_selected_day = tm_now.tm_mday;
+        }
+    }
+    calendar_fill();
+    set_hidden(g_calendar_menu_idx, 0);
+    position_menu_near(g_calendar_menu_idx,
+                       menu_anchor_from(e, g_mb_clock_idx >= 0 ? g_mb_clock_idx
+                                        : luna_get_element_by_id("mb_clock")),
+                       luna_window_width - 310.0f);
+}
+
+static void on_calendar_prev(LunaElement* e) {
+    (void)e;
+    if (--g_cal_month < 0) { g_cal_month = 11; g_cal_year--; }
+    g_cal_selected_day = 0;
+    calendar_fill();
+}
+
+static void on_calendar_next(LunaElement* e) {
+    (void)e;
+    if (++g_cal_month > 11) { g_cal_month = 0; g_cal_year++; }
+    g_cal_selected_day = 0;
+    calendar_fill();
+}
+
+static void on_calendar_today(LunaElement* e) {
+    (void)e;
+    time_t now = time(NULL);
+    struct tm tm_now;
+    if (!localtime_r(&now, &tm_now)) return;
+    g_cal_year = tm_now.tm_year + 1900;
+    g_cal_month = tm_now.tm_mon;
+    g_cal_selected_day = tm_now.tm_mday;
+    calendar_fill();
+}
+
+static void on_calendar_day(LunaElement* e) {
+    int idx = elem_idx_of(e);
+    const char* id;
+    int cell, day;
+    if (idx < 0) return;
+    id = luna_element_at(idx)->id;
+    if (!str_has_prefix(id, "cal_d")) return;
+    cell = atoi(id + 5);
+    if (cell < 0 || cell > 41) return;
+    {
+        struct tm first = {0};
+        int first_wday, dim;
+        first.tm_year = g_cal_year - 1900;
+        first.tm_mon = g_cal_month;
+        first.tm_mday = 1;
+        first.tm_isdst = -1;
+        if (mktime(&first) == (time_t)-1) first_wday = 0;
+        else first_wday = first.tm_wday;
+        dim = calendar_days_in_month(g_cal_year, g_cal_month);
+        day = cell - first_wday + 1;
+        if (day < 1 || day > dim) return;
+        g_cal_selected_day = day;
+        calendar_fill();
+    }
+}
+
+static void bt_update_ui(void) {
+    int p = luna_get_element_by_id("bt_power");
+    if (p >= 0) luna_update_classes(p, "on", g_bt_powered ? "on" : NULL);
+    int cc = luna_get_element_by_id("cc_bt");
+    if (cc >= 0) luna_update_classes(cc, "on", g_bt_powered ? "on" : NULL);
+    int st = luna_get_element_by_id("bt_status");
+    if (st >= 0) luna_set_text(st,
+        !g_bt_service_available ? "Bluetooth backend unavailable" :
+        (g_bt_busy ? "Updating…" :
+        (g_bt_error[0] ? g_bt_error :
+        (g_bt_backend == BT_NONE ? "bluetoothctl / ConnMan not found" :
+        (!g_bt_powered ? "Bluetooth is turned off" :
+         (g_bt_count ? "Devices" : "No devices found"))))));
+    for (int i = 0; i < MAX_BT_DEVICES; i++) {
+        char id[24]; snprintf(id, sizeof(id), "bt_%d", i);
+        int row = luna_get_element_by_id(id);
+        if (row < 0) continue;
+        if (i >= g_bt_count) { set_hidden(row, 1); continue; }
+        set_hidden(row, 0);
+        luna_update_classes(row, "connected",
+                            g_bt_devices[i].connected ? "connected" : NULL);
+        for (int j = 0; j < luna_element_count(); j++) {
+            LunaElement* child = luna_element_at(j);
+            if (child->parent_idx != row) continue;
+            if (strstr(child->class_name, "mi_label")) luna_set_text(j, g_bt_devices[i].name);
+            if (strstr(child->class_name, "bt_state")) {
+                char sig[24];
+                if (g_bt_devices[i].connected) snprintf(sig, sizeof(sig), "Connected");
+                else if (g_bt_devices[i].paired) snprintf(sig, sizeof(sig), "Paired");
+                else sig[0] = 0;
+                luna_set_text(j, sig);
+            }
+        }
+    }
+}
+
+static void network_update_ui(void) {
+    wifi_update_ui();
+    eth_update_ui();
     luna_mark_layout_dirty();
 }
 
@@ -2423,6 +3314,25 @@ static void position_menu_near(int menu_idx, int anchor_idx, float fallback_x) {
                (m->w > 1.0f ? m->w : 240.0f);
     float mh = m->css_height > 1.0f ? m->css_height :
                (m->h > 1.0f ? m->h : 220.0f);
+    /* A previous top+bottom stretch (or unresolved auto→0) can leave h near
+     * the output height.  Prefer content height so upward open stays above
+     * the taskbar instead of clamping to the top edge. */
+    if (mh > luna_window_height * 0.45f) {
+        float content_h = 0.0f;
+        for (int i = 0; i < luna_element_count(); i++) {
+            LunaElement* c = luna_element_at(i);
+            if (!c || c->parent_idx != menu_idx || c->display_none) continue;
+            if (strstr(c->class_name, "hidden")) continue;
+            float bottom = c->rel_y + c->h;
+            if (bottom > content_h) content_h = bottom;
+        }
+        if (content_h > 24.0f && content_h < luna_window_height * 0.9f)
+            mh = content_h + 12.0f;
+        else if (m->css_height > 1.0f && m->css_height < luna_window_height * 0.45f)
+            mh = m->css_height;
+        else
+            mh = 280.0f;
+    }
     int open_up = (g_chrome_menubar_edge == SKIN_EDGE_BOTTOM);
     float y;
     if (open_up)
@@ -3021,12 +3931,26 @@ static void apply_toolkit_session_env(void) {
         setenv("QT_QPA_PLATFORM", "wayland", 0);
     prefer_libdecor_cairo();
     /* Do not inherit scale hints from the Xorg login which started Luna.
-     * GDK_SCALE=2 is especially harmful here: GTK submits a 2x buffer and our
-     * scale-1 output then displays it at twice the intended logical size.
-     * Luna-specific variables remain available as explicit overrides. */
-    setenv("GDK_SCALE", getenv("LUNA_GDK_SCALE") ?: "1", 1);
-    setenv("GDK_DPI_SCALE", getenv("LUNA_GDK_DPI_SCALE") ?: "1", 1);
-    setenv("QT_SCALE_FACTOR", getenv("LUNA_QT_SCALE_FACTOR") ?: "1", 1);
+     * GDK_SCALE=2 submits a 2x buffer; prefer GDK_DPI_SCALE for text sizing.
+     * Settings dialog values apply unless LUNA_* overrides are set. */
+    {
+        const char* gdk_scale = getenv("LUNA_GDK_SCALE");
+        const char* gdk_dpi = getenv("LUNA_GDK_DPI_SCALE");
+        const char* qt_scale = getenv("LUNA_QT_SCALE_FACTOR");
+        const char* cursor_sz = getenv("LUNA_XCURSOR_SIZE");
+        if (!gdk_scale || !*gdk_scale) gdk_scale = g_settings.gdk_scale;
+        if (!gdk_dpi || !*gdk_dpi) gdk_dpi = g_settings.gdk_dpi_scale;
+        if (!qt_scale || !*qt_scale) qt_scale = g_settings.qt_scale_factor;
+        if (!cursor_sz || !*cursor_sz) cursor_sz = g_settings.xcursor_size;
+        if (!gdk_scale || !*gdk_scale) gdk_scale = "0.75";
+        if (!gdk_dpi || !*gdk_dpi) gdk_dpi = "0.75";
+        if (!qt_scale || !*qt_scale) qt_scale = "1";
+        if (!cursor_sz || !*cursor_sz) cursor_sz = "24";
+        setenv("GDK_SCALE", gdk_scale, 1);
+        setenv("GDK_DPI_SCALE", gdk_dpi, 1);
+        setenv("QT_SCALE_FACTOR", qt_scale, 1);
+        setenv("XCURSOR_SIZE", cursor_sz, 1);
+    }
     /* luna-session may set LUNA_CLIENT_RENDERER / GSK_RENDERER.  Still reject
      * vulkan: Luna has no Vulkan WSI / dmabuf path for clients, and GTK4 then
      * stalls (Firefox dialogs never paint). */
@@ -3101,9 +4025,6 @@ static void child_session_env(void) {
                                     "icons/Adwaita/cursors/left_ptr"))
             setenv("XCURSOR_THEME", "Adwaita", 0);
     }
-    if (!getenv("XCURSOR_SIZE"))
-        setenv("XCURSOR_SIZE", "24", 0);
-
     apply_xkb_session_env();
     apply_toolkit_session_env();
 
@@ -3158,6 +4079,7 @@ typedef struct {
     char only_show_in[512];
     char not_show_in[512];
     int hidden;
+    int no_display;
     int enabled;
     int application;
     int dbus_activatable;
@@ -3244,6 +4166,7 @@ static int desktop_entry_load(const char* path, LunaDesktopEntry* entry) {
         else if (!strcmp(key, "NotShowIn"))
             snprintf(entry->not_show_in, sizeof(entry->not_show_in), "%s", value);
         else if (!strcmp(key, "Hidden")) entry->hidden = desktop_bool(value, 0);
+        else if (!strcmp(key, "NoDisplay")) entry->no_display = desktop_bool(value, 0);
         else if (!strcmp(key, "DBusActivatable"))
             entry->dbus_activatable = desktop_bool(value, 0);
         else if (!strcmp(key, "X-GNOME-Autostart-enabled"))
@@ -3561,11 +4484,24 @@ static LunaApp* resolve_app(LunaElement* e) {
         if (!strncmp(id, "dock_", 5)) key = id + 5;
         else if (!strncmp(id, "lp_", 3)) key = id + 3;
         if (key) {
+            if (!strncmp(key, "xdg_", 4)) return NULL; /* handled by resolve_lp_xdg */
             for (int i = 0; i < APP_COUNT; i++)
                 if (!strcmp(g_apps[i].key, key)) return &g_apps[i];
         }
     }
     return NULL;
+}
+
+static int resolve_lp_xdg_slot(LunaElement* e) {
+    for (int idx = elem_idx_of(e); idx != -1; idx = luna_element_at(idx)->parent_idx) {
+        const char* id = luna_element_at(idx)->id;
+        if (!id || id[0] == '\0') continue;
+        if (strncmp(id, "lp_xdg_", 7) != 0) continue;
+        int slot = atoi(id + 7);
+        if (slot >= 0 && slot < g_lp_xdg_count && g_lp_xdg[slot].path[0])
+            return slot;
+    }
+    return -1;
 }
 
 static void app_set_dot(LunaApp* app, int running) {
@@ -3579,6 +4515,7 @@ static void app_set_dot(LunaApp* app, int running) {
  *   desktop:org.gnome.Nautilus.desktop
  *   org.gnome.Nautilus.desktop
  *   /absolute/path/to/custom.desktop
+ *   sakura / pcmanfm  (bare command → applications/<cmd>.desktop when present)
  * gtk-launch/GIO preserve startup notification and DBusActivatable semantics;
  * the local Exec parser is a no-dependency fallback. */
 static int app_desktop_entry_resolve(const char* command,
@@ -3717,6 +4654,17 @@ static void dismiss_cc(int trap_idx);
 static void dismiss_win_menu(void);
 static void dismiss_clip_menu(void);
 static void dismiss_wifi_menu(void);
+static void dismiss_bt_menu(void);
+
+typedef struct LunaSliderIds LunaSliderIds;
+static LunaSliderIds* g_bright_slider_ptr;
+static LunaSliderIds* g_vol_slider_ptr;
+static void cc_sliders_pull_from_system(LunaSliderIds* bright, LunaSliderIds* vol);
+static void cc_sliders_flush(LunaSliderIds* bright, LunaSliderIds* vol);
+static void settings_mark_audio_backend(const char* backend);
+static void settings_mark_brightness_backend(const char* backend);
+static void settings_update_sound_status(void);
+static void settings_read_alsa_fields(void);
 
 static const char* weather_icon_glyph(int code) {
     if (code == 0) return "\uf185";
@@ -3908,6 +4856,8 @@ static void on_weather_menu(LunaElement* e) {
     dismiss_win_menu();
     dismiss_clip_menu();
     dismiss_wifi_menu();
+    dismiss_bt_menu();
+    dismiss_calendar_menu();
     if (is_shown(g_weather_menu_idx)) { dismiss_weather_menu(); return; }
     int pi = luna_get_element_by_id("weather_city_input");
     if (pi >= 0) luna_set_value(pi, g_settings.weather_city);
@@ -3941,6 +4891,19 @@ static void reap_children(void) {
         g_sigchld_pending = 1;
         return;
     }
+    if (!luna_ethernet_reaper_try_lock()) {
+        luna_wifi_reaper_unlock();
+        pthread_mutex_unlock(&g_child_reaper_mutex);
+        g_sigchld_pending = 1;
+        return;
+    }
+    if (!luna_bluetooth_reaper_try_lock()) {
+        luna_ethernet_reaper_unlock();
+        luna_wifi_reaper_unlock();
+        pthread_mutex_unlock(&g_child_reaper_mutex);
+        g_sigchld_pending = 1;
+        return;
+    }
     int status;
     pid_t pid;
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
@@ -3948,11 +4911,26 @@ static void reap_children(void) {
             if (g_apps[i].pid == pid) {
                 g_apps[i].pid = 0;
                 app_set_dot(&g_apps[i], 0);
-                if (WIFEXITED(status) && WEXITSTATUS(status) == 127)
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
                     toast_show(g_apps[i].name, "App not installed (LUNA_APP_*)", 5.0);
+                } else if (WIFSIGNALED(status)) {
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "Application stopped (signal %d)",
+                             WTERMSIG(status));
+                    toast_show(g_apps[i].name, msg, 5.0);
+                    fprintf(stderr, "[luna-shell] %s stopped by signal %d\n",
+                            g_apps[i].name, WTERMSIG(status));
+                } else if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "Application exited with status %d",
+                             WEXITSTATUS(status));
+                    toast_show(g_apps[i].name, msg, 5.0);
+                }
             }
         }
     }
+    luna_bluetooth_reaper_unlock();
+    luna_ethernet_reaper_unlock();
     luna_wifi_reaper_unlock();
     pthread_mutex_unlock(&g_child_reaper_mutex);
 }
@@ -3994,6 +4972,11 @@ static void dismiss_wifi_menu(void) {
     if (is_shown(g_wifi_menu_idx)) set_hidden(g_wifi_menu_idx, 1);
     g_wifi_selected = -1;
     set_hidden(luna_get_element_by_id("wifi_credentials"), 1);
+    set_hidden(luna_get_element_by_id("net_tip"), 1);
+}
+
+static void dismiss_bt_menu(void) {
+    if (is_shown(g_bt_menu_idx)) set_hidden(g_bt_menu_idx, 1);
 }
 
 static void dismiss_popovers(void) {
@@ -4002,14 +4985,19 @@ static void dismiss_popovers(void) {
     dismiss_win_menu();
     dismiss_clip_menu();
     dismiss_wifi_menu();
+    dismiss_bt_menu();
     dismiss_weather_menu();
+    dismiss_calendar_menu();
 }
 
 static void on_luna_menu(LunaElement* e) {
     dismiss_cc(g_cc_idx);
     dismiss_win_menu();
     dismiss_clip_menu();
+    dismiss_wifi_menu();
+    dismiss_bt_menu();
     dismiss_weather_menu();
+    dismiss_calendar_menu();
     if (is_shown(g_luna_menu_idx)) { dismiss_luna_menu(g_luna_menu_idx); return; }
     set_hidden(g_luna_menu_idx, 0);
     int logo = luna_get_element_by_id("mb_logo");
@@ -4022,10 +5010,14 @@ static void on_control_center(LunaElement* e) {
     dismiss_win_menu();
     dismiss_clip_menu();
     dismiss_wifi_menu();
+    dismiss_bt_menu();
     dismiss_weather_menu();
+    dismiss_calendar_menu();
     if (is_shown(g_cc_idx)) { dismiss_cc(g_cc_idx); return; }
     set_hidden(g_cc_idx, 0);
     position_control_center();
+    if (g_bright_slider_ptr && g_vol_slider_ptr)
+        cc_sliders_pull_from_system(g_bright_slider_ptr, g_vol_slider_ptr);
 }
 
 static void on_wifi_menu(LunaElement* e) {
@@ -4033,13 +5025,34 @@ static void on_wifi_menu(LunaElement* e) {
     dismiss_cc(g_cc_idx);
     dismiss_win_menu();
     dismiss_clip_menu();
+    dismiss_bt_menu();
     dismiss_weather_menu();
+    dismiss_calendar_menu();
     if (is_shown(g_wifi_menu_idx)) { dismiss_wifi_menu(); return; }
     wifi_refresh();
-    wifi_update_ui();
+    eth_refresh();
+    network_update_ui();
     set_hidden(g_wifi_menu_idx, 0);
     position_menu_near(g_wifi_menu_idx,
                        menu_anchor_from(e, g_mb_wifi_idx),
+                       luna_window_width - 330.0f);
+}
+
+static void on_bt_menu(LunaElement* e) {
+    dismiss_luna_menu(g_luna_menu_idx);
+    dismiss_win_menu();
+    dismiss_clip_menu();
+    dismiss_wifi_menu();
+    dismiss_weather_menu();
+    dismiss_calendar_menu();
+    if (is_shown(g_bt_menu_idx)) { dismiss_bt_menu(); return; }
+    /* Keep Control Center open behind the device list when launched from CC. */
+    bt_refresh();
+    bt_update_ui();
+    luna_mark_layout_dirty();
+    set_hidden(g_bt_menu_idx, 0);
+    position_menu_near(g_bt_menu_idx,
+                       menu_anchor_from(e, luna_get_element_by_id("cc_bt")),
                        luna_window_width - 330.0f);
 }
 
@@ -4053,7 +5066,21 @@ static void on_wifi_power(LunaElement* e) {
     g_settings.wifi_enabled = desired;
     g_wifi_powered = desired; /* optimistic UI; next worker snapshot verifies it */
     settings_save();
-    wifi_update_ui();
+    network_update_ui();
+}
+
+static void on_bt_power(LunaElement* e) {
+    (void)e;
+    int desired = !g_bt_powered;
+    if (!bt_request_powered(desired)) {
+        toast_show("Bluetooth", "Bluetooth worker is unavailable", 2.5);
+        return;
+    }
+    g_settings.bluetooth_enabled = desired;
+    g_bt_powered = desired;
+    settings_save();
+    bt_update_ui();
+    luna_mark_layout_dirty();
 }
 
 static int wifi_row_number(LunaElement* e) {
@@ -4068,6 +5095,11 @@ static void on_wifi_network(LunaElement* e) {
     int i = wifi_row_number(e);
     if (i < 0 || i >= g_wifi_count) return;
     WifiNetwork* n = &g_wifi_networks[i];
+
+    if (luna_last_click_button() == LUNA_MOUSE_BUTTON_RIGHT) {
+        net_detail_open(0, i);
+        return;
+    }
 
     if (n->connected) {
         if (!wifi_request_disconnect(n->id)) {
@@ -4135,8 +5167,87 @@ static void on_wifi_scan(LunaElement* e) {
     }
     g_wifi_busy = 1;
     g_last_wifi_request = g_now;
-    wifi_update_ui();
+    network_update_ui();
     toast_show("Wi-Fi", "Scanning for networks...", 2.0);
+}
+
+static int eth_row_number(LunaElement* e) {
+    for (int idx = elem_idx_of(e); idx != -1; idx = luna_element_at(idx)->parent_idx) {
+        const char* id = luna_element_at(idx)->id;
+        if (str_has_prefix(id, "eth_") && isdigit((unsigned char)id[4])) return atoi(id + 4);
+    }
+    return -1;
+}
+
+static void on_eth_link(LunaElement* e) {
+    int i = eth_row_number(e);
+    if (i < 0 || i >= g_eth_count) return;
+    EthernetLink* n = &g_eth_links[i];
+    if (luna_last_click_button() == LUNA_MOUSE_BUTTON_RIGHT) {
+        net_detail_open(1, i);
+        return;
+    }
+    if (n->connected) {
+        if (!eth_request_disconnect(n->id)) {
+            toast_show("Ethernet", "Ethernet worker is unavailable", 2.5);
+            return;
+        }
+        toast_show("Ethernet", "Disconnecting...", 2.0);
+        return;
+    }
+    if (!n->available && strncmp(n->id, "iface:", 6) == 0) {
+        toast_show("Ethernet", "Cable is unplugged", 2.5);
+        return;
+    }
+    if (!eth_request_connect(n->id)) {
+        toast_show("Ethernet", "Ethernet worker is unavailable", 2.5);
+        return;
+    }
+    toast_show("Ethernet", "Connecting...", 2.0);
+}
+
+static int bt_row_number(LunaElement* e) {
+    for (int idx = elem_idx_of(e); idx != -1; idx = luna_element_at(idx)->parent_idx) {
+        const char* id = luna_element_at(idx)->id;
+        if (str_has_prefix(id, "bt_") && isdigit((unsigned char)id[3])) return atoi(id + 3);
+    }
+    return -1;
+}
+
+static void on_bt_device(LunaElement* e) {
+    int i = bt_row_number(e);
+    if (i < 0 || i >= g_bt_count) return;
+    BluetoothDevice* d = &g_bt_devices[i];
+    if (d->connected) {
+        if (!bt_request_disconnect(d->id)) {
+            toast_show("Bluetooth", "Bluetooth worker is unavailable", 2.5);
+            return;
+        }
+        toast_show("Bluetooth", "Disconnecting...", 2.0);
+        return;
+    }
+    if (!bt_request_connect(d->id)) {
+        toast_show("Bluetooth", "Bluetooth worker is unavailable", 2.5);
+        return;
+    }
+    toast_show("Bluetooth", "Connecting...", 2.0);
+}
+
+static void on_bt_scan(LunaElement* e) {
+    (void)e;
+    if (!g_bt_powered) {
+        toast_show("Bluetooth", "Turn on Bluetooth first", 2.5);
+        return;
+    }
+    if (!luna_bluetooth_request_scan()) {
+        toast_show("Bluetooth", "Bluetooth worker is unavailable", 2.5);
+        return;
+    }
+    g_bt_busy = 1;
+    g_last_bt_request = g_now;
+    bt_update_ui();
+    luna_mark_layout_dirty();
+    toast_show("Bluetooth", "Scanning for devices...", 2.5);
 }
 
 static void launchpad_close(void) {
@@ -4144,9 +5255,151 @@ static void launchpad_close(void) {
     set_hidden(g_launchpad_idx, 1);
 }
 
+static int lp_xdg_name_cmp(const void* a, const void* b) {
+    const LunaLpXdgApp* aa = (const LunaLpXdgApp*)a;
+    const LunaLpXdgApp* bb = (const LunaLpXdgApp*)b;
+    return strcasecmp(aa->name, bb->name);
+}
+
+static int lp_xdg_is_builtin_dup(const LunaDesktopEntry* entry) {
+    if (!entry) return 0;
+    for (int i = 0; i < APP_COUNT; i++) {
+        if (entry->name[0] && !strcasecmp(entry->name, g_apps[i].name))
+            return 1;
+        const char* cmd = g_apps[i].cmd[0] ? g_apps[i].cmd : g_apps[i].default_cmd;
+        if (!cmd || !*cmd) continue;
+        /* Compare the first Exec token basename to the configured command. */
+        const char* p = entry->exec;
+        while (*p == ' ' || *p == '\t') p++;
+        char tok[128];
+        size_t n = 0;
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"' && n + 1 < sizeof(tok)) tok[n++] = *p++;
+        } else {
+            while (*p && *p != ' ' && *p != '\t' && n + 1 < sizeof(tok)) tok[n++] = *p++;
+        }
+        tok[n] = 0;
+        if (!tok[0]) continue;
+        const char* base = strrchr(tok, '/');
+        base = base ? base + 1 : tok;
+        if (!strcmp(base, cmd)) return 1;
+    }
+    return 0;
+}
+
+static void lp_xdg_try_add(const char* path, const char* desktop_id,
+                           char seen[][NAME_MAX + 1], int* seen_count) {
+    if (!path || !desktop_id || !*desktop_id) return;
+    if (*seen_count >= MAX_LP_XDG * 4) return;
+    if (desktop_id_seen(seen, *seen_count, desktop_id)) return;
+    snprintf(seen[*seen_count], NAME_MAX + 1, "%s", desktop_id);
+    (*seen_count)++;
+
+    LunaDesktopEntry entry;
+    if (!desktop_entry_load(path, &entry)) return;
+    if (!entry.application || entry.hidden || entry.no_display || !entry.enabled)
+        return;
+    if (!entry.name[0] || (!entry.exec[0] && !entry.dbus_activatable)) return;
+    if (entry.only_show_in[0] && !desktop_matches_current(entry.only_show_in)) return;
+    if (entry.not_show_in[0] && desktop_matches_current(entry.not_show_in)) return;
+    if (!desktop_try_exec_available(entry.try_exec)) return;
+    if (lp_xdg_is_builtin_dup(&entry)) return;
+    if (g_lp_xdg_count >= MAX_LP_XDG) return;
+
+    LunaLpXdgApp* slot = &g_lp_xdg[g_lp_xdg_count++];
+    snprintf(slot->id, sizeof(slot->id), "%s", desktop_id);
+    snprintf(slot->name, sizeof(slot->name), "%s", entry.name);
+    snprintf(slot->path, sizeof(slot->path), "%s", path);
+}
+
+static void lp_xdg_scan_dir(const char* dir,
+                            char seen[][NAME_MAX + 1], int* seen_count) {
+    DIR* d = opendir(dir);
+    if (!d) return;
+    struct dirent* de;
+    while ((de = readdir(d)) != NULL) {
+        size_t len = strlen(de->d_name);
+        if (de->d_name[0] == '.' || len <= 8 ||
+            strcmp(de->d_name + len - 8, ".desktop"))
+            continue;
+        char path[PATH_MAX];
+        if (!path_join2(path, sizeof(path), dir, de->d_name)) continue;
+        lp_xdg_try_add(path, de->d_name, seen, seen_count);
+    }
+    closedir(d);
+}
+
+static void launchpad_populate_xdg(void) {
+    for (int i = 0; i < MAX_LP_XDG; i++) {
+        g_lp_xdg_idx[i] = -1;
+        g_lp_xdg_label_idx[i] = -1;
+        g_lp_xdg[i].id[0] = 0;
+        g_lp_xdg[i].name[0] = 0;
+        g_lp_xdg[i].path[0] = 0;
+    }
+    g_lp_xdg_count = 0;
+
+    char seen[MAX_LP_XDG * 4][NAME_MAX + 1];
+    int seen_count = 0;
+    char dir[PATH_MAX];
+
+    /* User applications first so they win the desktop-id race. */
+    if (path_join2(dir, sizeof(dir), g_xdg.data_home, "applications"))
+        lp_xdg_scan_dir(dir, seen, &seen_count);
+
+    const char* dirs = getenv("XDG_DATA_DIRS");
+    if (!dirs || !*dirs) dirs = "/usr/local/share:/usr/share";
+    char list[PATH_MAX * 2];
+    if (snprintf(list, sizeof(list), "%s", dirs) < (int)sizeof(list)) {
+        char* save = NULL;
+        for (char* base = strtok_r(list, ":", &save); base;
+             base = strtok_r(NULL, ":", &save)) {
+            if (!path_is_absolute(base)) continue;
+            if (path_join2(dir, sizeof(dir), base, "applications"))
+                lp_xdg_scan_dir(dir, seen, &seen_count);
+        }
+    }
+
+    if (g_lp_xdg_count > 1)
+        qsort(g_lp_xdg, (size_t)g_lp_xdg_count, sizeof(g_lp_xdg[0]), lp_xdg_name_cmp);
+
+    for (int i = 0; i < MAX_LP_XDG; i++) {
+        char id[32];
+        snprintf(id, sizeof(id), "lp_xdg_%02d", i);
+        g_lp_xdg_idx[i] = luna_get_element_by_id(id);
+        if (g_lp_xdg_idx[i] < 0) continue;
+
+        /* Prefer a dedicated label child when present. */
+        g_lp_xdg_label_idx[i] = -1;
+        for (int c = 0; c < luna_element_count(); c++) {
+            LunaElement* ch = luna_element_at(c);
+            if (ch->parent_idx != g_lp_xdg_idx[i]) continue;
+            if (strstr(ch->class_name, "lp_label")) {
+                g_lp_xdg_label_idx[i] = c;
+                break;
+            }
+        }
+
+        if (i < g_lp_xdg_count) {
+            set_hidden(g_lp_xdg_idx[i], 0);
+            if (g_lp_xdg_label_idx[i] >= 0)
+                luna_set_text(g_lp_xdg_label_idx[i], g_lp_xdg[i].name);
+            else
+                luna_set_text(g_lp_xdg_idx[i], g_lp_xdg[i].name);
+            wire_subtree(g_lp_xdg_idx[i], on_launch_app);
+        } else {
+            set_hidden(g_lp_xdg_idx[i], 1);
+        }
+    }
+    g_lp_xdg_ready = 1;
+    fprintf(stderr, "[luna-shell] launchpad: %d XDG applications\n", g_lp_xdg_count);
+}
+
 static void on_launchpad_open(LunaElement* e) {
     (void)e;
     dismiss_popovers();
+    if (!g_lp_xdg_ready) launchpad_populate_xdg();
     set_hidden(g_launchpad_idx, 0);
 }
 
@@ -4157,8 +5410,20 @@ static void on_launchpad_close(LunaElement* e) {
 
 static void on_launch_app(LunaElement* e) {
     LunaApp* app = resolve_app(e);
+    int xdg = resolve_lp_xdg_slot(e);
     launchpad_close();
-    if (app) app_launch(app);
+    if (app) {
+        app_launch(app);
+        return;
+    }
+    if (xdg >= 0) {
+        LunaApp tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        tmp.key = "xdg";
+        tmp.name = g_lp_xdg[xdg].name;
+        snprintf(tmp.cmd, sizeof(tmp.cmd), "%s", g_lp_xdg[xdg].path);
+        app_launch(&tmp);
+    }
 }
 
 static void on_dock_click(LunaElement* e) {
@@ -4191,7 +5456,13 @@ static int hit_inside(int hit, int root) {
 }
 
 static void on_mouse_release_hook(int hit, int drag_moved) {
-    if (drag_moved || hit < 0) return;
+    if (drag_moved) {
+        /* Slider thumbs use drag_mode=2; flush the final level on release so a
+         * fast fling is not lost to the apply throttle. */
+        cc_sliders_flush(g_bright_slider_ptr, g_vol_slider_ptr);
+        return;
+    }
+    if (hit < 0) return;
     if (is_shown(g_luna_menu_idx) &&
         !hit_inside(hit, g_luna_menu_idx) &&
         !hit_inside(hit, g_mb_logo_idx))
@@ -4205,11 +5476,22 @@ static void on_mouse_release_hook(int hit, int drag_moved) {
         !hit_inside(hit, g_wifi_menu_idx) &&
         !hit_inside(hit, g_mb_wifi_idx))
         dismiss_wifi_menu();
+    if (is_shown(g_bt_menu_idx) &&
+        !hit_inside(hit, g_bt_menu_idx) &&
+        !hit_inside(hit, luna_get_element_by_id("cc_bt")) &&
+        !hit_inside(hit, luna_get_element_by_id("cc_bt_open")))
+        dismiss_bt_menu();
     if (is_shown(g_weather_menu_idx) &&
         !hit_inside(hit, g_weather_menu_idx) &&
         !hit_inside(hit, g_mb_weather_idx) &&
         !hit_inside(hit, luna_get_element_by_id("widget_weather")))
         dismiss_weather_menu();
+    if (is_shown(g_calendar_menu_idx) &&
+        !hit_inside(hit, g_calendar_menu_idx) &&
+        !hit_inside(hit, g_mb_clock_idx) &&
+        !hit_inside(hit, luna_get_element_by_id("wg_date")) &&
+        !hit_inside(hit, luna_get_element_by_id("widget_clock")))
+        dismiss_calendar_menu();
     if (is_shown(g_win_menu_idx) && !hit_inside(hit, g_win_menu_idx)) {
         /* Keep open when the click was on a win_item (handler opens/repositions). */
         int on_win = 0;
@@ -4289,6 +5571,8 @@ static void apply_wallpaper(const char* theme) {
     /* Remove all theme classes; night is the default gradient (no extra class). */
     luna_update_classes(idx, "ocean forest sunset",
                         strcmp(theme, "night") != 0 ? theme : NULL);
+    luna_update_classes(idx, "wallpaper_static",
+                        g_settings.wallpaper_animation ? NULL : "wallpaper_static");
 }
 
 static void settings_mark_wallpaper(const char* theme) {
@@ -4343,6 +5627,8 @@ static void settings_mark_toggle(const char* id, int enabled) {
     int idx = luna_get_element_by_id(id);
     if (idx < 0) return;
     luna_update_classes(idx, "on", enabled ? "on" : NULL);
+    if (!strcmp(id, "wm_wallpaper_motion"))
+        luna_set_text(idx, enabled ? "Wallpaper motion · On" : "Wallpaper motion · Off");
 }
 
 static void settings_mark_locale(const char* locale_name) {
@@ -4369,6 +5655,127 @@ static void settings_mark_gap(void) {
     }
 }
 
+static void settings_mark_audio_backend(const char* backend) {
+    static const char* ids[] = {
+        "audio_auto", "audio_wpctl", "audio_pactl", "audio_alsa"
+    };
+    static const char* vals[] = { "auto", "wpctl", "pactl", "alsa" };
+    for (int i = 0; i < 4; i++) {
+        int idx = luna_get_element_by_id(ids[i]);
+        if (idx >= 0)
+            luna_update_classes(idx, "selected",
+                backend && !strcmp(backend, vals[i]) ? "selected" : NULL);
+    }
+}
+
+static void settings_mark_brightness_backend(const char* backend) {
+    static const char* ids[] = {
+        "bright_auto", "bright_sysfs", "bright_brightnessctl", "bright_xrandr"
+    };
+    static const char* vals[] = { "auto", "sysfs", "brightnessctl", "xrandr" };
+    for (int i = 0; i < 4; i++) {
+        int idx = luna_get_element_by_id(ids[i]);
+        if (idx >= 0)
+            luna_update_classes(idx, "selected",
+                backend && !strcmp(backend, vals[i]) ? "selected" : NULL);
+    }
+}
+
+static void settings_mark_choice_cards(const char* const* ids, const char* const* vals,
+                                      int n, const char* cur) {
+    for (int i = 0; i < n; i++) {
+        int idx = luna_get_element_by_id(ids[i]);
+        if (idx >= 0)
+            luna_update_classes(idx, "selected",
+                cur && !strcmp(cur, vals[i]) ? "selected" : NULL);
+    }
+}
+
+static void settings_mark_display_scale(void) {
+    static const char* gdk_ids[] = { "gdk_scale_1", "gdk_scale_2" };
+    static const char* gdk_vals[] = { "1", "2" };
+    static const char* dpi_ids[] = {
+        "gdk_dpi_05", "gdk_dpi_075", "gdk_dpi_1", "gdk_dpi_125",
+        "gdk_dpi_15", "gdk_dpi_175", "gdk_dpi_2"
+    };
+    static const char* dpi_vals[] = { "0.5", "0.75", "1", "1.25", "1.5", "1.75", "2" };
+    static const char* qt_ids[] = {
+        "qt_scale_05", "qt_scale_075", "qt_scale_1", "qt_scale_125",
+        "qt_scale_15", "qt_scale_175", "qt_scale_2"
+    };
+    static const char* qt_vals[] = { "0.5", "0.75", "1", "1.25", "1.5", "1.75", "2" };
+    static const char* cur_ids[] = { "xcursor_24", "xcursor_32", "xcursor_48" };
+    static const char* cur_vals[] = { "24", "32", "48" };
+    settings_mark_choice_cards(gdk_ids, gdk_vals, 2, g_settings.gdk_scale);
+    settings_mark_choice_cards(dpi_ids, dpi_vals, 7, g_settings.gdk_dpi_scale);
+    settings_mark_choice_cards(qt_ids, qt_vals, 7, g_settings.qt_scale_factor);
+    settings_mark_choice_cards(cur_ids, cur_vals, 3, g_settings.xcursor_size);
+}
+
+static void settings_update_sound_status(void) {
+    int a = luna_get_element_by_id("audio_backend_status");
+    if (a >= 0) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "Tools: wpctl %s · pactl %s · amixer %s · alsamixer %s",
+                 command_available("wpctl") ? "ok" : "—",
+                 command_available("pactl") ? "ok" : "—",
+                 command_available("amixer") ? "ok" : "—",
+                 command_available("alsamixer") ? "ok" : "—");
+        luna_set_text(a, msg);
+    }
+    int b = luna_get_element_by_id("bright_backend_status");
+    if (b >= 0) {
+        int has_sysfs = 0;
+        DIR* d = opendir("/sys/class/backlight");
+        if (d) {
+            struct dirent* de;
+            while ((de = readdir(d)) != NULL) {
+                if (de->d_name[0] != '.') { has_sysfs = 1; break; }
+            }
+            closedir(d);
+        }
+        char msg[192];
+        snprintf(msg, sizeof(msg), "Tools: backlight %s · brightnessctl %s · xrandr %s",
+                 has_sysfs ? "ok" : "—",
+                 command_available("brightnessctl") ? "ok" : "—",
+                 command_available("xrandr") ? "ok" : "—");
+        luna_set_text(b, msg);
+    }
+}
+
+/* Apply the persisted Dock membership after the layout has been bound and
+ * again immediately when the user changes it in Settings.  Launchpad entries
+ * remain available, so removing an app from the Dock never makes it
+ * inaccessible. */
+static void apply_dock_app_settings(void) {
+    int visible = 0;
+    int dock_idx = luna_get_element_by_id("dock");
+    for (int i = 0; i < APP_COUNT; i++) {
+        char id[64];
+        snprintf(id, sizeof(id), "dock_%s", g_apps[i].key);
+        int idx = luna_get_element_by_id(id);
+        if (idx >= 0) {
+            set_hidden(idx, !g_apps[i].dock_visible);
+            if (g_apps[i].dock_visible) visible++;
+        }
+    }
+    /* Keep the floating bar centred and remove the empty space left by hidden
+     * launchers.  The two permanent items (Launchpad and Trash) and separator
+     * account for the fixed 158 px; each visible app contributes 64 px. */
+    if (dock_idx >= 0) {
+        char klass[32];
+        for (int i = 0; i <= 6; i++) {
+            snprintf(klass, sizeof(klass), "dock_apps_%d", i);
+            luna_update_classes(dock_idx, klass, NULL);
+        }
+        if (visible > 6) visible = 6;
+        snprintf(klass, sizeof(klass), "dock_apps_%d", visible);
+        luna_update_classes(dock_idx, NULL, klass);
+    }
+    luna_mark_layout_dirty();
+    shell_request_repaint(2);
+}
+
 static void apply_wm_settings(void) {
     char cmd[80];
     int ok = 1;
@@ -4386,6 +5793,16 @@ static void apply_wm_settings(void) {
     /* Skin titlebar style/colors/prefer_ssd win over the Settings toggle when
      * the active skin declares them. */
     ok &= skin_apply_wm_decoration(skin_find(g_settings.skin));
+
+    /* Dock motion is intentionally CSS-only.  The persisted setting merely
+     * exposes a class to the stylesheet; no per-frame icon interpolation is
+     * performed by the shell. */
+    {
+        int dock = luna_get_element_by_id("dock");
+        if (dock >= 0)
+            luna_update_classes(dock, "dock_animated",
+                                g_settings.dock_magnification ? "dock_animated" : NULL);
+    }
 
     if (ok) {
         if (g_wm_settings_pending)
@@ -4416,6 +5833,10 @@ static void settings_populate_ui(void) {
         snprintf(input_id, sizeof(input_id), "pref_%s", g_apps[i].key);
         int idx = luna_get_element_by_id(input_id);
         if (idx >= 0) luna_set_value(idx, g_apps[i].cmd);
+
+        snprintf(input_id, sizeof(input_id), "dock_pref_%s", g_apps[i].key);
+        if (luna_get_element_by_id(input_id) >= 0)
+            settings_mark_toggle(input_id, g_apps[i].dock_visible);
     }
     /* Hostname */
     int h = luna_get_element_by_id("pref_hostname");
@@ -4433,18 +5854,31 @@ static void settings_populate_ui(void) {
     settings_mark_toggle("wm_classic_titlebar", g_settings.classic_titlebar);
     settings_mark_toggle("wm_shortcuts", g_settings.super_shortcuts);
     settings_mark_toggle("wm_dock_mag", g_settings.dock_magnification);
+    settings_mark_toggle("wm_wallpaper_motion", g_settings.wallpaper_animation);
     settings_mark_toggle("wm_restore", g_settings.session_restore);
     settings_mark_gap();
+    settings_mark_audio_backend(g_settings.audio_backend);
+    settings_mark_brightness_backend(g_settings.brightness_backend);
+    settings_mark_display_scale();
+    {
+        int c = luna_get_element_by_id("pref_alsa_card");
+        if (c >= 0) luna_set_value(c, g_settings.alsa_card);
+        int k = luna_get_element_by_id("pref_alsa_control");
+        if (k >= 0) luna_set_value(k, g_settings.alsa_control);
+    }
+    settings_update_sound_status();
     /* Show apps tab by default */
     set_hidden(g_settings_panel_apps, 0);
     set_hidden(g_settings_panel_disp, 1);
     set_hidden(g_settings_panel_lang, 1);
     set_hidden(g_settings_panel_kb, 1);
+    set_hidden(g_settings_panel_sound, 1);
     set_hidden(g_settings_panel_wm, 1);
-    if (g_stab_apps_idx >= 0) luna_update_classes(g_stab_apps_idx, "active", "active");
+    if (g_stab_apps_idx  >= 0) luna_update_classes(g_stab_apps_idx,  "active", "active");
     if (g_stab_disp_idx  >= 0) luna_update_classes(g_stab_disp_idx,  "active", NULL);
     if (g_stab_lang_idx  >= 0) luna_update_classes(g_stab_lang_idx,  "active", NULL);
     if (g_stab_kb_idx    >= 0) luna_update_classes(g_stab_kb_idx,    "active", NULL);
+    if (g_stab_sound_idx >= 0) luna_update_classes(g_stab_sound_idx, "active", NULL);
     if (g_stab_wm_idx    >= 0) luna_update_classes(g_stab_wm_idx,    "active", NULL);
 }
 
@@ -4491,15 +5925,36 @@ static void on_settings_save(LunaElement* e) {
         const char* v = luna_get_value(h);
         if (v && *v) snprintf(g_settings.hostname, sizeof(g_settings.hostname), "%s", v);
     }
+    settings_read_alsa_fields();
     settings_save();
     apply_wallpaper(g_settings.wallpaper);
     cursor_theme_reload(g_settings.cursor_theme);
     apply_keyboard_layout(g_settings.kb_layout);
     apply_ui_language(g_settings.ui_language);
+    apply_toolkit_session_env();
     apply_wm_settings();
+    apply_dock_app_settings();
     g_cursor_reload_pending = 1;
     set_hidden(g_settings_idx, 1);
     toast_show("Settings", "Settings saved successfully.", 3.0);
+}
+
+static void on_dock_pref_toggle(LunaElement* e) {
+    const char* id = NULL;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* cand = luna_element_at(i)->id;
+        if (str_has_prefix(cand, "dock_pref_")) { id = cand; break; }
+    }
+    if (!id) return;
+    const char* key = id + strlen("dock_pref_");
+    for (int i = 0; i < APP_COUNT; i++) {
+        if (strcmp(g_apps[i].key, key)) continue;
+        g_apps[i].dock_visible = !g_apps[i].dock_visible;
+        settings_mark_toggle(id, g_apps[i].dock_visible);
+        apply_dock_app_settings();
+        settings_save();
+        return;
+    }
 }
 
 static void on_settings_tab(LunaElement* e) {
@@ -4516,6 +5971,7 @@ static void on_settings_tab(LunaElement* e) {
     int is_disp = !strcmp(id, "stab_disp");
     int is_lang = !strcmp(id, "stab_language");
     int is_kb = !strcmp(id, "stab_keyboard");
+    int is_sound = !strcmp(id, "stab_sound");
     int is_wm = !strcmp(id, "stab_wm");
 
     if (g_stab_apps_idx >= 0)
@@ -4526,13 +5982,17 @@ static void on_settings_tab(LunaElement* e) {
         luna_update_classes(g_stab_lang_idx, "active", is_lang ? "active" : NULL);
     if (g_stab_kb_idx >= 0)
         luna_update_classes(g_stab_kb_idx, "active", is_kb ? "active" : NULL);
+    if (g_stab_sound_idx >= 0)
+        luna_update_classes(g_stab_sound_idx, "active", is_sound ? "active" : NULL);
     if (g_stab_wm_idx >= 0)
         luna_update_classes(g_stab_wm_idx, "active", is_wm ? "active" : NULL);
     set_hidden(g_settings_panel_apps, !is_apps);
     set_hidden(g_settings_panel_disp, !is_disp);
     set_hidden(g_settings_panel_lang, !is_lang);
     set_hidden(g_settings_panel_kb, !is_kb);
+    set_hidden(g_settings_panel_sound, !is_sound);
     set_hidden(g_settings_panel_wm, !is_wm);
+    if (is_sound) settings_update_sound_status();
 }
 
 static void on_locale_select(LunaElement* e) {
@@ -4552,6 +6012,187 @@ static void on_locale_select(LunaElement* e) {
     apply_ui_language(locale_name);
     settings_save();
     toast_show("Language & Region", "Language updated for newly launched applications.", 3.0);
+}
+
+static void settings_read_alsa_fields(void) {
+    int ac = luna_get_element_by_id("pref_alsa_card");
+    if (ac >= 0) {
+        const char* v = luna_get_value(ac);
+        if (v && *v) {
+            int ok = 1;
+            if (!strcmp(v, "default")) ok = 1;
+            else if (!strncmp(v, "hw:", 3)) {
+                for (const char* p = v + 3; *p; p++)
+                    if (!isdigit((unsigned char)*p) && *p != ',') { ok = 0; break; }
+            } else {
+                for (const char* p = v; *p; p++)
+                    if (!isdigit((unsigned char)*p)) { ok = 0; break; }
+            }
+            if (ok) {
+                snprintf(g_settings.alsa_card, sizeof(g_settings.alsa_card), "%.31s", v);
+            }
+        }
+    }
+    int ak = luna_get_element_by_id("pref_alsa_control");
+    if (ak >= 0) {
+        const char* v = luna_get_value(ak);
+        if (v && *v && strlen(v) < sizeof(g_settings.alsa_control)) {
+            int ok = 1;
+            for (const char* p = v; *p; p++) {
+                if (!(isalnum((unsigned char)*p) || *p == ' ' || *p == '_' ||
+                      *p == '-' || *p == '.' || *p == '+' || *p == '/')) {
+                    ok = 0; break;
+                }
+            }
+            if (ok) {
+                snprintf(g_settings.alsa_control, sizeof(g_settings.alsa_control),
+                         "%.63s", v);
+            }
+        }
+    }
+}
+
+static void on_audio_backend_select(LunaElement* e) {
+    const char* id = NULL;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* cand = luna_element_at(i)->id;
+        if (str_has_prefix(cand, "audio_")) { id = cand; break; }
+    }
+    if (!id) return;
+    const char* backend = NULL;
+    if (!strcmp(id, "audio_auto")) backend = "auto";
+    else if (!strcmp(id, "audio_wpctl")) backend = "wpctl";
+    else if (!strcmp(id, "audio_pactl")) backend = "pactl";
+    else if (!strcmp(id, "audio_alsa")) backend = "alsa";
+    if (!backend) return;
+    settings_read_alsa_fields();
+    snprintf(g_settings.audio_backend, sizeof(g_settings.audio_backend), "%s", backend);
+    settings_mark_audio_backend(backend);
+    settings_save();
+    settings_update_sound_status();
+    toast_show("Sound",
+               !strcmp(backend, "alsa") ? "Volume slider uses ALSA (amixer)" :
+               !strcmp(backend, "wpctl") ? "Volume slider uses PipeWire (wpctl)" :
+               !strcmp(backend, "pactl") ? "Volume slider uses PulseAudio (pactl)" :
+               "Volume slider picks the first available backend",
+               2.5);
+}
+
+static void on_brightness_backend_select(LunaElement* e) {
+    const char* id = NULL;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* cand = luna_element_at(i)->id;
+        if (str_has_prefix(cand, "bright_")) { id = cand; break; }
+    }
+    if (!id) return;
+    const char* backend = NULL;
+    if (!strcmp(id, "bright_auto")) backend = "auto";
+    else if (!strcmp(id, "bright_sysfs")) backend = "sysfs";
+    else if (!strcmp(id, "bright_brightnessctl")) backend = "brightnessctl";
+    else if (!strcmp(id, "bright_xrandr")) backend = "xrandr";
+    if (!backend) return;
+    snprintf(g_settings.brightness_backend, sizeof(g_settings.brightness_backend), "%s", backend);
+    settings_mark_brightness_backend(backend);
+    settings_save();
+    settings_update_sound_status();
+    toast_show("Display", "Brightness backend updated", 2.0);
+}
+
+static int settings_pick_scale_value(LunaElement* e, const char* prefix,
+                                     const char* const* ids, const char* const* vals,
+                                     int n, char* out, size_t out_n) {
+    const char* id = NULL;
+    for (int i = elem_idx_of(e); i >= 0; i = luna_element_at(i)->parent_idx) {
+        const char* cand = luna_element_at(i)->id;
+        if (str_has_prefix(cand, prefix)) { id = cand; break; }
+    }
+    if (!id) return 0;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(id, ids[i])) continue;
+        snprintf(out, out_n, "%s", vals[i]);
+        return 1;
+    }
+    return 0;
+}
+
+static void on_display_scale_select(LunaElement* e) {
+    static const char* gdk_ids[] = { "gdk_scale_1", "gdk_scale_2" };
+    static const char* gdk_vals[] = { "1", "2" };
+    static const char* dpi_ids[] = {
+        "gdk_dpi_05", "gdk_dpi_075", "gdk_dpi_1", "gdk_dpi_125",
+        "gdk_dpi_15", "gdk_dpi_175", "gdk_dpi_2"
+    };
+    static const char* dpi_vals[] = { "0.5", "0.75", "1", "1.25", "1.5", "1.75", "2" };
+    static const char* qt_ids[] = {
+        "qt_scale_05", "qt_scale_075", "qt_scale_1", "qt_scale_125",
+        "qt_scale_15", "qt_scale_175", "qt_scale_2"
+    };
+    static const char* qt_vals[] = { "0.5", "0.75", "1", "1.25", "1.5", "1.75", "2" };
+    static const char* cur_ids[] = { "xcursor_24", "xcursor_32", "xcursor_48" };
+    static const char* cur_vals[] = { "24", "32", "48" };
+    char buf[8];
+    const char* toast = NULL;
+    if (settings_pick_scale_value(e, "gdk_scale_", gdk_ids, gdk_vals, 2,
+                                  buf, sizeof(buf))) {
+        snprintf(g_settings.gdk_scale, sizeof(g_settings.gdk_scale), "%s", buf);
+        toast = "GDK_SCALE updated for new apps";
+    } else if (settings_pick_scale_value(e, "gdk_dpi_", dpi_ids, dpi_vals, 7,
+                                         buf, sizeof(buf))) {
+        snprintf(g_settings.gdk_dpi_scale, sizeof(g_settings.gdk_dpi_scale), "%s", buf);
+        toast = "GDK_DPI_SCALE updated for new apps";
+    } else if (settings_pick_scale_value(e, "qt_scale_", qt_ids, qt_vals, 7,
+                                         buf, sizeof(buf))) {
+        snprintf(g_settings.qt_scale_factor, sizeof(g_settings.qt_scale_factor), "%s", buf);
+        toast = "QT_SCALE_FACTOR updated for new apps";
+    } else if (settings_pick_scale_value(e, "xcursor_", cur_ids, cur_vals, 3,
+                                         buf, sizeof(buf))) {
+        snprintf(g_settings.xcursor_size, sizeof(g_settings.xcursor_size), "%s", buf);
+        toast = "XCURSOR_SIZE updated for new apps";
+    } else {
+        return;
+    }
+    settings_mark_display_scale();
+    apply_toolkit_session_env();
+    settings_save();
+    toast_show("Display scale", toast, 2.5);
+}
+
+static void on_open_alsamixer(LunaElement* e) {
+    (void)e;
+    if (!command_available("alsamixer")) {
+        toast_show("ALSA", "alsamixer is not installed", 2.5);
+        return;
+    }
+    settings_read_alsa_fields();
+    /* Prefer the configured terminal app; fall back to common emulators. */
+    const char* term = NULL;
+    for (int i = 0; i < APP_COUNT; i++) {
+        if (!strcmp(g_apps[i].key, "terminal") && g_apps[i].cmd[0]) {
+            term = g_apps[i].cmd;
+            break;
+        }
+    }
+    char cmd[512];
+    const char* card = g_settings.alsa_card;
+    char mixer_args[96] = {0};
+    if (card[0] && strcmp(card, "default") != 0) {
+        if (!strncmp(card, "hw:", 3))
+            snprintf(mixer_args, sizeof(mixer_args), " -D %s", card);
+        else
+            snprintf(mixer_args, sizeof(mixer_args), " -c %s", card);
+    }
+    if (term && *term)
+        snprintf(cmd, sizeof(cmd), "%s -e \"alsamixer%s\"", term, mixer_args);
+    else if (command_available("sakura"))
+        snprintf(cmd, sizeof(cmd), "sakura -e \"alsamixer%s\"", mixer_args);
+    else if (command_available("xterm"))
+        snprintf(cmd, sizeof(cmd), "xterm -e alsamixer%s", mixer_args);
+    else {
+        toast_show("ALSA", "No terminal available to host alsamixer", 2.5);
+        return;
+    }
+    spawn_command(cmd);
+    toast_show("ALSA", "Opening alsamixer…", 2.0);
 }
 
 static void on_system_toggle(LunaElement* e) {
@@ -4581,11 +6222,15 @@ static void on_wm_toggle(LunaElement* e) {
     else if (!strcmp(id, "wm_classic_titlebar")) value = &g_settings.classic_titlebar;
     else if (!strcmp(id, "wm_shortcuts")) value = &g_settings.super_shortcuts;
     else if (!strcmp(id, "wm_dock_mag")) value = &g_settings.dock_magnification;
+    else if (!strcmp(id, "wm_wallpaper_motion")) value = &g_settings.wallpaper_animation;
     else if (!strcmp(id, "wm_restore")) value = &g_settings.session_restore;
     if (!value) return;
     *value = !*value;
     settings_mark_toggle(id, *value);
-    apply_wm_settings();
+    if (!strcmp(id, "wm_wallpaper_motion"))
+        apply_wallpaper(g_settings.wallpaper);
+    else
+        apply_wm_settings();
     settings_save();
     shell_request_repaint(-1);
 }
@@ -4764,6 +6409,10 @@ static void on_cc_toggle(LunaElement* e) {
         on_wifi_power(e);
         return;
     }
+    if (!strcmp(t->id, "cc_bt")) {
+        on_bt_power(e);
+        return;
+    }
     luna_update_classes(idx, "on", now_on ? "on" : NULL);
     /* Keep the knob's layout position stable and let the .on CSS transform
      * provide the entire animation.  Overriding rel_x here used to add a
@@ -4771,31 +6420,497 @@ static void on_cc_toggle(LunaElement* e) {
      * child jump out from under the pointer during release hit-testing. */
 }
 
-/* Slider geometry is re-clamped every frame, but the three element ids never
- * change.  Resolve them once: the lookup is a hash probe plus a strcmp, and
- * doing six of them per frame for two sliders is work the frame loop can do
- * without. */
-typedef struct {
+/* Brightness / volume: 0..1 cached levels mirrored by the Control Center
+ * sliders.  System backends are optional; the UI still moves when unavailable. */
+static float g_bright_level = 0.75f;
+static float g_vol_level = 0.60f;
+static int g_bright_available = 0;
+static int g_vol_available = 0;
+static double g_last_bright_apply = -1e9;
+static double g_last_vol_apply = -1e9;
+static float g_last_bright_written = -1.0f;
+static float g_last_vol_written = -1.0f;
+
+struct LunaSliderIds {
     int thumb, fill, track;
     int resolved;
     float last_thumb_x, last_track_w;
-} LunaSliderIds;
+    float* level;
+    int* available;
+    double* last_apply;
+    float* last_written;
+    int (*write_fn)(float level01);
+    const char* kind; /* "brightness" | "volume" */
+};
 
-static void slider_tick_cached(LunaSliderIds* ids, const char* thumb_id,
-                               const char* fill_id, const char* track_id) {
-    if (!ids->resolved) {
-        ids->thumb = luna_get_element_by_id(thumb_id);
-        ids->fill  = luna_get_element_by_id(fill_id);
-        ids->track = luna_get_element_by_id(track_id);
-        ids->last_thumb_x = NAN;
-        ids->last_track_w = NAN;
-        ids->resolved = 1;
+static int shell_run_capture(const char* cmd, char* out, size_t out_n) {
+    if (!cmd || !out || out_n == 0) return 0;
+    out[0] = 0;
+    /* popen children must not be stolen by the shell-wide waitpid(-1) reaper. */
+    pthread_mutex_lock(&g_child_reaper_mutex);
+    FILE* f = popen(cmd, "r");
+    if (!f) {
+        pthread_mutex_unlock(&g_child_reaper_mutex);
+        return 0;
     }
+    size_t used = 0;
+    while (used + 1 < out_n) {
+        size_t n = fread(out + used, 1, out_n - 1 - used, f);
+        if (n == 0) break;
+        used += n;
+    }
+    out[used] = 0;
+    int rc = pclose(f);
+    pthread_mutex_unlock(&g_child_reaper_mutex);
+    return rc == 0 || (WIFEXITED(rc) && WEXITSTATUS(rc) == 0);
+}
+
+static int shell_spawn_argv(const char* const argv[]) {
+    if (!argv || !argv[0]) return 0;
+    pid_t pid = -1;
+    if (posix_spawnp(&pid, argv[0], NULL, NULL, (char* const*)argv, environ) != 0)
+        return 0;
+    /* Detached: reaper collects the child.  Do not block the UI thread. */
+    return 1;
+}
+
+static int brightness_read_sysfs(float* out01) {
+    DIR* d = opendir("/sys/class/backlight");
+    if (!d) return 0;
+    struct dirent* de;
+    int ok = 0;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char cur_path[256], max_path[256];
+        if (snprintf(cur_path, sizeof(cur_path),
+                     "/sys/class/backlight/%s/brightness", de->d_name) >= (int)sizeof(cur_path))
+            continue;
+        if (snprintf(max_path, sizeof(max_path),
+                     "/sys/class/backlight/%s/max_brightness", de->d_name) >= (int)sizeof(max_path))
+            continue;
+        FILE* fc = fopen(cur_path, "r");
+        FILE* fm = fopen(max_path, "r");
+        long cur = 0, max = 0;
+        if (fc && fm && fscanf(fc, "%ld", &cur) == 1 && fscanf(fm, "%ld", &max) == 1 && max > 0) {
+            *out01 = (float)cur / (float)max;
+            if (*out01 < 0.0f) *out01 = 0.0f;
+            if (*out01 > 1.0f) *out01 = 1.0f;
+            ok = 1;
+        }
+        if (fc) fclose(fc);
+        if (fm) fclose(fm);
+        if (ok) break;
+    }
+    closedir(d);
+    return ok;
+}
+
+static int brightness_write_sysfs(float level01) {
+    DIR* d = opendir("/sys/class/backlight");
+    if (!d) return 0;
+    struct dirent* de;
+    int ok = 0;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        char max_path[256], cur_path[256];
+        if (snprintf(max_path, sizeof(max_path),
+                     "/sys/class/backlight/%s/max_brightness", de->d_name) >= (int)sizeof(max_path))
+            continue;
+        if (snprintf(cur_path, sizeof(cur_path),
+                     "/sys/class/backlight/%s/brightness", de->d_name) >= (int)sizeof(cur_path))
+            continue;
+        FILE* fm = fopen(max_path, "r");
+        long max = 0;
+        if (fm && fscanf(fm, "%ld", &max) == 1 && max > 0) {
+            long cur = (long)(level01 * (float)max + 0.5f);
+            if (cur < 1) cur = 1;
+            if (cur > max) cur = max;
+            FILE* fc = fopen(cur_path, "w");
+            if (fc) {
+                if (fprintf(fc, "%ld\n", cur) > 0) ok = 1;
+                fclose(fc);
+            }
+        }
+        if (fm) fclose(fm);
+        if (ok) break;
+    }
+    closedir(d);
+    return ok;
+}
+
+static int brightness_read_brightnessctl(float* out01) {
+    char buf[256];
+    if (!shell_run_capture("brightnessctl -m 2>/dev/null", buf, sizeof(buf))) return 0;
+    /* device,class,current,percent%,max */
+    char* p = buf;
+    for (int i = 0; i < 3; i++) {
+        p = strchr(p, ',');
+        if (!p) return 0;
+        p++;
+    }
+    int pct = atoi(p);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    *out01 = (float)pct / 100.0f;
+    return 1;
+}
+
+static int brightness_write_brightnessctl(float level01) {
+    char pct[16];
+    int v = (int)(level01 * 100.0f + 0.5f);
+    if (v < 1) v = 1;
+    if (v > 100) v = 100;
+    snprintf(pct, sizeof(pct), "%d%%", v);
+    const char* const argv[] = { "brightnessctl", "-q", "set", pct, NULL };
+    return shell_spawn_argv(argv);
+}
+
+static int brightness_read_xrandr(float* out01) {
+    char buf[8192];
+    if (!shell_run_capture("xrandr --verbose --current 2>/dev/null", buf, sizeof(buf)))
+        return 0;
+    const char* p = strstr(buf, "Brightness:");
+    if (!p) return 0;
+    float b = 0.0f;
+    if (sscanf(p + 11, "%f", &b) != 1) return 0;
+    if (b < 0.1f) b = 0.1f;
+    if (b > 1.0f) b = 1.0f;
+    *out01 = (b - 0.1f) / 0.9f;
+    return 1;
+}
+
+static int brightness_write_xrandr(float level01) {
+    char buf[512];
+    if (!shell_run_capture("xrandr --query 2>/dev/null", buf, sizeof(buf))) return 0;
+    char output[64] = {0};
+    char* line = buf;
+    while (*line) {
+        char* nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        if (strstr(line, " connected")) {
+            sscanf(line, "%63s", output);
+            if (strstr(line, " connected primary") || output[0]) break;
+        }
+        if (!nl) break;
+        line = nl + 1;
+    }
+    if (!output[0]) return 0;
+    float b = 0.1f + level01 * 0.9f;
+    char val[32];
+    snprintf(val, sizeof(val), "%.3f", b);
+    const char* const argv[] = { "xrandr", "--output", output, "--brightness", val, NULL };
+    return shell_spawn_argv(argv);
+}
+
+static int brightness_read(float* out01) {
+    const char* be = g_settings.brightness_backend;
+    if (!be[0] || !strcmp(be, "auto")) {
+        if (brightness_read_sysfs(out01)) return 1;
+        if (command_available("brightnessctl") && brightness_read_brightnessctl(out01)) return 1;
+        if (command_available("xrandr") && brightness_read_xrandr(out01)) return 1;
+        return 0;
+    }
+    if (!strcmp(be, "sysfs")) return brightness_read_sysfs(out01);
+    if (!strcmp(be, "brightnessctl"))
+        return command_available("brightnessctl") && brightness_read_brightnessctl(out01);
+    if (!strcmp(be, "xrandr"))
+        return command_available("xrandr") && brightness_read_xrandr(out01);
+    return 0;
+}
+
+static int brightness_write(float level01) {
+    if (level01 < 0.0f) level01 = 0.0f;
+    if (level01 > 1.0f) level01 = 1.0f;
+    const char* be = g_settings.brightness_backend;
+    if (!be[0] || !strcmp(be, "auto")) {
+        if (brightness_write_sysfs(level01)) return 1;
+        if (command_available("brightnessctl") && brightness_write_brightnessctl(level01)) return 1;
+        if (command_available("xrandr") && brightness_write_xrandr(level01)) return 1;
+        return 0;
+    }
+    if (!strcmp(be, "sysfs")) return brightness_write_sysfs(level01);
+    if (!strcmp(be, "brightnessctl"))
+        return command_available("brightnessctl") && brightness_write_brightnessctl(level01);
+    if (!strcmp(be, "xrandr"))
+        return command_available("xrandr") && brightness_write_xrandr(level01);
+    return 0;
+}
+
+static int volume_read_wpctl(float* out01) {
+    char buf[128];
+    if (!shell_run_capture("wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null",
+                          buf, sizeof(buf)))
+        return 0;
+    const char* p = strstr(buf, "Volume:");
+    if (!p) return 0;
+    float v = 0.0f;
+    if (sscanf(p + 7, "%f", &v) != 1) return 0;
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    *out01 = v;
+    return 1;
+}
+
+static int volume_write_wpctl(float level01) {
+    char val[32];
+    snprintf(val, sizeof(val), "%.3f", level01);
+    const char* const argv[] = {
+        "wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", val, NULL
+    };
+    return shell_spawn_argv(argv);
+}
+
+static int volume_read_pactl(float* out01) {
+    char buf[512];
+    if (!shell_run_capture("pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null",
+                          buf, sizeof(buf)))
+        return 0;
+    const char* p = strchr(buf, '%');
+    if (!p) return 0;
+    /* Walk back to the number before the first %. */
+    const char* s = p;
+    while (s > buf && (isdigit((unsigned char)s[-1]) || s[-1] == ' ')) s--;
+    int pct = atoi(s);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    *out01 = (float)pct / 100.0f;
+    return 1;
+}
+
+static int volume_write_pactl(float level01) {
+    char pct[16];
+    int v = (int)(level01 * 100.0f + 0.5f);
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    snprintf(pct, sizeof(pct), "%d%%", v);
+    const char* const argv[] = {
+        "pactl", "set-sink-volume", "@DEFAULT_SINK@", pct, NULL
+    };
+    return shell_spawn_argv(argv);
+}
+
+static int alsa_control_ok(const char* name) {
+    if (!name || !*name || strlen(name) >= 64) return 0;
+    for (const char* p = name; *p; p++) {
+        if (isalnum((unsigned char)*p) || *p == ' ' || *p == '_' ||
+            *p == '-' || *p == '.' || *p == '+' || *p == '/')
+            continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int alsa_card_ok(const char* card) {
+    if (!card || !*card) return 1;
+    if (!strcmp(card, "default")) return 1;
+    if (!strncmp(card, "hw:", 3)) {
+        for (const char* p = card + 3; *p; p++)
+            if (!isdigit((unsigned char)*p) && *p != ',') return 0;
+        return 1;
+    }
+    for (const char* p = card; *p; p++)
+        if (!isdigit((unsigned char)*p)) return 0;
+    return 1;
+}
+
+/* Build amixer argv into out[0..].  Returns argc, or 0 on invalid settings.
+ * out must hold at least 8 pointers; strings live in scratch buffers. */
+static int amixer_build_argv(const char* action, const char* value,
+                             char card_buf[32], char ctl_buf[64], char val_buf[32],
+                             const char* out[8]) {
+    if (!alsa_control_ok(g_settings.alsa_control) || !alsa_card_ok(g_settings.alsa_card))
+        return 0;
+    if (!command_available("amixer")) return 0;
+    snprintf(ctl_buf, 64, "%s", g_settings.alsa_control);
+    int n = 0;
+    out[n++] = "amixer";
+    out[n++] = "-M"; /* mapped volume percent, matches alsamixer */
+    const char* card = g_settings.alsa_card;
+    if (card[0] && strcmp(card, "default") != 0) {
+        if (!strncmp(card, "hw:", 3)) {
+            snprintf(card_buf, 32, "%s", card);
+            out[n++] = "-D";
+            out[n++] = card_buf;
+        } else {
+            snprintf(card_buf, 32, "%s", card);
+            out[n++] = "-c";
+            out[n++] = card_buf;
+        }
+    }
+    out[n++] = action;
+    out[n++] = ctl_buf;
+    if (value && *value) {
+        snprintf(val_buf, 32, "%s", value);
+        out[n++] = val_buf;
+    }
+    out[n] = NULL;
+    return n;
+}
+
+static int volume_read_amixer(float* out01) {
+    char card_buf[32], ctl_buf[64], val_buf[32];
+    const char* argv[8];
+    if (!amixer_build_argv("sget", NULL, card_buf, ctl_buf, val_buf, argv))
+        return 0;
+    /* Rebuild as a shell-safe capture command.  argv is validated above. */
+    char cmd[256];
+    int off = 0;
+    for (int i = 0; argv[i]; i++) {
+        int wrote = snprintf(cmd + off, sizeof(cmd) - (size_t)off, "%s%s",
+                             i ? " " : "", argv[i]);
+        if (wrote < 0 || (size_t)wrote >= sizeof(cmd) - (size_t)off) return 0;
+        off += wrote;
+    }
+    if (snprintf(cmd + off, sizeof(cmd) - (size_t)off, " 2>/dev/null") < 0)
+        return 0;
+    char buf[2048];
+    if (!shell_run_capture(cmd, buf, sizeof(buf))) return 0;
+    /* Prefer Playback percentages: "Playback 50 [39%] [-20.25dB]" */
+    int pct = -1;
+    for (char* p = buf; (p = strstr(p, "Playback")) != NULL; p++) {
+        char* br = strchr(p, '[');
+        if (!br) continue;
+        if (strchr(br, '%')) {
+            pct = atoi(br + 1);
+            break;
+        }
+    }
+    if (pct < 0) {
+        char* br = strchr(buf, '[');
+        while (br) {
+            if (strchr(br, '%')) { pct = atoi(br + 1); break; }
+            br = strchr(br + 1, '[');
+        }
+    }
+    if (pct < 0) return 0;
+    if (pct > 100) pct = 100;
+    *out01 = (float)pct / 100.0f;
+    return 1;
+}
+
+static int volume_write_amixer(float level01) {
+    char pct[16];
+    int v = (int)(level01 * 100.0f + 0.5f);
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    snprintf(pct, sizeof(pct), "%d%%", v);
+    char card_buf[32], ctl_buf[64], val_buf[32];
+    const char* argv_const[8];
+    if (!amixer_build_argv("sset", pct, card_buf, ctl_buf, val_buf, argv_const))
+        return 0;
+    /* shell_spawn_argv wants a mutable-looking argv array of non-const. */
+    char* argv[8];
+    for (int i = 0; i < 8; i++) {
+        argv[i] = (char*)argv_const[i];
+        if (!argv_const[i]) break;
+    }
+    return shell_spawn_argv((const char* const*)argv);
+}
+
+static int volume_try_backend(const char* be, float* out01, int write, float level01) {
+    if (!strcmp(be, "wpctl")) {
+        if (write) return command_available("wpctl") && volume_write_wpctl(level01);
+        return command_available("wpctl") && volume_read_wpctl(out01);
+    }
+    if (!strcmp(be, "pactl")) {
+        if (write) return command_available("pactl") && volume_write_pactl(level01);
+        return command_available("pactl") && volume_read_pactl(out01);
+    }
+    if (!strcmp(be, "alsa")) {
+        if (write) return volume_write_amixer(level01);
+        return volume_read_amixer(out01);
+    }
+    return 0;
+}
+
+static int volume_read(float* out01) {
+    const char* be = g_settings.audio_backend;
+    if (be[0] && strcmp(be, "auto") != 0)
+        return volume_try_backend(be, out01, 0, 0.0f);
+    if (volume_try_backend("wpctl", out01, 0, 0.0f)) return 1;
+    if (volume_try_backend("pactl", out01, 0, 0.0f)) return 1;
+    if (volume_try_backend("alsa", out01, 0, 0.0f)) return 1;
+    return 0;
+}
+
+static int volume_write(float level01) {
+    if (level01 < 0.0f) level01 = 0.0f;
+    if (level01 > 1.0f) level01 = 1.0f;
+    const char* be = g_settings.audio_backend;
+    if (be[0] && strcmp(be, "auto") != 0)
+        return volume_try_backend(be, NULL, 1, level01);
+    if (volume_try_backend("wpctl", NULL, 1, level01)) return 1;
+    if (volume_try_backend("pactl", NULL, 1, level01)) return 1;
+    if (volume_try_backend("alsa", NULL, 1, level01)) return 1;
+    return 0;
+}
+
+static float slider_read_ratio(int thumb_idx, int track_idx) {
+    if (thumb_idx < 0 || track_idx < 0) return 0.0f;
+    LunaElement* th = luna_element_at(thumb_idx);
+    LunaElement* tr = luna_element_at(track_idx);
+    if (!th || !tr) return 0.0f;
+    float usable = tr->w - th->w;
+    if (usable < 1.0f) usable = 1.0f;
+    float ratio = th->rel_x / usable;
+    if (ratio < 0.0f) ratio = 0.0f;
+    if (ratio > 1.0f) ratio = 1.0f;
+    return ratio;
+}
+
+static void slider_set_ratio(int thumb_idx, int fill_idx, int track_idx, float ratio) {
+    if (thumb_idx < 0 || track_idx < 0) return;
+    if (ratio < 0.0f) ratio = 0.0f;
+    if (ratio > 1.0f) ratio = 1.0f;
+    LunaElement* th = luna_element_at(thumb_idx);
+    LunaElement* tr = luna_element_at(track_idx);
+    if (!th || !tr) return;
+    float track_w = tr->w > 1.0f ? tr->w : 268.0f;
+    float thumb_w = th->w > 1.0f ? th->w : 18.0f;
+    float usable = track_w - thumb_w;
+    if (usable < 1.0f) usable = 1.0f;
+    float thumb_x = ratio * usable;
+
+    /* Inline style="left: N%" / "width: N%" must not keep winning over the
+     * absolute positions we write while the user drags. */
+    th->pct_left = 0;
+    th->has_left = 1;
+    th->rel_x = thumb_x;
+    th->rel_y = 1.0f;
+    th->pos_overridden_x = 1;
+    th->pos_overridden_y = 1;
+
+    if (fill_idx >= 0) {
+        LunaElement* fill = luna_element_at(fill_idx);
+        fill->pct_w = 0;
+        fill->has_css_width = 1;
+        fill->css_width = thumb_x + thumb_w * 0.5f;
+        if (fill->css_width < 0.0f) fill->css_width = 0.0f;
+        if (fill->css_width > track_w) fill->css_width = track_w;
+    }
+}
+
+static void slider_apply_level(LunaSliderIds* ids, int force) {
+    if (!ids || !ids->level || !ids->write_fn) return;
+    float level = *ids->level;
+    if (!force && ids->last_written && fabsf(level - *ids->last_written) < 0.005f)
+        return;
+    if (!force && ids->last_apply && g_now - *ids->last_apply < 0.05)
+        return;
+    if (ids->write_fn(level)) {
+        if (ids->available) *ids->available = 1;
+        if (ids->last_written) *ids->last_written = level;
+        if (ids->last_apply) *ids->last_apply = g_now;
+    } else if (ids->available) {
+        *ids->available = 0;
+    }
+}
+
+static void slider_tick_cached(LunaSliderIds* ids) {
+    if (!ids->resolved) return;
     int ti = ids->thumb, fi = ids->fill, ki = ids->track;
     if (ti == -1 || fi == -1 || ki == -1) return;
     LunaElement* th = luna_element_at(ti);
-    /* Hidden controls need no geometry maintenance. A drag remains active even
-     * across a visibility transition, so allow that final clamp. */
     if (!luna_element_visible(ti) && !th->is_active) {
         ids->last_thumb_x = NAN;
         ids->last_track_w = NAN;
@@ -4803,138 +6918,130 @@ static void slider_tick_cached(LunaSliderIds* ids, const char* thumb_id,
     }
     LunaElement* tr = luna_element_at(ki);
     float track_w = tr->w > 0 ? tr->w : 268.0f;
-    float max_x = track_w - 19.0f;
-    float thumb_x = th->rel_x;
-    if (thumb_x < 1.0f) thumb_x = 1.0f;
-    if (thumb_x > max_x) thumb_x = max_x;
+    float thumb_w = th->w > 1.0f ? th->w : 18.0f;
+    float usable = track_w - thumb_w;
+    if (usable < 1.0f) usable = 1.0f;
+
+    /* Prefer the live drag position; otherwise restore from the cached level. */
+    float thumb_x = th->is_active ? th->rel_x : (*ids->level * usable);
+    if (thumb_x < 0.0f) thumb_x = 0.0f;
+    if (thumb_x > usable) thumb_x = usable;
+
+    int moved = th->is_active &&
+                (ids->last_thumb_x != thumb_x || ids->last_track_w != track_w);
     if (thumb_x == ids->last_thumb_x && track_w == ids->last_track_w &&
-        th->rel_y == 1.0f && th->pos_overridden_x && th->pos_overridden_y)
+        th->rel_y == 1.0f && th->pos_overridden_x && th->pos_overridden_y &&
+        !th->pct_left)
         return;
 
-    th->rel_x = thumb_x;
-    th->rel_y = 1.0f;
-    th->pos_overridden_x = 1;
-    th->pos_overridden_y = 1;
-    LunaElement* fill = luna_element_at(fi);
-    fill->css_width = thumb_x + 9.0f;
-    fill->has_css_width = 1;
+    slider_set_ratio(ti, fi, ki, thumb_x / usable);
+    *ids->level = thumb_x / usable;
     ids->last_thumb_x = thumb_x;
     ids->last_track_w = track_w;
+    if (moved || th->is_active)
+        slider_apply_level(ids, 0);
 }
 
-static void slider_tick_when_needed(LunaSliderIds* ids, const char* thumb_id,
-                                    const char* fill_id, const char* track_id) {
-    /* The two shell sliders live in Control Center.  Resolve and clamp them
-     * only while the panel is visible or a drag is still active. */
+static void slider_tick_when_needed(LunaSliderIds* ids) {
+    if (!ids->resolved) return;
     if (!is_shown(g_cc_idx)) {
-        if (!ids->resolved || ids->thumb < 0) return;
+        if (ids->thumb < 0) return;
         LunaElement* th = luna_element_at(ids->thumb);
         if (!th || !th->is_active) return;
     }
-    slider_tick_cached(ids, thumb_id, fill_id, track_id);
+    slider_tick_cached(ids);
+}
+
+static void slider_resolve(LunaSliderIds* ids, const char* thumb_id,
+                           const char* fill_id, const char* track_id) {
+    ids->thumb = luna_get_element_by_id(thumb_id);
+    ids->fill  = luna_get_element_by_id(fill_id);
+    ids->track = luna_get_element_by_id(track_id);
+    ids->last_thumb_x = NAN;
+    ids->last_track_w = NAN;
+    ids->resolved = 1;
+    if (ids->thumb >= 0) {
+        LunaElement* th = luna_element_at(ids->thumb);
+        th->is_draggable = 1;
+        th->drag_mode = 2; /* drag self inside the track */
+        th->cursor_pointer = 1;
+    }
+}
+
+static void cc_sliders_pull_from_system(LunaSliderIds* bright, LunaSliderIds* vol) {
+    float b = g_bright_level, v = g_vol_level;
+    g_bright_available = brightness_read(&b);
+    if (g_bright_available) g_bright_level = b;
+    g_vol_available = volume_read(&v);
+    if (g_vol_available) g_vol_level = v;
+    if (bright && bright->resolved)
+        slider_set_ratio(bright->thumb, bright->fill, bright->track, g_bright_level);
+    if (vol && vol->resolved)
+        slider_set_ratio(vol->thumb, vol->fill, vol->track, g_vol_level);
+    if (bright) {
+        bright->last_thumb_x = NAN;
+        bright->last_track_w = NAN;
+        if (bright->last_written) *bright->last_written = g_bright_level;
+    }
+    if (vol) {
+        vol->last_thumb_x = NAN;
+        vol->last_track_w = NAN;
+        if (vol->last_written) *vol->last_written = g_vol_level;
+    }
+    luna_mark_layout_dirty();
+}
+
+static void cc_sliders_flush(LunaSliderIds* bright, LunaSliderIds* vol) {
+    if (bright && bright->resolved) {
+        *bright->level = slider_read_ratio(bright->thumb, bright->track);
+        slider_apply_level(bright, 1);
+    }
+    if (vol && vol->resolved) {
+        *vol->level = slider_read_ratio(vol->thumb, vol->track);
+        slider_apply_level(vol, 1);
+    }
+}
+
+/* Filled from main() so track-click handlers can reach the live slider state. */
+
+static void on_cc_track(LunaElement* e) {
+    int track = -1;
+    for (int i = elem_idx_of(e); i != -1; i = luna_element_at(i)->parent_idx) {
+        const char* id = luna_element_at(i)->id;
+        if (!strcmp(id, "bright_track") || !strcmp(id, "vol_track")) {
+            track = i;
+            break;
+        }
+    }
+    if (track < 0) return;
+    LunaSliderIds* ids = NULL;
+    if (!strcmp(luna_element_at(track)->id, "bright_track")) ids = g_bright_slider_ptr;
+    else ids = g_vol_slider_ptr;
+    if (!ids || !ids->resolved || ids->thumb < 0) return;
+
+    double mx = 0, my = 0;
+    luna_get_pointer(&mx, &my);
+    LunaElement* tr = luna_element_at(track);
+    LunaElement* th = luna_element_at(ids->thumb);
+    float usable = tr->w - (th->w > 1.0f ? th->w : 18.0f);
+    if (usable < 1.0f) usable = 1.0f;
+    float ratio = ((float)mx - tr->x - (th->w * 0.5f)) / usable;
+    slider_set_ratio(ids->thumb, ids->fill, ids->track, ratio);
+    *ids->level = slider_read_ratio(ids->thumb, ids->track);
+    ids->last_thumb_x = NAN;
+    slider_apply_level(ids, 1);
+    luna_mark_layout_dirty();
+    if (ids->available && !*ids->available)
+        toast_show(ids->kind && !strcmp(ids->kind, "volume") ? "Sound" : "Display",
+                   ids->kind && !strcmp(ids->kind, "volume")
+                       ? "No audio backend (wpctl/pactl)"
+                       : "No brightness backend",
+                   2.5);
 }
 
 /* ── System status snapshots (sampling lives in luna-monitor.h) ── */
 typedef LunaMonitorSnapshot ShellStatusSnapshot;
 #define SHELL_ASYNC_STATE_MAX LUNA_MONITOR_STATE_MAX
-
-/* Per-frame Dock magnification. Runs before luna_update() so the engine eases
- * cur_scale toward the transform_scale we set here. Growth is centered (no
- * vertical lift) so the enlarged icons stay inside the dock's fixed-height
- * layer surface — no clipping, no input-region carving needed. */
-static void dock_magnify_tick(void) {
-    static double last_mx = NAN, last_my = NAN;
-    static float last_x = NAN, last_y = NAN, last_w = NAN, last_h = NAN;
-    static float last_first_cx = NAN, last_last_cx = NAN;
-    static int last_active = -1, last_enabled = -1, last_count = -1;
-
-    int enabled = !g_chrome_dock_hidden && g_settings.dock_magnification &&
-                  g_dock_icon_count > 0;
-    if (!enabled) {
-        if (last_enabled == 0 && last_count == g_dock_icon_count) return;
-        int changed = 0;
-        for (int i = 0; i < g_dock_icon_count; i++) {
-            LunaElement* icon = luna_element_at(g_dock_icon_idx[i]);
-            if (!icon) continue;
-            if (fabsf(icon->transform_scale - 1.0f) > 0.001f ||
-                fabsf(icon->transform_tx) > 0.01f ||
-                fabsf(icon->transform_ty) > 0.01f) {
-                icon->transform_scale = 1.0f;
-                icon->transform_tx = 0.0f;
-                icon->transform_ty = 0.0f;
-                luna_mark_visual_dirty(g_dock_icon_idx[i]);
-                changed = 1;
-            }
-        }
-        if (changed) shell_request_repaint(2);
-        last_enabled = 0;
-        last_active = 0;
-        last_count = g_dock_icon_count;
-        last_mx = last_my = NAN;
-        return;
-    }
-
-    LunaElement* d = g_dock_root_idx >= 0 ? luna_element_at(g_dock_root_idx) : NULL;
-    int active = 0;
-    if (d && !d->display_none && strstr(d->class_name, "hidden") == NULL) {
-        float top = d->y, bot = d->y + d->h;
-        active = (g_luna_my >= top - 96.0 && g_luna_my <= bot + 24.0);
-    }
-
-    float first_cx = NAN, last_cx = NAN;
-    if (g_dock_icon_count > 0) {
-        LunaElement* first = luna_element_at(g_dock_icon_idx[0]);
-        LunaElement* tail = luna_element_at(g_dock_icon_idx[g_dock_icon_count - 1]);
-        if (first) first_cx = first->x + first->w * 0.5f;
-        if (tail) last_cx = tail->x + tail->w * 0.5f;
-    }
-    int geometry_changed = !d || d->x != last_x || d->y != last_y ||
-                           d->w != last_w || d->h != last_h ||
-                           first_cx != last_first_cx || last_cx != last_last_cx ||
-                           last_count != g_dock_icon_count;
-    int pointer_changed = g_luna_mx != last_mx || g_luna_my != last_my;
-    if (last_enabled == 1 && active == last_active && !geometry_changed &&
-        (!active || !pointer_changed))
-        return;
-
-    const float peak = 1.32f;
-    const float sigma = 66.0f;
-    const float cutoff = sigma * 3.0f; /* <0.4% scale contribution beyond this */
-    int changed = 0;
-    for (int i = 0; i < g_dock_icon_count; i++) {
-        LunaElement* e = luna_element_at(g_dock_icon_idx[i]);
-        if (!e) continue;
-        float scale = 1.0f;
-        if (active) {
-            float cx = e->x + e->w * 0.5f;
-            float dx = (float)g_luna_mx - cx;
-            if (fabsf(dx) < cutoff) {
-                float g = expf(-(dx * dx) / (2.0f * sigma * sigma));
-                scale = 1.0f + (peak - 1.0f) * g;
-            }
-        }
-        float ty = -(scale - 1.0f) * e->h * 0.18f;
-        if (fabsf(e->transform_scale - scale) > 0.001f ||
-            fabsf(e->transform_ty - ty) > 0.01f ||
-            fabsf(e->transform_tx) > 0.01f) {
-            e->transform_scale = scale;
-            e->transform_ty = ty;
-            e->transform_tx = 0.0f;
-            luna_mark_visual_dirty(g_dock_icon_idx[i]);
-            changed = 1;
-        }
-    }
-    if (changed) shell_request_repaint(2);
-
-    last_enabled = 1;
-    last_active = active;
-    last_count = g_dock_icon_count;
-    last_mx = g_luna_mx;
-    last_my = g_luna_my;
-    if (d) { last_x = d->x; last_y = d->y; last_w = d->w; last_h = d->h; }
-    last_first_cx = first_cx;
-    last_last_cx = last_cx;
-}
 
 static void poll_shell_state(void) {
     shell_state_watch_ensure();
@@ -5332,9 +7439,20 @@ static void on_win_click(LunaElement* e) {
 
 #define CLIP_MENU_SLOTS 8
 
+/* Persistent clipboard history lives under XDG_DATA_HOME (survives cache
+ * cleanups and reboots).  Fall back to the legacy cache path so existing
+ * histories keep showing until luna-clipboard migrates them. */
 static void clip_history_path(char* buf, size_t n) {
     char dir[PATH_MAX];
-    if (!xdg_app_dir(dir, sizeof(dir), g_xdg.cache_home, "luna-clipboard", 0) ||
+    buf[0] = 0;
+    if (xdg_app_dir(dir, sizeof(dir), g_xdg.data_home, "luna-clipboard", 0) &&
+        path_join2(buf, n, dir, "history") && access(buf, R_OK) == 0)
+        return;
+    if (xdg_app_dir(dir, sizeof(dir), g_xdg.cache_home, "luna-clipboard", 0) &&
+        path_join2(buf, n, dir, "history") && access(buf, R_OK) == 0)
+        return;
+    /* Prefer the durable location when the file does not exist yet. */
+    if (!xdg_app_dir(dir, sizeof(dir), g_xdg.data_home, "luna-clipboard", 0) ||
         !path_join2(buf, n, dir, "history"))
         buf[0] = 0;
 }
@@ -5524,20 +7642,36 @@ static void on_tray_click(LunaElement* e) {
  * These fills are leaf nodes whose width cannot affect a sibling or parent.
  * Updating them used to mark the entire document layout dirty every time a
  * CPU sample changed.  On KMS that full layout pass landed on the
- * render thread and showed up as a regular hitch.  Keep the resolved width in
- * sync directly; the next unrelated layout pass will preserve it through the
- * matching css_width value. */
+ * render thread and showed up as a regular hitch.  Keep both the percentage
+ * source and its resolved width in sync directly.  Keeping pct_w/raw_w is
+ * important: otherwise a later unrelated layout pass restores the stale
+ * percentage from the HTML and makes the meter jump back. */
 static int set_bar_fill(int fi, float pct) {
     if (fi < 0) return 0;
     LunaElement* fill = luna_element_at(fi);
     float bar_w = 176.0f;
     int p = fill->parent_idx;
-    if (p != -1 && luna_element_at(p)->w > 0) bar_w = luna_element_at(p)->w;
+    if (p != -1) {
+        LunaElement* bar = luna_element_at(p);
+        if (bar && bar->w > 0.0f) {
+            /* Percent widths resolve against the parent's content box.  Using
+             * the border-box width overfills the inset Win95/XP meters. */
+            bar_w = bar->w - bar->pad_l - bar->pad_r
+                         - bar->border_width * 2.0f;
+            if (bar_w < 0.0f) bar_w = 0.0f;
+        }
+    }
     if (pct < 0.0f) pct = 0.0f;
     if (pct > 100.0f) pct = 100.0f;
-    float nw = 2.0f + (bar_w - 2.0f) * pct / 100.0f;
-    if (fabsf(fill->css_width - nw) < 1.0f && fill->has_css_width) return 0;
-    fill->css_width = nw;
+    float ratio = pct / 100.0f;
+    float nw = bar_w * ratio;
+    if (fill->pct_w && fabsf(fill->raw_w - ratio) < 0.0001f &&
+        fabsf(fill->w - nw) < 0.5f)
+        return 0;
+    fill->pct_w = 1;
+    fill->raw_w = ratio;
+    fill->raw_w_off = 0.0f;
+    fill->css_width = ratio;
     fill->has_css_width = 1;
     fill->w = nw;
     return 1;
@@ -5613,9 +7747,10 @@ static void update_async_status(void) {
 
         snprintf(g_cached_net, sizeof(g_cached_net), "%s", fresh.network);
         idx = g_mb_wifi_idx;
+        const char* net_icon = (!strcmp(fresh.network, "Ethernet")) ? "\uf6ff" : "\uf1eb";
         if (g_mb_wifi_icon_idx >= 0 &&
-            text_would_change(g_mb_wifi_icon_idx, "\uf1eb")) {
-            luna_set_text_paint_only(g_mb_wifi_icon_idx, "\uf1eb");
+            text_would_change(g_mb_wifi_icon_idx, net_icon)) {
+            luna_set_text_paint_only(g_mb_wifi_icon_idx, net_icon);
             dirty_mb |= repaint_matters(g_mb_wifi_icon_idx);
         }
         if (text_would_change(idx, g_cached_net)) {
@@ -5761,6 +7896,11 @@ static void update_launchpad_filter(void) {
         if (idx >= 0)
             luna_element_at(idx)->display_none = !str_contains_ci(g_apps[i].name, q);
     }
+    for (int i = 0; i < g_lp_xdg_count; i++) {
+        int idx = g_lp_xdg_idx[i];
+        if (idx >= 0)
+            luna_element_at(idx)->display_none = !str_contains_ci(g_lp_xdg[i].name, q);
+    }
     luna_mark_layout_dirty();
 }
 
@@ -5833,6 +7973,12 @@ static void bind_indices(void) {
     g_confirm_idx       = luna_get_element_by_id("confirm_overlay");
     g_confirm_box_idx   = luna_get_element_by_id("confirm_box");
     g_toast_idx         = luna_get_element_by_id("toast");
+    if (g_toast_idx < 0) {
+        fprintf(stderr,
+                "[luna-shell] layout truncated: #toast missing "
+                "(need LUNA_UI_MAX_ELEMENTS >= DOM size; now %d, have %d elements)\n",
+                LUNA_UI_MAX_ELEMENTS, elem_count);
+    }
     g_lp_search_idx     = luna_get_element_by_id("lp_search");
     g_settings_idx      = luna_get_element_by_id("settings_win");
     g_settings_sheet_idx = luna_get_element_by_id("settings_sheet");
@@ -5840,11 +7986,13 @@ static void bind_indices(void) {
     g_settings_panel_disp = luna_get_element_by_id("settings_panel_disp");
     g_settings_panel_lang = luna_get_element_by_id("settings_panel_language");
     g_settings_panel_kb   = luna_get_element_by_id("settings_panel_keyboard");
+    g_settings_panel_sound = luna_get_element_by_id("settings_panel_sound");
     g_settings_panel_wm   = luna_get_element_by_id("settings_panel_wm");
     g_stab_apps_idx     = luna_get_element_by_id("stab_apps");
     g_stab_disp_idx     = luna_get_element_by_id("stab_disp");
     g_stab_lang_idx     = luna_get_element_by_id("stab_language");
     g_stab_kb_idx       = luna_get_element_by_id("stab_keyboard");
+    g_stab_sound_idx    = luna_get_element_by_id("stab_sound");
     g_stab_wm_idx       = luna_get_element_by_id("stab_wm");
     g_win_menu_idx      = luna_get_element_by_id("win_menu");
     g_clip_menu_idx     = luna_get_element_by_id("clip_menu");
@@ -5852,8 +8000,13 @@ static void bind_indices(void) {
     g_mb_cc_idx         = luna_get_element_by_id("mb_cc");
     g_mb_wifi_idx       = luna_get_element_by_id("mb_wifi");
     g_wifi_menu_idx     = luna_get_element_by_id("wifi_menu");
+    g_bt_menu_idx       = luna_get_element_by_id("bt_menu");
     g_mb_weather_idx    = luna_get_element_by_id("mb_weather");
     g_weather_menu_idx  = luna_get_element_by_id("weather_menu");
+    g_calendar_menu_idx = luna_get_element_by_id("calendar_menu");
+    g_mb_clock_idx      = luna_get_element_by_id("mb_clock");
+    g_net_detail_idx    = luna_get_element_by_id("net_detail_win");
+    g_net_detail_box_idx = luna_get_element_by_id("net_detail_box");
 
     for (int i = 0; i < UI_CACHE_COUNT; i++)
         g_ui_idx[i] = luna_get_element_by_id(g_ui_cache_ids[i]);
@@ -5866,12 +8019,15 @@ static void bind_indices(void) {
     if (g_about_box_idx >= 0) {
         luna_update_classes(g_about_box_idx, NULL, "sheet_box");
     }
+    if (g_net_detail_box_idx >= 0) {
+        luna_update_classes(g_net_detail_box_idx, NULL, "sheet_box");
+    }
 
     /* Drag handles used to advertise draggable="1" in the markup.  Keep this
      * behavior in the shell so presentation-only HTML changes cannot disable
      * moving either sheet. */
     {
-        const char* drag_ids[] = { "about_drag", "settings_drag", "confirm_drag" };
+        const char* drag_ids[] = { "about_drag", "settings_drag", "confirm_drag", "net_detail_drag" };
         for (size_t i = 0; i < sizeof(drag_ids) / sizeof(drag_ids[0]); i++) {
             int idx = luna_get_element_by_id(drag_ids[i]);
             if (idx < 0) continue;
@@ -5896,9 +8052,27 @@ static void bind_indices(void) {
         g_lp_app_idx[i] = luna_get_element_by_id(id);
         wire_subtree(g_lp_app_idx[i], on_launch_app);
         app_set_dot(&g_apps[i], 0);
+        snprintf(id, sizeof(id), "dock_pref_%s", g_apps[i].key);
+        wire_subtree(luna_get_element_by_id(id), on_dock_pref_toggle);
     }
+    apply_dock_app_settings();
+    /* Settings is shell chrome, not an external application.  Override both
+     * generic app launch bindings after the loop so the dock and Launchpad
+     * open Luna's existing modeless settings sheet. */
+    wire_subtree(luna_get_element_by_id("dock_settings"), on_settings_open);
+    wire_subtree(luna_get_element_by_id("lp_settings"), on_settings_open);
     wire_subtree(luna_get_element_by_id("mb_logo"),       on_luna_menu);
     wire_subtree(luna_get_element_by_id("mb_wifi"),       on_wifi_menu);
+    wire_subtree(luna_get_element_by_id("mb_clock"),      on_calendar_menu);
+    wire_subtree(luna_get_element_by_id("wg_date"),       on_calendar_menu);
+    wire_subtree(luna_get_element_by_id("widget_clock"),  on_calendar_menu);
+    wire_subtree(luna_get_element_by_id("cal_prev"),      on_calendar_prev);
+    wire_subtree(luna_get_element_by_id("cal_next"),      on_calendar_next);
+    wire_subtree(luna_get_element_by_id("cal_today_btn"), on_calendar_today);
+    for (int i = 0; i < 42; i++) {
+        char id[16]; snprintf(id, sizeof(id), "cal_d%d", i);
+        wire_subtree(luna_get_element_by_id(id), on_calendar_day);
+    }
     wire_subtree(luna_get_element_by_id("mb_weather"),    on_weather_menu);
     wire_subtree(luna_get_element_by_id("weather_go"),    on_weather_go);
     wire_subtree(luna_get_element_by_id("widget_weather"),on_widget_weather);
@@ -5915,12 +8089,25 @@ static void bind_indices(void) {
     wire_subtree(luna_get_element_by_id("cc_wifi"),       on_cc_toggle);
     wire_subtree(luna_get_element_by_id("cc_bt"),         on_cc_toggle);
     wire_subtree(luna_get_element_by_id("cc_night"),      on_cc_toggle);
+    wire_subtree(luna_get_element_by_id("bright_track"),  on_cc_track);
+    wire_subtree(luna_get_element_by_id("vol_track"),     on_cc_track);
     wire_subtree(luna_get_element_by_id("wifi_power"),    on_wifi_power);
     wire_subtree(luna_get_element_by_id("wifi_connect"),  on_wifi_connect);
     wire_subtree(luna_get_element_by_id("wifi_scan"),     on_wifi_scan);
     for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
         char id[16]; snprintf(id, sizeof(id), "wifi_%d", i);
         wire_subtree(luna_get_element_by_id(id), on_wifi_network);
+    }
+    for (int i = 0; i < MAX_ETHERNET_LINKS; i++) {
+        char id[16]; snprintf(id, sizeof(id), "eth_%d", i);
+        wire_subtree(luna_get_element_by_id(id), on_eth_link);
+    }
+    wire_subtree(luna_get_element_by_id("bt_power"),      on_bt_power);
+    wire_subtree(luna_get_element_by_id("bt_scan"),       on_bt_scan);
+    wire_subtree(luna_get_element_by_id("cc_bt_open"),    on_bt_menu);
+    for (int i = 0; i < MAX_BT_DEVICES; i++) {
+        char id[16]; snprintf(id, sizeof(id), "bt_%d", i);
+        wire_subtree(luna_get_element_by_id(id), on_bt_device);
     }
 
     /* Wire wallpaper selection thumbs */
@@ -5970,6 +8157,7 @@ static void bind_indices(void) {
     wire_subtree(g_stab_disp_idx, on_settings_tab);
     wire_subtree(g_stab_lang_idx, on_settings_tab);
     wire_subtree(g_stab_kb_idx, on_settings_tab);
+    wire_subtree(g_stab_sound_idx, on_settings_tab);
     wire_subtree(g_stab_wm_idx, on_settings_tab);
     {
         const char* locale_ids[] = { "locale_ja", "locale_en", "locale_c" };
@@ -5978,9 +8166,32 @@ static void bind_indices(void) {
         wire_subtree(luna_get_element_by_id("sys_numlock"), on_system_toggle);
     }
     {
+        const char* audio_ids[] = {
+            "audio_auto", "audio_wpctl", "audio_pactl", "audio_alsa"
+        };
+        for (size_t i = 0; i < sizeof(audio_ids) / sizeof(audio_ids[0]); i++)
+            wire_subtree(luna_get_element_by_id(audio_ids[i]), on_audio_backend_select);
+        const char* bright_ids[] = {
+            "bright_auto", "bright_sysfs", "bright_brightnessctl", "bright_xrandr"
+        };
+        for (size_t i = 0; i < sizeof(bright_ids) / sizeof(bright_ids[0]); i++)
+            wire_subtree(luna_get_element_by_id(bright_ids[i]), on_brightness_backend_select);
+        wire_subtree(luna_get_element_by_id("btn_open_alsamixer"), on_open_alsamixer);
+        const char* scale_ids[] = {
+            "gdk_scale_1", "gdk_scale_2",
+            "gdk_dpi_05", "gdk_dpi_075", "gdk_dpi_1", "gdk_dpi_125",
+            "gdk_dpi_15", "gdk_dpi_175", "gdk_dpi_2",
+            "qt_scale_05", "qt_scale_075", "qt_scale_1", "qt_scale_125",
+            "qt_scale_15", "qt_scale_175", "qt_scale_2",
+            "xcursor_24", "xcursor_32", "xcursor_48"
+        };
+        for (size_t i = 0; i < sizeof(scale_ids) / sizeof(scale_ids[0]); i++)
+            wire_subtree(luna_get_element_by_id(scale_ids[i]), on_display_scale_select);
+    }
+    {
         const char* toggle_ids[] = {
             "wm_snap", "wm_top_maximize", "wm_double_click", "wm_classic_titlebar", "wm_shortcuts",
-            "wm_dock_mag", "wm_restore"
+            "wm_dock_mag", "wm_wallpaper_motion", "wm_restore"
         };
         for (size_t i = 0; i < sizeof(toggle_ids) / sizeof(toggle_ids[0]); i++)
             wire_subtree(luna_get_element_by_id(toggle_ids[i]), on_wm_toggle);
@@ -6010,6 +8221,11 @@ static void bind_indices(void) {
     wire_subtree(luna_get_element_by_id("stl_max"), on_settings_max);
     wire_subtree(luna_get_element_by_id("tl_close"), on_about_close);
     wire_subtree(luna_get_element_by_id("about_backdrop"), on_about_close);
+    wire_subtree(luna_get_element_by_id("ntl_close"), net_detail_close);
+    wire_subtree(luna_get_element_by_id("ntl_min"), net_detail_close);
+    wire_subtree(luna_get_element_by_id("net_detail_close"), net_detail_close);
+    wire_subtree(luna_get_element_by_id("net_detail_action"), on_net_detail_action);
+    wire_subtree(luna_get_element_by_id("net_detail_backdrop"), net_detail_close);
     wire_subtree(luna_get_element_by_id("stl_close"), on_settings_close);
     wire_subtree(luna_get_element_by_id("settings_backdrop"), on_settings_close);
     wire_subtree(luna_get_element_by_id("settings_cancel"), on_settings_close);
@@ -6018,16 +8234,6 @@ static void bind_indices(void) {
     wire_subtree(luna_get_element_by_id("ctl_close"),        on_confirm_cancel);
     wire_subtree(luna_get_element_by_id("confirm_cancel"), on_confirm_cancel);
     wire_subtree(luna_get_element_by_id("confirm_ok"), on_confirm_ok);
-
-    /* Cache dock geometry for magnification: the dock root and every icon
-     * square (.dock_icon, excluding the .dock_dot running indicators). */
-    g_dock_root_idx = luna_get_element_by_id("dock");
-    g_dock_icon_count = 0;
-    for (int i = 0; i < luna_element_count() && g_dock_icon_count < MAX_DOCK_ICONS; i++) {
-        LunaElement* e = luna_element_at(i);
-        if (strstr(e->class_name, "dock_icon"))
-            g_dock_icon_idx[g_dock_icon_count++] = i;
-    }
 
     /* ── Hot-path child element cache ──
      * One linear pass at bind time; O(1) lookups in every render tick. */
@@ -6092,7 +8298,7 @@ static void bind_indices(void) {
         }
     }
 
-    /* Initial Control Center state uses the persisted Wi-Fi preference. */
+    /* Initial Control Center state uses the persisted Wi-Fi / Bluetooth preference. */
     int cc_wifi = luna_get_element_by_id("cc_wifi");
     if (cc_wifi != -1)
         luna_update_classes(cc_wifi, "on", g_settings.wifi_enabled ? "on" : NULL);
@@ -6101,8 +8307,14 @@ static void bind_indices(void) {
         luna_element_at(k)->rel_x = g_settings.wifi_enabled ? 21.0f : 3.0f;
         luna_element_at(k)->pos_overridden_x = 1;
     }
+    int cc_bt = luna_get_element_by_id("cc_bt");
+    if (cc_bt != -1)
+        luna_update_classes(cc_bt, "on", g_settings.bluetooth_enabled ? "on" : NULL);
     k = luna_get_element_by_id("cc_bt_knob");
-    if (k != -1) { luna_element_at(k)->rel_x = 21.0f; luna_element_at(k)->pos_overridden_x = 1; }
+    if (k != -1) {
+        luna_element_at(k)->rel_x = g_settings.bluetooth_enabled ? 21.0f : 3.0f;
+        luna_element_at(k)->pos_overridden_x = 1;
+    }
 }
 
 /* ── Display backends ──────────────────────────────────────────────────
@@ -6340,7 +8552,10 @@ static void dispatch_key(int key, int scancode, int action, int mods) {
             if (is_shown(g_win_menu_idx))    { dismiss_win_menu();      return; }
             if (is_shown(g_clip_menu_idx))   { dismiss_clip_menu();     return; }
             if (is_shown(g_wifi_menu_idx))   { dismiss_wifi_menu();     return; }
+            if (is_shown(g_bt_menu_idx))     { dismiss_bt_menu();       return; }
             if (is_shown(g_weather_menu_idx)){ dismiss_weather_menu();  return; }
+            if (is_shown(g_calendar_menu_idx)){ dismiss_calendar_menu(); return; }
+            if (is_shown(g_net_detail_idx))  { net_detail_close(NULL);  return; }
             if (is_shown(g_luna_menu_idx))   { dismiss_luna_menu(g_luna_menu_idx); return; }
             if (is_shown(g_cc_idx))          { dismiss_cc(g_cc_idx);    return; }
         }
@@ -7227,13 +9442,22 @@ static LunaSurface g_surfs[] = {
       .anchor=ZWLR_ANCHOR_TOP|ZWLR_ANCHOR_RIGHT,
       .margin_top=38, .margin_right=14, .fixed_w=340, .fixed_h=76,
       .is_overlay=1 },
-    /* wifi_menu: full-output overlay so position_menu_near works on Wayland */
+    /* wifi_menu / bt_menu: full-output overlays so position_menu_near works on Wayland */
     { .name="wifi_menu",    .root_id="wifi_menu",
+      .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
+      .is_overlay=1 },
+    { .name="bt_menu",      .root_id="bt_menu",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
       .is_overlay=1 },
     { .name="weather_menu", .root_id="weather_menu",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
       .is_overlay=1, .is_kbd=1 },
+    { .name="calendar_menu", .root_id="calendar_menu",
+      .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
+      .is_overlay=1 },
+    { .name="net_detail", .root_id="net_detail_win", .input_root_id="net_detail_box",
+      .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
+      .is_overlay=1 },
 };
 #define LUNA_SURF_COUNT (int)(sizeof(g_surfs)/sizeof(g_surfs[0]))
 
@@ -9058,11 +11282,11 @@ int main(int argc, char** argv) {
     if (g_skin_override && *g_skin_override)
         snprintf(g_settings.skin, sizeof(g_settings.skin), "%s", g_skin_override);
     int startup_skin = skin_find(g_settings.skin);
-    if (startup_skin == 0 && strcmp(g_settings.skin, "luna"))
-        snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+    if (startup_skin == 0 && strcmp(g_settings.skin, "default"))
+        snprintf(g_settings.skin, sizeof(g_settings.skin), "default");
     if (!g_layout_path && startup_skin > 0 && g_skins[startup_skin].layout[0])
         g_layout_path = g_skins[startup_skin].layout;
-    /* Built-in "luna" skin has no layout.html of its own.  An installed
+    /* The built-in default skin is embedded.  An installed
      * session still has PREFIX/share/luna-desktop/shell/luna-shell.html;
      * falling back to the embedded copy used cwd-relative "ui/" for CSS
      * and painted only glClear — black wallpaper, invisible menubar/dock. */
@@ -9141,12 +11365,12 @@ int main(int argc, char** argv) {
     }
     if (!loaded) {
         fprintf(stderr, "[luna-shell] using embedded layout (no luna-desktop/shell/luna-shell.html)\n");
-        luna_set_html_base_dir("ui");
+        luna_set_html_base_dir("skins/default");
         luna_parse_html(default_html);
     } else {
         fprintf(stderr, "[luna-shell] layout %s\n", g_layout_path);
     }
-    /* Authoring contract: layout.html may <link> ../_base/luna-shell.css and
+    /* Authoring contract: layout.html may <link> ../default/style.css and
      * style.css so a browser preview matches the running shell.  When those
      * links load successfully, trust that cascade as-is.  --css still wins
      * and rebuilds the sheet; otherwise fall back to the embedded base and
@@ -9157,7 +11381,7 @@ int main(int argc, char** argv) {
         if (startup_skin > 0 && !luna_load_css_file(g_skins[startup_skin].css)) {
             fprintf(stderr, "[luna-shell] skin '%s' could not load; using Luna Moonlight\n",
                     g_settings.skin);
-            snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+            snprintf(g_settings.skin, sizeof(g_settings.skin), "default");
         }
     } else if (luna_css_from_document) {
         /* layout.html already linked base (+ usually its own style.css).
@@ -9170,14 +11394,14 @@ int main(int argc, char** argv) {
             !luna_load_css_file(g_skins[startup_skin].css)) {
             fprintf(stderr, "[luna-shell] skin '%s' could not load; using Luna Moonlight\n",
                     g_settings.skin);
-            snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+            snprintf(g_settings.skin, sizeof(g_settings.skin), "default");
         }
     } else {
         luna_parse_css(default_css);
         if (startup_skin > 0 && !luna_load_css_file(g_skins[startup_skin].css)) {
             fprintf(stderr, "[luna-shell] skin '%s' could not load; using Luna Moonlight\n",
                     g_settings.skin);
-            snprintf(g_settings.skin, sizeof(g_settings.skin), "luna");
+            snprintf(g_settings.skin, sizeof(g_settings.skin), "default");
         }
     }
     luna_inject_body_background();
@@ -9255,15 +11479,88 @@ int main(int argc, char** argv) {
             fprintf(stderr, "[luna-shell] warning: cannot restore saved Wi-Fi state\n");
     }
 
+    LunaEthernetConfig eth_cfg = {
+        .notify = shell_async_notify,
+        .notify_user = NULL,
+    };
+    if (!luna_ethernet_init(&eth_cfg)) {
+        g_eth_service_available = 0;
+        g_eth_busy = 0;
+        snprintf(g_eth_error, sizeof(g_eth_error), "Ethernet worker unavailable");
+        fprintf(stderr, "[luna-shell] warning: Ethernet worker unavailable\n");
+    } else {
+        g_eth_service_available = 1;
+        g_eth_busy = 1;
+        g_last_eth_request = plat_time();
+    }
+
+    LunaBluetoothConfig bt_cfg = {
+        .notify = shell_async_notify,
+        .notify_user = NULL,
+    };
+    if (!luna_bluetooth_init(&bt_cfg)) {
+        g_bt_service_available = 0;
+        g_bt_busy = 0;
+        snprintf(g_bt_error, sizeof(g_bt_error), "Bluetooth worker unavailable");
+        fprintf(stderr, "[luna-shell] warning: Bluetooth worker unavailable\n");
+    } else {
+        g_bt_service_available = 1;
+        g_bt_busy = 1;
+        g_last_bt_request = plat_time();
+        if (!luna_bluetooth_request_set_powered(g_settings.bluetooth_enabled))
+            fprintf(stderr, "[luna-shell] warning: cannot restore saved Bluetooth state\n");
+    }
+
     g_now = plat_time();
     toast_show("Welcome to Luna", "Your desktop is ready.", 8.0);
     session_restore_schedule();
+
+    /* Debug: LUNA_DEBUG_LAUNCH=sakura,pcmanfm forces dock launches once the
+     * shell is up — used to capture child abort env without clicking the dock. */
+    {
+        const char* dbg = getenv("LUNA_DEBUG_LAUNCH");
+        if (dbg && *dbg) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "%s", dbg);
+            for (char* tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+                while (*tok == ' ') tok++;
+                for (int i = 0; i < APP_COUNT; i++) {
+                    if (!strcmp(g_apps[i].key, tok) || !strcmp(g_apps[i].default_cmd, tok) ||
+                        !strcmp(g_apps[i].cmd, tok)) {
+                        fprintf(stderr, "[luna-shell] LUNA_DEBUG_LAUNCH → %s\n", g_apps[i].key);
+                        app_launch(&g_apps[i]);
+                        break;
+                    }
+                }
+            }
+        }
+    }
     weather_request(g_settings.weather_city);
 
     double last    = g_now;
     int    prev_ww = 0, prev_wh = 0;
-    LunaSliderIds bright_slider = { .thumb = -1, .fill = -1, .track = -1 };
-    LunaSliderIds vol_slider    = { .thumb = -1, .fill = -1, .track = -1 };
+    LunaSliderIds bright_slider = {
+        .thumb = -1, .fill = -1, .track = -1,
+        .level = &g_bright_level,
+        .available = &g_bright_available,
+        .last_apply = &g_last_bright_apply,
+        .last_written = &g_last_bright_written,
+        .write_fn = brightness_write,
+        .kind = "brightness",
+    };
+    LunaSliderIds vol_slider = {
+        .thumb = -1, .fill = -1, .track = -1,
+        .level = &g_vol_level,
+        .available = &g_vol_available,
+        .last_apply = &g_last_vol_apply,
+        .last_written = &g_last_vol_written,
+        .write_fn = volume_write,
+        .kind = "volume",
+    };
+    slider_resolve(&bright_slider, "bright_thumb", "bright_fill", "bright_track");
+    slider_resolve(&vol_slider, "vol_thumb", "vol_fill", "vol_track");
+    g_bright_slider_ptr = &bright_slider;
+    g_vol_slider_ptr = &vol_slider;
 
     while (!g_should_close) {
         g_now = plat_time();
@@ -9310,9 +11607,8 @@ int main(int argc, char** argv) {
             wm_settings_retry_tick();
             session_restore_tick();
         }
-        slider_tick_when_needed(&bright_slider, "bright_thumb", "bright_fill", "bright_track");
-        slider_tick_when_needed(&vol_slider, "vol_thumb", "vol_fill", "vol_track");
-        if (!interaction_busy) dock_magnify_tick();
+        slider_tick_when_needed(&bright_slider);
+        slider_tick_when_needed(&vol_slider);
         cursor_theme_tick_and_refresh();
         if (!interaction_busy && g_toast_deadline > 0.0 && g_now > g_toast_deadline) {
             set_hidden(g_toast_idx, 1);
@@ -9339,8 +11635,9 @@ int main(int argc, char** argv) {
             /* Wallpaper aurora/stars: only damage the bg layer when the
              * desktop is empty. Continuous full-screen commits under open
              * windows force a whole-desktop re-composite every tick → flicker
-             * and starve client frame callbacks.  Thirty hertz keeps the idle
-             * animation smooth without repainting beneath application windows. */
+             * and starve client frame callbacks.  Twelve hertz keeps the idle
+             * animation smooth enough without repainting beneath
+             * application windows. */
             int desktop_busy = shell_desktop_busy();
             int bg_ticking = g_bg_animated && !desktop_busy && !interaction_busy;
             if (bg_ticking &&
@@ -9374,7 +11671,7 @@ int main(int argc, char** argv) {
             /* The integrated update result is also the complete redraw decision
              * for the single KMS/X11 framebuffer. */
             /* Pointer/hover easing runs at vblank cadence, while an idle CSS
-             * wallpaper runs at 30 Hz.  The KMS hardware cursor remains
+             * wallpaper runs at 12 Hz.  The KMS hardware cursor remains
              * full-rate without repainting the
              * primary plane, saving GPU work and memory bandwidth.  A still
              * wallpaper is entirely event-driven: the old two-second "safety"
@@ -9417,6 +11714,8 @@ int main(int argc, char** argv) {
     }
     session_save();
     luna_weather_shutdown();
+    luna_bluetooth_shutdown();
+    luna_ethernet_shutdown();
     luna_wifi_shutdown();
     luna_monitor_shutdown();
     shell_state_watch_close();

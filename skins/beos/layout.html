@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Luna Shell — BeOS</title>
   <!-- Open this file in a browser to preview; luna-shell loads the same links. -->
-  <link rel="stylesheet" href="../_base/luna-shell.css">
+  <link rel="stylesheet" href="../default/style.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -125,6 +125,34 @@
     </div>
     <div class="menu_sep"></div>
     <div id="wifi_scan" class="menu_item"><span class="mi_sym luna_icon">&#xf021;</span><span class="mi_label">Scan for Networks</span></div>
+    <div class="menu_sep" id="eth_sep"></div>
+    <span class="menu_section_label" id="eth_section">Ethernet</span>
+    <span id="eth_status">Checking wired interfaces...</span>
+    <div id="eth_0" class="menu_item eth_link hidden"><span class="mi_sym luna_icon">&#xf6ff;</span><span class="mi_label">Ethernet</span><span class="eth_state"></span></div>
+    <div id="eth_1" class="menu_item eth_link hidden"><span class="mi_sym luna_icon">&#xf6ff;</span><span class="mi_label">Ethernet</span><span class="eth_state"></span></div>
+    <div id="eth_2" class="menu_item eth_link hidden"><span class="mi_sym luna_icon">&#xf6ff;</span><span class="mi_label">Ethernet</span><span class="eth_state"></span></div>
+    <div id="eth_3" class="menu_item eth_link hidden"><span class="mi_sym luna_icon">&#xf6ff;</span><span class="mi_label">Ethernet</span><span class="eth_state"></span></div>
+  </div>
+
+
+  <!-- Bluetooth menu (backed by bluetoothctl / ConnMan) -->
+  <div id="bt_menu" class="menu_panel hidden">
+    <div id="bt_head">
+      <span id="bt_title">Bluetooth</span>
+      <div class="cc_toggle" id="bt_power"><div class="cc_knob"></div></div>
+    </div>
+    <span id="bt_status">Checking Bluetooth service...</span>
+    <div class="menu_sep"></div>
+    <div id="bt_0" class="menu_item bt_device hidden"><span class="mi_sym luna_icon">&#xf293;</span><span class="mi_label">Device</span><span class="bt_state"></span></div>
+    <div id="bt_1" class="menu_item bt_device hidden"><span class="mi_sym luna_icon">&#xf293;</span><span class="mi_label">Device</span><span class="bt_state"></span></div>
+    <div id="bt_2" class="menu_item bt_device hidden"><span class="mi_sym luna_icon">&#xf293;</span><span class="mi_label">Device</span><span class="bt_state"></span></div>
+    <div id="bt_3" class="menu_item bt_device hidden"><span class="mi_sym luna_icon">&#xf293;</span><span class="mi_label">Device</span><span class="bt_state"></span></div>
+    <div id="bt_4" class="menu_item bt_device hidden"><span class="mi_sym luna_icon">&#xf293;</span><span class="mi_label">Device</span><span class="bt_state"></span></div>
+    <div id="bt_5" class="menu_item bt_device hidden"><span class="mi_sym luna_icon">&#xf293;</span><span class="mi_label">Device</span><span class="bt_state"></span></div>
+    <div id="bt_6" class="menu_item bt_device hidden"><span class="mi_sym luna_icon">&#xf293;</span><span class="mi_label">Device</span><span class="bt_state"></span></div>
+    <div id="bt_7" class="menu_item bt_device hidden"><span class="mi_sym luna_icon">&#xf293;</span><span class="mi_label">Device</span><span class="bt_state"></span></div>
+    <div class="menu_sep"></div>
+    <div id="bt_scan" class="menu_item"><span class="mi_sym luna_icon">&#xf021;</span><span class="mi_label">Scan for Devices</span></div>
   </div>
 
   <!-- Luna Dropdown Menu -->
@@ -186,7 +214,7 @@
       </div>
       <div class="cc_cell">
         <div class="cc_toggle on" id="cc_bt"><div class="cc_knob"></div></div>
-        <span class="cc_label">Bluetooth</span>
+        <span class="cc_label" id="cc_bt_open">Bluetooth</span>
       </div>
       <div class="cc_cell">
         <div class="cc_toggle" id="cc_night"><div class="cc_knob"></div></div>
@@ -195,12 +223,12 @@
     </div>
     <span class="cc_section">Display & Sound</span>
     <div class="cc_track" id="bright_track">
-      <div class="cc_fill" id="bright_fill" style="width: 75%;"></div>
-      <div class="cc_thumb" id="bright_thumb" style="left: 73%;"></div>
+      <div class="cc_fill" id="bright_fill"></div>
+      <div class="cc_thumb" id="bright_thumb"></div>
     </div>
     <div class="cc_track" id="vol_track">
-      <div class="cc_fill" id="vol_fill" style="width: 60%;"></div>
-      <div class="cc_thumb" id="vol_thumb" style="left: 58%;"></div>
+      <div class="cc_fill" id="vol_fill"></div>
+      <div class="cc_thumb" id="vol_thumb"></div>
     </div>
     <span class="cc_section">System Performance</span>
     <div class="cc_stat_row">
@@ -293,38 +321,46 @@
 
   <!-- Dock -->
   <div id="dock">
-    <div class="dock_item" id="dock_files">
+    <div class="dock_item" id="dock_files" role="button" tabindex="0" aria-label="Files">
       <div class="dock_icon g_files luna_icon">&#xf07b;</div>
       <div class="dock_dot" id="dot_files"></div>
+      <span class="dock_label">Files</span>
     </div>
-    <div class="dock_item" id="dock_launchpad">
+    <div class="dock_item" id="dock_launchpad" role="button" tabindex="0" aria-label="Applications">
       <div class="dock_icon g_launchpad luna_icon">&#xf135;</div>
       <div class="dock_dot spacer"></div>
+      <span class="dock_label">Apps</span>
     </div>
-    <div class="dock_item" id="dock_terminal">
+    <div class="dock_item" id="dock_terminal" role="button" tabindex="0" aria-label="Terminal">
       <div class="dock_icon g_terminal luna_icon">&#xf120;</div>
       <div class="dock_dot" id="dot_terminal"></div>
+      <span class="dock_label">Terminal</span>
     </div>
-    <div class="dock_item" id="dock_browser">
+    <div class="dock_item" id="dock_browser" role="button" tabindex="0" aria-label="Browser">
       <div class="dock_icon g_browser luna_icon">&#xf0ac;</div>
       <div class="dock_dot" id="dot_browser"></div>
+      <span class="dock_label">Browser</span>
     </div>
-    <div class="dock_item" id="dock_editor">
+    <div class="dock_item" id="dock_editor" role="button" tabindex="0" aria-label="Editor">
       <div class="dock_icon g_editor luna_icon">&#xf15c;</div>
       <div class="dock_dot" id="dot_editor"></div>
+      <span class="dock_label">Editor</span>
     </div>
-    <div class="dock_item" id="dock_music">
+    <div class="dock_item" id="dock_music" role="button" tabindex="0" aria-label="Music">
       <div class="dock_icon g_music luna_icon">&#xf001;</div>
       <div class="dock_dot" id="dot_music"></div>
+      <span class="dock_label">Music</span>
     </div>
-    <div class="dock_item" id="dock_settings">
+    <div class="dock_item" id="dock_settings" role="button" tabindex="0" aria-label="Settings">
       <div class="dock_icon g_settings luna_icon">&#xf013;</div>
-      <div class="dock_dot" id="dot_settings"></div>
+      <div class="dock_dot spacer"></div>
+      <span class="dock_label">Settings</span>
     </div>
     <div class="dock_sep"></div>
-    <div class="dock_item" id="dock_trash">
+    <div class="dock_item" id="dock_trash" role="button" tabindex="0" aria-label="Trash">
       <div class="dock_icon g_trash luna_icon">&#xf1f8;</div>
       <div class="dock_dot spacer"></div>
+      <span class="dock_label">Trash</span>
     </div>
   </div>
 
@@ -364,6 +400,198 @@
         <div class="lp_icon g_hello luna_icon">&#xf118;</div>
         <span class="lp_label">Hello GTK</span>
       </div>
+      <div class="lp_app hidden" id="lp_xdg_00">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_01">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_02">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_03">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_04">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_05">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_06">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_07">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_08">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_09">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_10">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_11">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_12">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_13">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_14">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_15">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_16">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_17">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_18">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_19">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_20">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_21">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_22">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_23">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_24">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_25">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_26">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_27">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_28">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_29">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_30">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_31">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_32">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_33">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_34">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_35">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_36">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_37">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_38">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_39">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_40">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_41">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_42">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_43">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_44">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_45">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_46">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
+      <div class="lp_app hidden" id="lp_xdg_47">
+        <div class="lp_icon luna_icon">&#xf111;</div>
+        <span class="lp_label">App</span>
+      </div>
     </div>
     <span id="lp_hint">Press Esc to close Launchpad</span>
   </div>
@@ -401,30 +629,42 @@
       <div id="settings_title">System Settings</div>
       <div id="settings_body">
         <div id="settings_sidebar">
-          <div class="stab active" id="stab_apps"><span class="stab_icon luna_icon">&#xf013;</span> Applications</div>
-          <div class="stab" id="stab_disp"><span class="stab_icon luna_icon">&#xf108;</span> Appearance</div>
-          <div class="stab" id="stab_keyboard"><span class="stab_icon luna_icon">&#xf11c;</span> Keyboard</div>
-          <div class="stab" id="stab_wm"><span class="stab_icon luna_icon">&#xf2d0;</span> Windows</div>
+          <div class="stab active" id="stab_apps" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf013;</span> Applications</div>
+          <div class="stab" id="stab_disp" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf108;</span> Appearance</div>
+          <div class="stab" id="stab_language" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf1ab;</span> Language</div>
+          <div class="stab" id="stab_keyboard" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf11c;</span> Keyboard</div>
+          <div class="stab" id="stab_sound" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf028;</span> Sound &amp; Display</div>
+          <div class="stab" id="stab_wm" role="tab" tabindex="0"><span class="stab_icon luna_icon">&#xf2d0;</span> Windows</div>
         </div>
         <div id="settings_content">
           <!-- Apps Panel -->
           <div id="settings_panel_apps">
-            <span class="panel_heading">Default Applications</span>
+            <span class="panel_heading">Dock Applications</span>
+            <span class="pref_hint">Show or hide Dock launchers and set the command (or .desktop file) each one opens.</span>
             <div class="pref_row">
+              <div class="dock_pref on" id="dock_pref_files" role="switch" tabindex="0"><div class="wm_switch"><div class="wm_switch_knob"></div></div></div>
               <span class="pref_label">File Manager</span>
-              <input type="text" id="pref_files" class="pref_input" value="luna-fm">
+              <input type="text" id="pref_files" class="pref_input" value="pcmanfm">
             </div>
             <div class="pref_row">
+              <div class="dock_pref on" id="dock_pref_terminal" role="switch" tabindex="0"><div class="wm_switch"><div class="wm_switch_knob"></div></div></div>
               <span class="pref_label">Terminal</span>
-              <input type="text" id="pref_terminal" class="pref_input" value="foot">
+              <input type="text" id="pref_terminal" class="pref_input" value="sakura">
             </div>
             <div class="pref_row">
+              <div class="dock_pref on" id="dock_pref_browser" role="switch" tabindex="0"><div class="wm_switch"><div class="wm_switch_knob"></div></div></div>
               <span class="pref_label">Web Browser</span>
               <input type="text" id="pref_browser" class="pref_input" value="firefox">
             </div>
             <div class="pref_row">
+              <div class="dock_pref on" id="dock_pref_editor" role="switch" tabindex="0"><div class="wm_switch"><div class="wm_switch_knob"></div></div></div>
               <span class="pref_label">Text Editor</span>
               <input type="text" id="pref_editor" class="pref_input" value="luna-edit">
+            </div>
+            <div class="pref_row">
+              <div class="dock_pref on" id="dock_pref_music" role="switch" tabindex="0"><div class="wm_switch"><div class="wm_switch_knob"></div></div></div>
+              <span class="pref_label">Music Player</span>
+              <input type="text" id="pref_music" class="pref_input" value="aplay+ui">
             </div>
           </div>
 
@@ -448,11 +688,11 @@
             </div>
 
             <span class="panel_heading">Desktop Wallpaper</span>
-            <div id="wp_thumbs_row">
-              <div class="wp_thumb wp_t_night selected" id="wp_night"></div>
-              <div class="wp_thumb wp_t_ocean" id="wp_ocean"></div>
-              <div class="wp_thumb wp_t_forest" id="wp_forest"></div>
-              <div class="wp_thumb wp_t_sunset" id="wp_sunset"></div>
+            <div id="wp_thumbs_row" role="radiogroup" aria-label="Desktop wallpaper">
+              <div class="wp_thumb wp_t_night selected" id="wp_night" role="radio" tabindex="0"></div>
+              <div class="wp_thumb wp_t_ocean" id="wp_ocean" role="radio" tabindex="0"></div>
+              <div class="wp_thumb wp_t_forest" id="wp_forest" role="radio" tabindex="0"></div>
+              <div class="wp_thumb wp_t_sunset" id="wp_sunset" role="radio" tabindex="0"></div>
             </div>
             <div class="wp_label_row">
               <span class="wp_lbl">Night Sky</span>
@@ -460,6 +700,7 @@
               <span class="wp_lbl">Pine Forest</span>
               <span class="wp_lbl">Dusk Sunset</span>
             </div>
+            <div class="wm_choice wallpaper_motion" id="wm_wallpaper_motion" role="switch" tabindex="0">Wallpaper motion · stars &amp; aurora</div>
 
             <span class="panel_heading" style="margin-top: 16px;">Cursor Theme</span>
             <div id="cur_thumbs_row">
@@ -476,6 +717,30 @@
             </div>
           </div>
 
+          <!-- Language & region panel. Locale applies to apps launched after the change. -->
+          <div id="settings_panel_language" class="hidden">
+            <span class="panel_heading">Language &amp; Region</span>
+            <span class="pref_hint">Choose the session language and regional format. New applications use it immediately; sign in again so every application inherits it.</span>
+            <span class="pref_section">Application language and formats</span>
+            <div id="locale_cards" class="option_card_grid" role="radiogroup" aria-label="Display language">
+              <div class="option_card" id="locale_ja" role="radio" tabindex="0">
+                <span class="option_card_name">日本語</span><span class="option_card_desc">日本 · ja_JP.UTF-8</span>
+              </div>
+              <div class="option_card" id="locale_en" role="radio" tabindex="0">
+                <span class="option_card_name">English</span><span class="option_card_desc">United States · en_US.UTF-8</span>
+              </div>
+              <div class="option_card" id="locale_c" role="radio" tabindex="0">
+                <span class="option_card_name">English (portable)</span><span class="option_card_desc">C.UTF-8 · always available</span>
+              </div>
+            </div>
+            <span class="pref_section">Keyboard locks</span>
+            <div class="wm_pref system_pref" id="sys_numlock" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">NumLock at sign-in</span><span class="wm_pref_desc">Enable the numeric keypad now and restore it at the next Luna session.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <span class="settings_notice">The physical NumLock key remains usable. CapsLock and ScrollLock are also synchronized with Wayland applications.</span>
+          </div>
+
           <!-- Keyboard panel: selecting a card applies and saves immediately. -->
           <div id="settings_panel_keyboard" class="hidden">
             <span class="panel_heading">Keyboard Layout</span>
@@ -490,6 +755,136 @@
               <div class="kb_card" id="kb_kr_us" role="radio" tabindex="0"><span class="kb_name">한국어 + US</span><span class="kb_desc">Korean / English</span></div>
             </div>
             <span class="kb_help">複数配列では Alt + Shift で切り替えられます。日本語キーボードを固定する場合は「日本語 (JIS)」を選択してください。</span>
+          </div>
+
+
+          <!-- Sound & display backends for Control Center sliders. -->
+          <div id="settings_panel_sound" class="hidden">
+            <span class="panel_heading">Sound</span>
+            <span class="pref_hint">Choose how the Control Center volume slider talks to the system. Auto tries PipeWire, then PulseAudio, then ALSA.</span>
+            <span class="pref_section">Volume backend</span>
+            <div id="audio_backend_cards" class="option_card_grid" role="radiogroup" aria-label="Volume backend">
+              <div class="option_card" id="audio_auto" role="radio" tabindex="0">
+                <span class="option_card_name">Auto</span><span class="option_card_desc">PipeWire → Pulse → ALSA</span>
+              </div>
+              <div class="option_card" id="audio_wpctl" role="radio" tabindex="0">
+                <span class="option_card_name">PipeWire</span><span class="option_card_desc">wpctl</span>
+              </div>
+              <div class="option_card" id="audio_pactl" role="radio" tabindex="0">
+                <span class="option_card_name">PulseAudio</span><span class="option_card_desc">pactl</span>
+              </div>
+              <div class="option_card" id="audio_alsa" role="radio" tabindex="0">
+                <span class="option_card_name">ALSA</span><span class="option_card_desc">amixer / alsamixer</span>
+              </div>
+            </div>
+
+            <span class="pref_section">ALSA device</span>
+            <span class="pref_hint">Used when the backend is ALSA (or Auto falls through to it). Card may be default, a number, or hw:N.</span>
+            <div class="pref_row">
+              <span class="pref_label">Card</span>
+              <input type="text" id="pref_alsa_card" class="pref_input" value="default" placeholder="default or 0">
+            </div>
+            <div class="pref_row">
+              <span class="pref_label">Control</span>
+              <input type="text" id="pref_alsa_control" class="pref_input" value="Master" placeholder="Master">
+            </div>
+            <div class="pref_row">
+              <span class="pref_label"></span>
+              <div id="btn_open_alsamixer" class="dlg_btn">Open alsamixer</div>
+            </div>
+            <span id="audio_backend_status" class="settings_notice">Detecting audio tools…</span>
+
+            <span class="panel_heading" style="margin-top: 16px;">Display brightness</span>
+            <span class="pref_hint">Choose how the Control Center brightness slider is applied.</span>
+            <span class="pref_section">Brightness backend</span>
+            <div id="bright_backend_cards" class="option_card_grid" role="radiogroup" aria-label="Brightness backend">
+              <div class="option_card" id="bright_auto" role="radio" tabindex="0">
+                <span class="option_card_name">Auto</span><span class="option_card_desc">Backlight → brightnessctl → xrandr</span>
+              </div>
+              <div class="option_card" id="bright_sysfs" role="radio" tabindex="0">
+                <span class="option_card_name">Backlight</span><span class="option_card_desc">/sys/class/backlight</span>
+              </div>
+              <div class="option_card" id="bright_brightnessctl" role="radio" tabindex="0">
+                <span class="option_card_name">brightnessctl</span><span class="option_card_desc">Userspace helper</span>
+              </div>
+              <div class="option_card" id="bright_xrandr" role="radio" tabindex="0">
+                <span class="option_card_name">xrandr</span><span class="option_card_desc">Software gamma</span>
+              </div>
+            </div>
+            <span id="bright_backend_status" class="settings_notice">Detecting brightness tools…</span>
+
+            <span class="panel_heading" style="margin-top: 16px;">Application display scale</span>
+            <span class="pref_hint">Sets GDK/Qt scale for applications launched from Luna. Prefer DPI scale for sharper text; integer GDK_SCALE doubles buffer resolution and can look oversized.</span>
+            <span class="pref_section">GDK_DPI_SCALE</span>
+            <div id="gdk_dpi_cards" class="option_card_grid" role="radiogroup" aria-label="GDK DPI scale">
+              <div class="option_card" id="gdk_dpi_05" role="radio" tabindex="0">
+                <span class="option_card_name">50%</span><span class="option_card_desc">0.5</span>
+              </div>
+              <div class="option_card" id="gdk_dpi_075" role="radio" tabindex="0">
+                <span class="option_card_name">75%</span><span class="option_card_desc">0.75</span>
+              </div>
+              <div class="option_card" id="gdk_dpi_1" role="radio" tabindex="0">
+                <span class="option_card_name">100%</span><span class="option_card_desc">GDK_DPI_SCALE=1</span>
+              </div>
+              <div class="option_card" id="gdk_dpi_125" role="radio" tabindex="0">
+                <span class="option_card_name">125%</span><span class="option_card_desc">1.25</span>
+              </div>
+              <div class="option_card" id="gdk_dpi_15" role="radio" tabindex="0">
+                <span class="option_card_name">150%</span><span class="option_card_desc">1.5</span>
+              </div>
+              <div class="option_card" id="gdk_dpi_175" role="radio" tabindex="0">
+                <span class="option_card_name">175%</span><span class="option_card_desc">1.75</span>
+              </div>
+              <div class="option_card" id="gdk_dpi_2" role="radio" tabindex="0">
+                <span class="option_card_name">200%</span><span class="option_card_desc">2</span>
+              </div>
+            </div>
+            <span class="pref_section">GDK_SCALE</span>
+            <div id="gdk_scale_cards" class="option_card_grid" role="radiogroup" aria-label="GDK integer scale">
+              <div class="option_card" id="gdk_scale_1" role="radio" tabindex="0">
+                <span class="option_card_name">1×</span><span class="option_card_desc">Default · recommended</span>
+              </div>
+              <div class="option_card" id="gdk_scale_2" role="radio" tabindex="0">
+                <span class="option_card_name">2×</span><span class="option_card_desc">Integer buffer scale</span>
+              </div>
+            </div>
+            <span class="pref_section">QT_SCALE_FACTOR</span>
+            <div id="qt_scale_cards" class="option_card_grid" role="radiogroup" aria-label="Qt scale factor">
+              <div class="option_card" id="qt_scale_05" role="radio" tabindex="0">
+                <span class="option_card_name">50%</span><span class="option_card_desc">0.5</span>
+              </div>
+              <div class="option_card" id="qt_scale_075" role="radio" tabindex="0">
+                <span class="option_card_name">75%</span><span class="option_card_desc">0.75</span>
+              </div>
+              <div class="option_card" id="qt_scale_1" role="radio" tabindex="0">
+                <span class="option_card_name">100%</span><span class="option_card_desc">QT_SCALE_FACTOR=1</span>
+              </div>
+              <div class="option_card" id="qt_scale_125" role="radio" tabindex="0">
+                <span class="option_card_name">125%</span><span class="option_card_desc">1.25</span>
+              </div>
+              <div class="option_card" id="qt_scale_15" role="radio" tabindex="0">
+                <span class="option_card_name">150%</span><span class="option_card_desc">1.5</span>
+              </div>
+              <div class="option_card" id="qt_scale_175" role="radio" tabindex="0">
+                <span class="option_card_name">175%</span><span class="option_card_desc">1.75</span>
+              </div>
+              <div class="option_card" id="qt_scale_2" role="radio" tabindex="0">
+                <span class="option_card_name">200%</span><span class="option_card_desc">2</span>
+              </div>
+            </div>
+            <span class="pref_section">Cursor size (XCURSOR_SIZE)</span>
+            <div id="xcursor_cards" class="option_card_grid" role="radiogroup" aria-label="Cursor size">
+              <div class="option_card" id="xcursor_24" role="radio" tabindex="0">
+                <span class="option_card_name">24</span><span class="option_card_desc">Default</span>
+              </div>
+              <div class="option_card" id="xcursor_32" role="radio" tabindex="0">
+                <span class="option_card_name">32</span><span class="option_card_desc">Large</span>
+              </div>
+              <div class="option_card" id="xcursor_48" role="radio" tabindex="0">
+                <span class="option_card_name">48</span><span class="option_card_desc">Extra large</span>
+              </div>
+            </div>
+            <span class="settings_notice">Already-running applications keep their old scale until restarted. LUNA_GDK_SCALE / LUNA_GDK_DPI_SCALE / LUNA_QT_SCALE_FACTOR / LUNA_XCURSOR_SIZE still override these when set.</span>
           </div>
 
           <!-- Window-management panel: lightweight compositor settings. -->
@@ -527,7 +922,7 @@
 
             <span class="pref_section">Desktop behavior</span>
             <div class="wm_pref" id="wm_dock_mag" role="switch" tabindex="0">
-              <div class="wm_pref_text"><span class="wm_pref_name">Dock magnification</span><span class="wm_pref_desc">Scale nearby icons while pointing at the dock.</span></div>
+              <div class="wm_pref_text"><span class="wm_pref_name">Dock hover animation</span><span class="wm_pref_desc">Lift only the pointed icon using the skin stylesheet.</span></div>
               <div class="wm_switch"><div class="wm_switch_knob"></div></div>
             </div>
             <div class="wm_pref" id="wm_restore" role="switch" tabindex="0">

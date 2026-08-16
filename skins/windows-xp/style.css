@@ -71,98 +71,6 @@ body {
   overflow: hidden;
 }
 
-/* -------------------------------------------------------------------------
-   Bliss-style desktop wallpaper
-   ------------------------------------------------------------------------- */
-#bg_layer,
-#wallpaper,
-#wallpaper.night,
-#wallpaper.ocean,
-#wallpaper.forest,
-#wallpaper.sunset {
-  position: fixed;
-  inset: 0 0 30px 0;
-  overflow: hidden;
-  background:
-    radial-gradient(ellipse 95% 42% at 19% 101%, #5fad35 0 49%, transparent 50%),
-    radial-gradient(ellipse 100% 48% at 78% 108%, #70ba42 0 50%, transparent 51%),
-    linear-gradient(180deg, #3c9de7 0%, #76c6f2 52%, #9edafa 67%, #55a832 68%, #3d8c28 100%);
-}
-
-#wallpaper::before,
-#wallpaper::after {
-  content: "";
-  position: absolute;
-  pointer-events: none;
-}
-
-#wallpaper::before {
-  width: 300px;
-  height: 82px;
-  left: 7%;
-  top: 10%;
-  opacity: 0.9;
-  filter: blur(0.2px);
-  background:
-    radial-gradient(ellipse at 17% 62%, rgba(255,255,255,.93) 0 24%, transparent 25%),
-    radial-gradient(ellipse at 36% 48%, rgba(255,255,255,.95) 0 29%, transparent 30%),
-    radial-gradient(ellipse at 57% 58%, rgba(255,255,255,.92) 0 25%, transparent 26%),
-    radial-gradient(ellipse at 76% 69%, rgba(255,255,255,.86) 0 21%, transparent 22%);
-}
-
-#wallpaper::after {
-  width: 210px;
-  height: 62px;
-  right: 8%;
-  top: 20%;
-  opacity: 0.76;
-  background:
-    radial-gradient(ellipse at 19% 64%, rgba(255,255,255,.9) 0 23%, transparent 24%),
-    radial-gradient(ellipse at 42% 49%, rgba(255,255,255,.92) 0 29%, transparent 30%),
-    radial-gradient(ellipse at 68% 66%, rgba(255,255,255,.88) 0 24%, transparent 25%);
-}
-
-#wp_aurora1,
-#wp_aurora2 {
-  display: block !important;
-  position: absolute;
-  animation: none !important;
-  filter: none !important;
-}
-
-#wp_aurora1 {
-  z-index: 2;
-  left: -13%;
-  bottom: -31%;
-  width: 76%;
-  height: 77%;
-  opacity: 1;
-  border-radius: 50% 55% 0 0;
-  transform: rotate(-5deg);
-  background:
-    radial-gradient(ellipse at 56% 31%, rgba(154, 212, 96, .83) 0 22%, transparent 49%),
-    linear-gradient(155deg, #7ec34f 0%, #5eac3c 48%, #38862b 100%);
-  box-shadow: inset -28px 38px 65px rgba(255,255,255,.11);
-}
-
-#wp_aurora2 {
-  z-index: 1;
-  right: -18%;
-  bottom: -32%;
-  width: 90%;
-  height: 75%;
-  opacity: 1;
-  border-radius: 60% 50% 0 0;
-  transform: rotate(5deg);
-  background:
-    radial-gradient(ellipse at 42% 24%, rgba(173, 224, 107, .62) 0 18%, transparent 48%),
-    linear-gradient(205deg, #72bd44 0%, #55a438 50%, #2f7c26 100%);
-}
-
-#wp_moon,
-#wp_moon_halo,
-.star { display: none !important; }
-
 /* Decorative XP desktop icons. */
 #xp_desktop_icons {
   position: fixed;
@@ -410,6 +318,9 @@ body {
   background: linear-gradient(180deg, #3b83e4, #2b6bd7 48%, #2155bd) !important;
   box-shadow: inset 1px 1px rgba(255,255,255,.18) !important;
 }
+
+/* .win_item sets display:flex !important; keep unused slots fully hidden. */
+.win_item.hidden { display: none !important; }
 
 .win_item:hover {
   background: linear-gradient(180deg, #5598ee, #3679df 50%, #245cc7) !important;

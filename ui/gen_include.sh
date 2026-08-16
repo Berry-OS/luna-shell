@@ -1,6 +1,7 @@
 #!/bin/sh
 # gen_include.sh - CSS/HTML を C文字列リテラルの .h ファイルに変換する
 # 使い方: ./gen_include.sh demo.css demo.html
+#         ./gen_include.sh -o output.h path/to/input.css
 
 set -e
 
@@ -19,7 +20,16 @@ to_c_string_h() {
     printf 'Generated: %s\n' "$output"
 }
 
-if [ $# -eq 0 ]; then
+if [ "$#" -eq 3 ] && [ "$1" = "-o" ]; then
+    input="$3"
+    output="$2"
+    awk '{
+        gsub(/\\/, "\\\\")
+        gsub(/"/, "\\\"")
+        print "    \"" $0 "\\n\""
+    }' "$input" > "$output"
+    printf 'Generated: %s <- %s\n' "$output" "$input"
+elif [ $# -eq 0 ]; then
     to_c_string_h demo.css
     to_c_string_h demo.html
 else

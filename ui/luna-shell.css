@@ -1043,10 +1043,16 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   padding: 8px 14px; z-index: 450;
 }
 .dock_item { width: 54px; flex: 0 0 54px; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; }
-.dock_item:hover .dock_icon {
+/* Dock motion is stylesheet-only (no per-frame C interpolation). */
+#dock.dock_animated .dock_item:hover .dock_icon,
+#dock.dock_animated .dock_item:focus-visible .dock_icon {
+  transform: translateY(-8px) scale(1.28);
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.66), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.45), 0 0 24px rgba(var(--luna-gold-rgb), 0.25);
 }
-.dock_icon { width: 52px; height: 52px; border-radius: 15px; color: #ffffff; font-size: 20px; text-align: center; padding-top: 14px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.46); transition: box-shadow 0.16s ease; }
+#dock.dock_animated .dock_item:active .dock_icon {
+  transform: translateY(-2px) scale(1.12);
+}
+.dock_icon { width: 52px; height: 52px; border-radius: 15px; color: #ffffff; font-size: 20px; text-align: center; padding-top: 14px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.46); transition: transform 0.16s ease, box-shadow 0.16s ease; }
 .dock_dot { width: 4px; height: 4px; border-radius: 50%; background-color: var(--luna-gold); box-shadow: 0 0 6px rgba(var(--luna-gold-rgb), 0.90); }
 .dock_dot.spacer { background-color: transparent; box-shadow: none; }
 .dock_sep { width: 1px; flex: 0 0 1px; height: 54px; background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.22), transparent); }

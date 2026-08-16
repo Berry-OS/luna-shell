@@ -3,9 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Luna Shell — Nocturne Atelier</title>
-  <!-- Open this file in a browser to preview; luna-shell loads the same links. -->
-  <link rel="stylesheet" href="../default/style.css">
+  <title>Luna Shell — Desktop</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -123,6 +121,9 @@
       <input type="password" id="wifi_password" placeholder="Password (leave blank if saved/open)">
       <div id="wifi_connect" class="dlg_btn primary">Connect</div>
     </div>
+    <div id="net_tip" class="net_tip hidden">
+      <span id="net_tip_line">—</span>
+    </div>
     <div class="menu_sep"></div>
     <div id="wifi_scan" class="menu_item"><span class="mi_sym luna_icon">&#xf021;</span><span class="mi_label">Scan for Networks</span></div>
     <div class="menu_sep" id="eth_sep"></div>
@@ -239,6 +240,28 @@
       <span class="cc_stat_label">RAM</span>
       <div class="cc_bar"><div class="cc_bar_fill" id="cc_mem_fill" style="width: 48%;"></div></div>
     </div>
+  </div>
+
+  <!-- Calendar popover (opened from menubar clock / desktop date) -->
+  <div id="calendar_menu" class="menu_panel hidden">
+    <div id="cal_head">
+      <div id="cal_prev" class="cal_nav luna_icon" role="button" tabindex="0">&#xf053;</div>
+      <span id="cal_month_label">August 2026</span>
+      <div id="cal_next" class="cal_nav luna_icon" role="button" tabindex="0">&#xf054;</div>
+    </div>
+    <div id="cal_weekdays">
+      <span class="cal_wd">Su</span><span class="cal_wd">Mo</span><span class="cal_wd">Tu</span><span class="cal_wd">We</span>
+      <span class="cal_wd">Th</span><span class="cal_wd">Fr</span><span class="cal_wd">Sa</span>
+    </div>
+    <div id="cal_grid">
+      <div id="cal_d0" class="cal_day"></div><div id="cal_d1" class="cal_day"></div><div id="cal_d2" class="cal_day"></div><div id="cal_d3" class="cal_day"></div><div id="cal_d4" class="cal_day"></div><div id="cal_d5" class="cal_day"></div><div id="cal_d6" class="cal_day"></div>
+      <div id="cal_d7" class="cal_day"></div><div id="cal_d8" class="cal_day"></div><div id="cal_d9" class="cal_day"></div><div id="cal_d10" class="cal_day"></div><div id="cal_d11" class="cal_day"></div><div id="cal_d12" class="cal_day"></div><div id="cal_d13" class="cal_day"></div>
+      <div id="cal_d14" class="cal_day"></div><div id="cal_d15" class="cal_day"></div><div id="cal_d16" class="cal_day"></div><div id="cal_d17" class="cal_day"></div><div id="cal_d18" class="cal_day"></div><div id="cal_d19" class="cal_day"></div><div id="cal_d20" class="cal_day"></div>
+      <div id="cal_d21" class="cal_day"></div><div id="cal_d22" class="cal_day"></div><div id="cal_d23" class="cal_day"></div><div id="cal_d24" class="cal_day"></div><div id="cal_d25" class="cal_day"></div><div id="cal_d26" class="cal_day"></div><div id="cal_d27" class="cal_day"></div>
+      <div id="cal_d28" class="cal_day"></div><div id="cal_d29" class="cal_day"></div><div id="cal_d30" class="cal_day"></div><div id="cal_d31" class="cal_day"></div><div id="cal_d32" class="cal_day"></div><div id="cal_d33" class="cal_day"></div><div id="cal_d34" class="cal_day"></div>
+      <div id="cal_d35" class="cal_day"></div><div id="cal_d36" class="cal_day"></div><div id="cal_d37" class="cal_day"></div><div id="cal_d38" class="cal_day"></div><div id="cal_d39" class="cal_day"></div><div id="cal_d40" class="cal_day"></div><div id="cal_d41" class="cal_day"></div>
+    </div>
+    <div id="cal_today_btn" class="dlg_btn">Today</div>
   </div>
 
   <!-- Weather popover (Open-Meteo; mirrors qberry-weather.js) -->
@@ -982,6 +1005,71 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Network details (right-click a Wi-Fi / Ethernet row) -->
+  <div id="net_detail_win" class="modal_sheet modeless_dialog hidden">
+    <div id="net_detail_backdrop" class="modal_backdrop"></div>
+    <div id="net_detail_box" class="sheet_box about_box dialog_window">
+      <div class="tl tl_red" id="ntl_close"></div>
+      <div class="tl tl_yellow" id="ntl_min"></div>
+      <div class="tl tl_green" id="ntl_max"></div>
+      <div id="net_detail_drag"></div>
+      <div id="net_detail_content">
+        <div id="net_detail_icon"><div class="luna_icon" aria-hidden="true">&#xf1eb;</div></div>
+        <div id="net_detail_title">Network</div>
+        <div id="net_detail_ver"><span class="about_ver_dot"></span><span id="net_detail_status">—</span></div>
+        <div id="net_detail_sep"></div>
+        <div id="net_detail_grid">
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf0ac;</div>
+            <div class="spec_text">
+              <span class="spec_label">Interface</span>
+              <span class="spec_value" id="nd_iface">—</span>
+            </div>
+          </div>
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf1eb;</div>
+            <div class="spec_text">
+              <span class="spec_label">IPv4</span>
+              <span class="spec_value" id="nd_ipv4">—</span>
+            </div>
+          </div>
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf0c1;</div>
+            <div class="spec_text">
+              <span class="spec_label">IPv6</span>
+              <span class="spec_value" id="nd_ipv6">—</span>
+            </div>
+          </div>
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf074;</div>
+            <div class="spec_text">
+              <span class="spec_label">Gateway</span>
+              <span class="spec_value" id="nd_gateway">—</span>
+            </div>
+          </div>
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf0e8;</div>
+            <div class="spec_text">
+              <span class="spec_label">DNS</span>
+              <span class="spec_value" id="nd_dns">—</span>
+            </div>
+          </div>
+          <div class="about_spec">
+            <div class="spec_icon luna_icon">&#xf2db;</div>
+            <div class="spec_text">
+              <span class="spec_label">MAC / Extra</span>
+              <span class="spec_value" id="nd_extra">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="net_detail_btns">
+        <button class="dlg_btn" id="net_detail_close">Close</button>
+        <button class="dlg_btn primary" id="net_detail_action">Disconnect</button>
       </div>
     </div>
   </div>

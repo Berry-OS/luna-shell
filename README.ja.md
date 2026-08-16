@@ -69,19 +69,18 @@ my-skin/
     └── colors.conf
 ```
 
-`layout.html` が開発用の本体。共有ベース CSS とスキン用 CSS を `<link>` し、
-通常のブラウザで開いた見た目がそのままデスクトップになるようにする:
+`layout.html` が開発用の本体。各スキンは上書き用ベースなしで、自分用の
+完全な `style.css` を持つ。テーマ作成時は `skins/default/style.css` を
+コピーして始めてもよい:
 
 ```html
-<link rel="stylesheet" href="../_base/luna-shell.css">
 <link rel="stylesheet" href="style.css">
 ```
 
 `skins/<name>/layout.html` をブラウザで開いて HTML/CSS を直し、同じファイルを
 テーマとして使う。luna-shell は既存の HTML/CSS エンジンでその `<link>` を読む。
-共有ベースは `skins/_base/`（スキンとしては扱わない）。アイコンフォントは
-`skins/fonts/`（`_base` からは `../fonts`）に置く。`layout.html` があれば
-自動で採用され、`skin.conf` の `layout=` で名前を上書きできる。
+アイコンフォントは `skins/fonts/`（各スキンからは `../fonts`）に置く。
+`layout.html` があれば自動で採用され、`skin.conf` の `layout=` で名前を上書きできる。
 
 ```ini
 name=My Skin

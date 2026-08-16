@@ -26,7 +26,9 @@
 #include <wayland-client.h>
 
 #define HIST_MAX       32
-#define CLIP_MAX_BYTES (2 * 1024 * 1024)
+#define CLIP_MAX_BYTES (64 * 1024 * 1024)
+#define CLIP_MAX_MIMES 64
+#define CLIP_MAX_TOTAL_BYTES (128 * 1024 * 1024)
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -42,7 +44,13 @@ static const char *const PREFERRED_MIMES[] = {
 typedef struct {
     char  *data;
     size_t len;
-    char  *mime; /* strdup'd preferred mime we store under */
+    char  *mime; /* primary representation (used by the history UI) */
+    struct {
+        char *mime;
+        char *data;
+        size_t len;
+    } *variants;
+    size_t variant_count;
 } ClipEntry;
 
 typedef struct {
@@ -83,32 +91,145 @@ static void die(const char *msg) {
 }
 
 static void clip_free(ClipEntry *e) {
+    for (size_t i = 0; i < e->variant_count; i++) {
+        free(e->variants[i].mime);
+        free(e->variants[i].data);
+    }
+    free(e->variants);
     free(e->data);
     free(e->mime);
     e->data = NULL;
     e->mime = NULL;
     e->len = 0;
+    e->variants = NULL;
+    e->variant_count = 0;
+}
+
+static bool mime_is_text(const char *mime) {
+    return mime && (!strncmp(mime, "text/", 5) || !strcmp(mime, "UTF8_STRING") ||
+                    !strcmp(mime, "TEXT") || !strcmp(mime, "STRING"));
+}
+
+static bool mime_is_plain_text(const char *mime) {
+    if (!mime)
+        return false;
+    for (int i = 0; PREFERRED_MIMES[i]; i++)
+        if (!strcmp(mime, PREFERRED_MIMES[i]))
+            return true;
+    return false;
+}
+
+static bool clip_has_mime(const ClipEntry *e, const char *mime) {
+    for (size_t i = 0; i < e->variant_count; i++)
+        if (!strcmp(e->variants[i].mime, mime))
+            return true;
+    return false;
+}
+
+static const void *clip_payload(const ClipEntry *e, const char *mime,
+                                size_t *len) {
+    for (size_t i = 0; i < e->variant_count; i++) {
+        if (!strcmp(e->variants[i].mime, mime)) {
+            *len = e->variants[i].len;
+            return e->variants[i].data;
+        }
+    }
+    /* History files written by older versions contain only the MIME that was
+     * preferred by the copying client.  All plain-text aliases carry the same
+     * bytes, so allow a paste target to request a different common alias. */
+    if (mime_is_plain_text(mime)) {
+        for (int preferred = 0; PREFERRED_MIMES[preferred]; preferred++) {
+            for (size_t i = 0; i < e->variant_count; i++) {
+                if (!strcmp(e->variants[i].mime, PREFERRED_MIMES[preferred])) {
+                    *len = e->variants[i].len;
+                    return e->variants[i].data;
+                }
+            }
+        }
+    }
+    *len = 0;
+    return NULL;
+}
+
+static bool clip_add(ClipEntry *e, const char *mime, const void *data, size_t len,
+                     bool primary) {
+    if (!mime || !data || !len || e->variant_count >= CLIP_MAX_MIMES)
+        return false;
+    for (size_t i = 0; i < e->variant_count; i++)
+        if (!strcmp(e->variants[i].mime, mime))
+            return true;
+    void *nv = realloc(e->variants, (e->variant_count + 1) * sizeof(*e->variants));
+    if (!nv)
+        return false;
+    e->variants = nv;
+    size_t i = e->variant_count;
+    e->variants[i].mime = strdup(mime);
+    e->variants[i].data = malloc(len);
+    if (!e->variants[i].mime || !e->variants[i].data) {
+        free(e->variants[i].mime);
+        free(e->variants[i].data);
+        return false;
+    }
+    memcpy(e->variants[i].data, data, len);
+    e->variants[i].len = len;
+    e->variant_count++;
+
+    if (primary || !e->data || (mime_is_text(mime) && !mime_is_text(e->mime))) {
+        char *copy = malloc(len + 1);
+        char *type = strdup(mime);
+        if (copy && type) {
+            memcpy(copy, data, len);
+            copy[len] = '\0';
+            free(e->data);
+            free(e->mime);
+            e->data = copy;
+            e->mime = type;
+            e->len = len;
+        } else {
+            free(copy);
+            free(type);
+        }
+    }
+    return true;
 }
 
 static void clip_set(ClipEntry *e, const char *mime, const void *data, size_t len) {
     clip_free(e);
-    e->data = malloc(len + 1);
-    if (!e->data)
-        return;
-    memcpy(e->data, data, len);
-    e->data[len] = '\0';
-    e->len = len;
-    e->mime = mime ? strdup(mime) : strdup("text/plain;charset=utf-8");
+    clip_add(e, mime ? mime : "text/plain;charset=utf-8", data, len, true);
+}
+
+static void clip_copy(ClipEntry *dst, const ClipEntry *src) {
+    clip_free(dst);
+    for (size_t i = 0; i < src->variant_count; i++)
+        clip_add(dst, src->variants[i].mime, src->variants[i].data,
+                 src->variants[i].len, src->mime && !strcmp(src->mime, src->variants[i].mime));
+}
+
+static bool clip_equal(const ClipEntry *a, const ClipEntry *b) {
+    if (a->variant_count != b->variant_count)
+        return false;
+    for (size_t i = 0; i < a->variant_count; i++) {
+        bool found = false;
+        for (size_t j = 0; j < b->variant_count; j++) {
+            if (!strcmp(a->variants[i].mime, b->variants[j].mime) &&
+                a->variants[i].len == b->variants[j].len &&
+                !memcmp(a->variants[i].data, b->variants[j].data,
+                        a->variants[i].len)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return false;
+    }
+    return true;
 }
 
 static void history_push(const ClipEntry *e) {
     if (!e->data || e->len == 0)
         return;
     /* Dedup against the most recent entry. */
-    if (g.hist_count > 0 &&
-        g.history[0].len == e->len &&
-        g.history[0].data &&
-        memcmp(g.history[0].data, e->data, e->len) == 0)
+    if (g.hist_count > 0 && clip_equal(&g.history[0], e))
         return;
     if (g.hist_count == HIST_MAX)
         clip_free(&g.history[HIST_MAX - 1]);
@@ -117,13 +238,26 @@ static void history_push(const ClipEntry *e) {
     for (int i = g.hist_count - 1; i > 0; i--)
         g.history[i] = g.history[i - 1];
     memset(&g.history[0], 0, sizeof(g.history[0]));
-    clip_set(&g.history[0], e->mime, e->data, e->len);
+    clip_copy(&g.history[0], e);
 }
 
+/* Durable history directory under XDG_DATA_HOME (not cache). */
 static void history_path(char *buf, size_t n) {
     const char *home = getenv("HOME");
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && *xdg && xdg[0] == '/')
+        snprintf(buf, n, "%s/luna-clipboard", xdg);
+    else if (home && *home)
+        snprintf(buf, n, "%s/.local/share/luna-clipboard", home);
+    else
+        snprintf(buf, n, "/tmp/luna-clipboard-%d", (int)getuid());
+}
+
+/* Pre-migration location; read-only fallback / one-shot migrate source. */
+static void history_path_legacy_cache(char *buf, size_t n) {
+    const char *home = getenv("HOME");
     const char *xdg = getenv("XDG_CACHE_HOME");
-    if (xdg && *xdg)
+    if (xdg && *xdg && xdg[0] == '/')
         snprintf(buf, n, "%s/luna-clipboard", xdg);
     else if (home && *home)
         snprintf(buf, n, "%s/.cache/luna-clipboard", home);
@@ -173,10 +307,19 @@ static void history_save(void) {
 static void become_selection_owner(void); /* forward */
 
 static void history_load(void) {
-    char dir[512], path[576];
+    char dir[512], path[576], legacy_dir[512], legacy_path[576];
+    int migrated = 0;
     history_path(dir, sizeof(dir));
     snprintf(path, sizeof(path), "%s/history", dir);
     FILE *f = fopen(path, "rb");
+    if (!f) {
+        /* One-shot migration from the old XDG_CACHE_HOME location. */
+        history_path_legacy_cache(legacy_dir, sizeof(legacy_dir));
+        snprintf(legacy_path, sizeof(legacy_path), "%s/history", legacy_dir);
+        f = fopen(legacy_path, "rb");
+        if (f)
+            migrated = 1;
+    }
     if (!f)
         return;
     /* File stores newest-first, matching history[0]. */
@@ -208,7 +351,13 @@ static void history_load(void) {
     }
     fclose(f);
     if (g.hist_count > 0 && g.history[0].data)
-        clip_set(&g.current, g.history[0].mime, g.history[0].data, g.history[0].len);
+        clip_copy(&g.current, &g.history[0]);
+    if (migrated && g.hist_count > 0) {
+        history_save();
+        unlink(legacy_path);
+        if (g.verbose)
+            fprintf(stderr, "luna-clipboard: migrated history → %s\n", path);
+    }
 }
 
 static void cmd_sock_path(char *buf, size_t n) {
@@ -250,7 +399,7 @@ static void handle_cmd_line(const char *line) {
         int idx = atoi(line + 7);
         if (idx < 0 || idx >= g.hist_count || !g.history[idx].data)
             return;
-        clip_set(&g.current, g.history[idx].mime, g.history[idx].data, g.history[idx].len);
+        clip_copy(&g.current, &g.history[idx]);
         /* Move selected entry to front of history. */
         ClipEntry picked = g.history[idx];
         for (int i = idx; i > 0; i--)
@@ -473,10 +622,11 @@ static void source_send(void *data, struct wl_data_source *s,
                         const char *mime, int32_t fd) {
     (void)data;
     (void)s;
-    (void)mime;
-    if (g.current.data && g.current.len > 0) {
-        const char *p = g.current.data;
-        size_t left = g.current.len;
+    size_t payload_len = 0;
+    const char *payload = clip_payload(&g.current, mime, &payload_len);
+    if (payload && payload_len > 0) {
+        const char *p = payload;
+        size_t left = payload_len;
         while (left > 0) {
             ssize_t n = write(fd, p, left);
             if (n < 0) {
@@ -539,9 +689,21 @@ static void become_selection_owner(void) {
     if (!g.source)
         return;
     wl_data_source_add_listener(g.source, &source_listener, NULL);
-    /* Offer every common text mime so GTK/Qt/Firefox all find a match. */
-    for (int i = 0; PREFERRED_MIMES[i]; i++)
-        wl_data_source_offer(g.source, PREFERRED_MIMES[i]);
+    /* Preserve exact representations, and keep plain text interoperable with
+     * clients that choose a different alias (also repairs old history rows). */
+    for (size_t i = 0; i < g.current.variant_count; i++)
+        wl_data_source_offer(g.source, g.current.variants[i].mime);
+    bool has_plain_text = false;
+    for (size_t i = 0; i < g.current.variant_count; i++)
+        if (mime_is_plain_text(g.current.variants[i].mime)) {
+            has_plain_text = true;
+            break;
+        }
+    if (has_plain_text) {
+        for (int i = 0; PREFERRED_MIMES[i]; i++)
+            if (!clip_has_mime(&g.current, PREFERRED_MIMES[i]))
+                wl_data_source_offer(g.source, PREFERRED_MIMES[i]);
+    }
     g.own_selection = true;
     /* Expect an echo only briefly: luna-compositor skips re-offering to the
      * owner.  Clear after flush so a later real GTK offer is never mistaken
@@ -556,39 +718,47 @@ static void become_selection_owner(void) {
 }
 
 static void take_offer(struct wl_data_offer *offer) {
-    const char *mime = pick_mime();
-    if (!mime) {
+    const char *preferred = pick_mime();
+    if (!preferred) {
         wl_data_offer_destroy(offer);
         offer_mimes_clear();
         return;
     }
-    char *data = NULL;
-    size_t len = 0;
-    if (receive_offer(offer, mime, &data, &len) != 0 || !data) {
+    ClipEntry incoming = {0};
+    size_t total = 0;
+    /* Receive the preferred representation first, then preserve every other
+     * advertised MIME independently (PNG, HTML, URI lists, app formats, ...). */
+    for (size_t pass = 0; pass <= g.offer_mime_count; pass++) {
+        const char *mime = pass == 0 ? preferred : g.offer_mimes[pass - 1];
+        if (!strcmp(mime, preferred) && pass != 0)
+            continue;
+        char *data = NULL;
+        size_t len = 0;
+        if (receive_offer(offer, mime, &data, &len) == 0 && data && len &&
+            len <= CLIP_MAX_BYTES && total + len <= CLIP_MAX_TOTAL_BYTES) {
+            if (clip_add(&incoming, mime, data, len, pass == 0))
+                total += len;
+        }
         free(data);
-        wl_data_offer_destroy(offer);
-        offer_mimes_clear();
-        return;
     }
     wl_data_offer_destroy(offer);
     offer_mimes_clear();
 
     /* Ignore empty / identical content. */
-    if (len == 0) {
-        free(data);
+    if (!incoming.data) {
+        clip_free(&incoming);
         return;
     }
-    if (g.current.data && g.current.len == len &&
-        memcmp(g.current.data, data, len) == 0) {
-        free(data);
+    if (clip_equal(&g.current, &incoming)) {
+        clip_free(&incoming);
         /* Still re-own so the seat keeps a living source. */
         if (!g.own_selection)
             become_selection_owner();
         return;
     }
 
-    clip_set(&g.current, mime, data, len);
-    free(data);
+    clip_free(&g.current);
+    g.current = incoming;
     history_push(&g.current);
     history_save();
     become_selection_owner();
@@ -728,7 +898,7 @@ static void usage(const char *argv0) {
         "\n"
         "Runs in the foreground and owns the Wayland seat selection so\n"
         "clipboard contents survive after the copying app exits.\n"
-        "History: $XDG_CACHE_HOME/luna-clipboard/history\n"
+        "History: $XDG_DATA_HOME/luna-clipboard/history\n"
         "Commands: $XDG_RUNTIME_DIR/luna-clipboard.sock  (select N / clear)\n"
         "Opt out from luna-session with LUNA_CLIPBOARD=none\n",
         argv0);
@@ -754,6 +924,9 @@ int main(int argc, char **argv) {
     if (clear_hist) {
         char dir[512], path[576];
         history_path(dir, sizeof(dir));
+        snprintf(path, sizeof(path), "%s/history", dir);
+        unlink(path);
+        history_path_legacy_cache(dir, sizeof(dir));
         snprintf(path, sizeof(path), "%s/history", dir);
         unlink(path);
         return 0;

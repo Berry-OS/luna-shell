@@ -45,13 +45,6 @@
 }
 
 html, body { background: var(--ami-desk); color: var(--ami-ink); }
-#wallpaper,
-#wallpaper.ocean,
-#wallpaper.forest,
-#wallpaper.sunset {
-  background: linear-gradient(180deg, var(--ami-blue-hi) 0%, var(--ami-blue) 40%, var(--ami-blue-lo) 100%);
-}
-#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none; }
 
 #menubar {
   height: 24px; top: 0; bottom: auto; padding: 0 4px;

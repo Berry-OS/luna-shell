@@ -47,13 +47,6 @@
 }
 
 html, body { background: var(--be-desk); color: var(--be-ink); }
-#wallpaper,
-#wallpaper.ocean,
-#wallpaper.forest,
-#wallpaper.sunset {
-  background: linear-gradient(180deg, var(--be-desk) 0%, var(--be-desk-lo) 100%);
-}
-#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none; }
 
 #menubar {
   height: 28px; top: 0; bottom: auto;

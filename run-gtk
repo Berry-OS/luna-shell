@@ -25,7 +25,7 @@ SIZE="${SIZE:-1920x1080}"
 SOCKET="${SOCKET:-wayland-webgl-$$}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 
-if [ ! -f "$TARGET/vespera-server" ] || [ "${1}" = "--build" ]; then
+if [ ! -f "$TARGET/luna-compositor" ] || [ "${1}" = "--build" ]; then
     echo "→ Building (feature=webgl)..."
     [ "${1}" = "--build" ] && shift
     cd "$SCRIPT_DIR"
@@ -41,7 +41,7 @@ ln -sf libwayland_client.so "$TARGET/libwayland-client.so"   2>/dev/null || true
 
 echo "→ Starting WebGL compositor (socket=$SOCKET, port=$PORT)"
 XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    "$TARGET/vespera-server" --socket "$SOCKET" --backend webgl --port "$PORT" --size "$SIZE" &
+    "$TARGET/luna-compositor" --socket "$SOCKET" --backend webgl --port "$PORT" --size "$SIZE" &
 COMPOSITOR_PID=$!
 
 cleanup() {

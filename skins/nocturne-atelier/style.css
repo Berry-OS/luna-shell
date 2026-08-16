@@ -51,28 +51,6 @@
 }
 
 html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
-#wallpaper,
-#wallpaper.ocean,
-#wallpaper.forest,
-#wallpaper.sunset {
-  background: linear-gradient(145deg, var(--atelier-paper) 0%, var(--atelier-forest) 48%, var(--atelier-paper) 100%);
-}
-#wp_aurora1 {
-  background: radial-gradient(ellipse at 72% 22%, var(--atelier-wash), var(--atelier-clear));
-  opacity: 0.8; animation: none;
-}
-#wp_aurora2 {
-  background: radial-gradient(ellipse at 18% 84%, var(--atelier-wash), var(--atelier-clear));
-  opacity: 0.45; animation: none;
-}
-#wp_moon {
-  width: 110px; height: 110px; border-radius: 55px;
-  background: var(--atelier-brass-hi);
-  box-shadow: 0 0 70px var(--atelier-wash);
-  opacity: 0.72;
-}
-#wp_moon_halo { opacity: 0.3; }
-.star { background: var(--atelier-brass-hi); animation: none; opacity: 0.36; }
 
 #menubar {
   left: 18px; top: 14px; width: calc(100% - 36px); height: 38px;

@@ -72,20 +72,19 @@ my-skin/
     └── colors.conf
 ```
 
-`layout.html` is the development surface. Link the shared base sheet and the
-skin overrides so a normal browser tab matches the running desktop:
+`layout.html` is the development surface. Each skin ships its own complete
+`style.css` (no shared base sheet to override). Theme skins may optionally
+start from a copy of `skins/default/style.css`, or link it during preview:
 
 ```html
-<link rel="stylesheet" href="../_base/luna-shell.css">
 <link rel="stylesheet" href="style.css">
 ```
 
 Open `skins/<name>/layout.html` in a browser, edit HTML/CSS there, and use the
 same files as the theme — luna-shell loads those `<link>`s via the existing
-HTML/CSS engine. Shared base CSS lives in `skins/_base/` (not a skin itself);
-icon fonts live in `skins/fonts/` (resolved as `../fonts` from `_base`). If
-`layout.html` is present it is picked up automatically (override with `layout=`
-in `skin.conf`).
+HTML/CSS engine. Icon fonts live in `skins/fonts/` (resolved as `../fonts`
+from each skin). If `layout.html` is present it is picked up automatically
+(override with `layout=` in `skin.conf`).
 
 ```ini
 name=My Skin

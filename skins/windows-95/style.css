@@ -43,13 +43,6 @@
 }
 
 html, body { background: var(--w95-teal); color: var(--w95-ink); }
-#wallpaper,
-#wallpaper.ocean,
-#wallpaper.forest,
-#wallpaper.sunset {
-  background: var(--w95-teal);
-}
-#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none; }
 
 #menubar,
 #menubar.edge_bottom {
@@ -197,29 +190,17 @@ body {
 * {
   border-radius: 0 !important;
   transition: none !important;
-  animation: none !important;
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   box-sizing: border-box;
 }
 
+/* Wallpaper remains independent from the square Windows 95 chrome. */
+#wp_moon { border-radius: 83px !important; }
+#wp_moon_halo { border-radius: 150px !important; }
+.star { border-radius: 50% !important; }
+
 .hidden { display: none !important; }
-
-#bg_layer,
-#wallpaper,
-#wallpaper.night,
-#wallpaper.ocean,
-#wallpaper.forest,
-#wallpaper.sunset {
-  background: var(--w95-desktop) !important;
-  filter: none !important;
-}
-
-#wp_aurora1,
-#wp_aurora2,
-#wp_moon,
-#wp_moon_halo,
-.star { display: none !important; }
 
 /* Desktop icons --------------------------------------------------------- */
 #w95_desktop_icons {
@@ -461,6 +442,9 @@ body {
   box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight) !important;
 }
 
+/* .win_item sets display:flex !important after .hidden; beat it explicitly. */
+.win_item.hidden { display: none !important; }
+
 .win_item.active {
   padding: 3px 6px 1px 8px !important;
   background:
@@ -654,6 +638,7 @@ body {
 #luna_menu .mi_key { display: none !important; }
 
 #wifi_menu,
+#bt_menu,
 #clip_menu,
 #control_center,
 #weather_menu,

@@ -1,0 +1,175 @@
+/* Hallmark · macrostructure: Catalogue · tone: playful-classic · anchor hue: blue
+ * theme: Windows XP · enrichment: Tier A CSS wallpaper · chrome: shell-native
+ * audience: general desktop users · use: live desktop skin switching
+ */
+/* Hallmark · pre-emit critique: P4 H5 E4 S5 R4 V5 */
+
+:root {
+  --xp-blue: #245edb;
+  --xp-blue-hi: #3c8cf3;
+  --xp-blue-lo: #1536a0;
+  --xp-green: #3c9b26;
+  --xp-green-hi: #69bd45;
+  --xp-sky: #6fbbf0;
+  --xp-hill: #66ad3a;
+  --xp-hill-dark: #318132;
+  --xp-paper: #ece9d8;
+  --xp-paper-hi: #fffef5;
+  --xp-rule: #7f9db9;
+  --xp-ink: #10213b;
+  --xp-muted: #52657d;
+  --xp-white: #ffffff;
+  --xp-shadow: #16356899;
+  --xp-clear: #00000000;
+  --xp-overlay: #ffffff24;
+  --color-accent: var(--xp-blue);
+  --color-accent-ink: var(--xp-white);
+  --color-paper: var(--xp-paper);
+  --color-ink: var(--xp-ink);
+  --color-muted: var(--xp-muted);
+  --color-focus: var(--xp-blue-lo);
+  --luna-accent: var(--xp-blue);
+  --luna-accent-2: var(--xp-blue-hi);
+  --luna-accent-dark: var(--xp-blue-lo);
+  --luna-gold: var(--xp-green-hi);
+  --luna-glass: var(--xp-paper);
+  --luna-glass-card: var(--xp-paper-hi);
+  --luna-glass-edge: var(--xp-rule);
+  --luna-text: var(--xp-ink);
+  --luna-text-dim: var(--xp-muted);
+  --luna-text-muted: var(--xp-muted);
+  --dialog-surface: var(--xp-paper);
+  --dialog-footer: var(--xp-paper);
+  --dialog-divider: var(--xp-rule);
+  --about-surface: var(--xp-paper);
+  --about-card: var(--xp-paper-hi);
+  --about-card-hover: var(--xp-white);
+  --about-icon: var(--xp-blue);
+  --about-border: var(--xp-rule);
+  --radius-xl: 8px;
+  --radius-lg: 6px;
+  --radius-md: 4px;
+  --radius-sm: 3px;
+}
+
+html, body { background: var(--xp-sky); color: var(--xp-ink); }
+#wallpaper,
+#wallpaper.ocean,
+#wallpaper.forest,
+#wallpaper.sunset {
+  background: linear-gradient(165deg, var(--xp-sky) 0%, var(--xp-sky) 58%, var(--xp-hill) 59%, var(--xp-hill-dark) 100%);
+}
+#wp_aurora1 {
+  background: radial-gradient(ellipse at 82% 73%, var(--xp-green-hi), var(--xp-clear));
+  opacity: 0.82;
+  animation: none;
+}
+#wp_aurora2 {
+  background: radial-gradient(ellipse at 30% 76%, var(--xp-hill), var(--xp-clear));
+  opacity: 0.9;
+  animation: none;
+}
+#wp_moon, #wp_moon_halo, .star { display: none; }
+
+#menubar {
+  top: auto; bottom: 0; height: 34px;
+  padding: 0 5px;
+  background: linear-gradient(180deg, var(--xp-blue-hi), var(--xp-blue) 48%, var(--xp-blue-lo));
+  border: 0; border-top: 1px solid var(--xp-blue-hi);
+  border-radius: 0; box-shadow: 0 -2px 8px var(--xp-shadow);
+}
+#mb_left, #mb_center, #mb_right { height: 34px; }
+#mb_logo {
+  width: 62px; height: 30px; border-radius: 0 15px 15px 0;
+  background: linear-gradient(180deg, var(--xp-green-hi), var(--xp-green));
+  border: 1px solid var(--xp-green-hi);
+  box-shadow: inset 0 1px var(--xp-overlay);
+}
+#mb_logo_glyph { color: var(--xp-white); }
+#mb_app, .mb_app_name, .mb_item, .mb_status, .tray_glyph, .win_label { color: var(--xp-white); }
+.mb_item { border-radius: 2px; }
+.mb_item:hover, .tray_item:hover { background-color: var(--xp-overlay); color: var(--xp-white); }
+.win_item {
+  height: 26px; border-radius: 2px;
+  background-color: var(--xp-blue-hi); border: 1px solid var(--xp-blue-lo);
+}
+.win_item.active { background: var(--xp-blue-lo); border-color: var(--xp-white); box-shadow: none; }
+
+.menu_panel {
+  top: auto; bottom: 38px;
+  background: var(--xp-paper); color: var(--xp-ink);
+  border: 1px solid var(--xp-blue-lo); border-radius: 2px;
+  box-shadow: 4px 5px 12px var(--xp-shadow); animation: none;
+}
+.menu_item { border-radius: 0; }
+.menu_item:hover { background: var(--xp-blue); box-shadow: none; }
+.menu_section_label, .mi_label, .mi_sym, .mi_key { color: var(--xp-ink); }
+.menu_sep { background-color: var(--xp-rule); }
+
+#dock {
+  left: 72px; bottom: 37px; margin-left: 0;
+  width: 478px; height: 58px; padding: 5px 8px; gap: 5px;
+  background: var(--xp-paper); border: 1px solid var(--xp-rule);
+  border-radius: 3px; box-shadow: 3px 4px 10px var(--xp-shadow);
+}
+.dock_item { width: 46px; flex-basis: 46px; }
+.dock_icon { width: 42px; height: 42px; padding-top: 10px; border-radius: 5px; box-shadow: 1px 2px 4px var(--xp-shadow); }
+.dock_dot { background-color: var(--xp-green); box-shadow: none; }
+.dock_sep { background: var(--xp-rule); }
+
+.widget, #toast, #switcher_strip {
+  background: var(--xp-paper); color: var(--xp-ink);
+  border: 1px solid var(--xp-blue-lo); border-radius: 4px;
+  box-shadow: 3px 4px 10px var(--xp-shadow);
+}
+#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, #toast_msg, .sw_title, .sw_app { color: var(--xp-ink); }
+
+.sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
+  background: var(--xp-paper); color: var(--xp-ink);
+  border: 3px solid var(--xp-blue); border-radius: 6px 6px 2px 2px;
+  box-shadow: 5px 7px 18px var(--xp-shadow);
+}
+#settings_title {
+  background: linear-gradient(90deg, var(--xp-blue-lo), var(--xp-blue-hi));
+  color: var(--xp-white); text-align: left; padding-left: 88px;
+  border-bottom: 1px solid var(--xp-blue-lo);
+}
+#settings_sidebar, #settings_btns, #confirm_btns { background: var(--xp-paper); }
+.panel_heading { color: var(--xp-blue-lo); }
+.stab, .pref_label, .pref_hint, .pref_section, .wm_pref_name, .wm_pref_desc,
+.skin_name, .skin_desc, .cur_name, .cur_desc, .kb_name, .kb_desc { color: var(--xp-ink); }
+.stab:hover, .skin_card:hover, .cur_card:hover, .kb_card:hover, .wm_pref:hover { background-color: var(--xp-paper-hi); color: var(--xp-ink); }
+.stab.active, .skin_card.selected, .cur_card.selected, .kb_card.selected, .wm_choice.selected {
+  background: var(--xp-blue); color: var(--xp-white); border-color: var(--xp-blue-lo); box-shadow: none;
+}
+.stab.active .stab_icon, .skin_card.selected .skin_name, .skin_card.selected .skin_desc { color: var(--xp-white); }
+.pref_input, .pref_input_full, #wifi_password {
+  background: var(--xp-white); color: var(--xp-ink); border-color: var(--xp-rule); border-radius: 1px;
+}
+.dlg_btn {
+  background: var(--xp-paper); color: var(--xp-ink); border-color: var(--xp-rule);
+  border-radius: 2px; box-shadow: inset 1px 1px var(--xp-white);
+}
+.dlg_btn.primary { background: var(--xp-blue); color: var(--xp-white); border-color: var(--xp-blue-lo); }
+.dlg_btn:hover { background: var(--xp-paper-hi); color: var(--xp-ink); }
+.dlg_btn.primary:hover { background: var(--xp-blue-hi); color: var(--xp-white); }
+.dlg_btn:focus-visible, .skin_card:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 1ms; transition-duration: 1ms; }
+}
+
+/* Taskbar chrome: Start button + hide the macOS-style dock (apps live in #win_list). */
+#mb_logo {
+  width: auto; min-width: 62px; padding: 0 12px 0 8px; gap: 6px;
+  display: flex; flex-direction: row; align-items: center;
+}
+.mb_start_label {
+  color: var(--xp-white); font-size: 13px; font-weight: 700;
+  font-style: italic; letter-spacing: 0.02em;
+}
+#mb_logo_glyph { color: var(--xp-white); font-size: 12px; }
+#dock, #dock.hidden { display: none !important; }
+#menubar.edge_bottom, #menubar {
+  top: auto; bottom: 0; height: 34px;
+}

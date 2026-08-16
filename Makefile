@@ -14,12 +14,20 @@ FONTDIR  ?= /usr/share/fonts/luna
 # e.g. make webgl APP=/usr/bin/gtk4-demo
 APP      ?= $(TARGET)/hello-gtk
 
-GLFW_CFLAGS := $(shell pkg-config --cflags glfw3 2>/dev/null)
-GLFW_LIBS   := $(shell pkg-config --libs glfw3 2>/dev/null)
+SPECFILE     ?= luna-shell.spec
+RPM_NAME     := $(shell awk '/^Name:/{print $$2; exit}' $(SPECFILE))
+RPM_VERSION  := $(shell awk '/^Version:/{print $$2; exit}' $(SPECFILE))
+RPM_RELEASE  := $(shell awk '/^Release:/{print $$2; exit}' $(SPECFILE))
+DIST_NAME    := $(RPM_NAME)-$(RPM_VERSION)
+TARBALL      := $(DIST_NAME).tar
+RPMBUILD_DIR := $(CURDIR)/rpmbuild
+RPM_DIST     := $(CURDIR)/.rpm-dist
+# Local rustup toolchains are not the distro rust/cargo RPMs listed in the spec.
+RPMBUILD_FLAGS ?= $(shell rpm -q rust cargo >/dev/null 2>&1 || echo --nodeps)
 
 .PHONY: all build build-dri build-webgl build-desktop build-desktop-system build-shell \
         symlinks symlinks-system run server demo webgl run-gtk desktop desktop-system \
-        luna-session install install-system stop clean luna-shell \
+        luna-session install install-system stop clean dist rpm srpm luna-shell \
         luna-clipboard luna-tray-notify
 
 all: build symlinks
@@ -60,6 +68,7 @@ symlinks-system:
 	@echo "✓ Done"
 
 UI_DIR = ui
+DEFAULT_SKIN_DIR = skins/default
 
 # Wayland client for luna-shell / luna-clipboard:
 #   LUNA_WAYLAND_CLIENT=system   (default) — distro libwayland-client
@@ -80,8 +89,11 @@ SHELL_WL_DEPS   :=
 SHELL_WL_LABEL  := system wayland-client
 endif
 
-$(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h: $(UI_DIR)/luna-shell.css $(UI_DIR)/luna-shell.html $(UI_DIR)/gen_include.sh
-	cd $(UI_DIR) && ./gen_include.sh luna-shell.css luna-shell.html
+$(UI_DIR)/luna-shell.css.h: $(DEFAULT_SKIN_DIR)/style.css $(UI_DIR)/gen_include.sh
+	cd $(UI_DIR) && ./gen_include.sh -o luna-shell.css.h ../$(DEFAULT_SKIN_DIR)/style.css
+
+$(UI_DIR)/luna-shell.html.h: $(DEFAULT_SKIN_DIR)/layout.html $(UI_DIR)/gen_include.sh
+	cd $(UI_DIR) && ./gen_include.sh -o luna-shell.html.h ../$(DEFAULT_SKIN_DIR)/layout.html
 
 SHELL_CFLAGS := -pthread \
                 $(shell pkg-config --cflags libdrm 2>/dev/null) \
@@ -103,14 +115,19 @@ $(LAYER_SHELL_SRC): $(LAYER_SHELL_XML)
 luna-shell: $(SHELL_WL_DEPS) $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
             $(UI_DIR)/luna-client-env-policy.h \
-            $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
+            $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-ethernet.h \
+            $(UI_DIR)/luna-bluetooth.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
             $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \
             $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
 	@echo "→ Building luna-shell (Luna Desktop shell, $(SHELL_WL_LABEL))"
 	# luna-shell's layout, animation and draw-list walks are hot on every KMS \
 	# frame.  Prefer runtime optimization over the size-oriented global default.
+	# These MUST come AFTER SHELL_CFLAGS: Berry rpm %{optflags} is
+	# `-Os -ffast-math`, gcc keeps the last -O* / -f* of each kind, and
+	# -ffast-math left luna_render as a no-op (black desktop, live cursor).
 	# Wi-Fi backend (luna-wifi.h) and the status poller both use pthreads.
-	gcc -O2 -Wall -Wextra -DLUNA_BACKEND_X11 -include $(UI_DIR)/luna-client-env-policy.h $(SHELL_CFLAGS) -I$(UI_DIR) \
+	gcc -Wall -Wextra -DLUNA_BACKEND_X11 -include $(UI_DIR)/luna-client-env-policy.h $(SHELL_CFLAGS) \
+	    -O2 -fno-fast-math -fno-finite-math-only -I$(UI_DIR) \
 	    $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c $(LAYER_SHELL_SRC) \
 	    -o luna-shell $(SHELL_LIBS) -lX11
 
@@ -216,7 +233,7 @@ install: build-desktop
 	install -d $(PREFIX)/bin $(LUNA_LIB) $(PREFIX)/share/luna-desktop/shell \
 	            $(PREFIX)/share/luna-desktop/cursors $(PREFIX)/share/luna-desktop/skins \
 	            $(PREFIX)/share/doc/luna-desktop
-	install -d $(FONTDIR)
+	install -d $(FONTDIR)/web
 	install -m 755 luna-session $(PREFIX)/bin/luna-session
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
@@ -244,10 +261,12 @@ install: build-desktop
 	  'Libs: -L$${libdir} -lwayland-client -Wl,-rpath,$${libdir}' \
 	  'Cflags: -I$${includedir}' \
 	  > $(PREFIX)/lib/pkgconfig/luna-wayland-client.pc
-	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
+	install -m 644 $(DEFAULT_SKIN_DIR)/layout.html $(PREFIX)/share/luna-desktop/shell/luna-shell.html
+	install -m 644 $(DEFAULT_SKIN_DIR)/style.css $(PREFIX)/share/luna-desktop/shell/luna-shell.css
 	install -m 644 ui/luna-ui/luna-ui.h ui/luna-ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 skins/fonts/LunaSymbols-Solid.otf skins/fonts/LunaSymbols-Regular.otf \
 	               skins/fonts/LunaSymbols-Brands.otf $(FONTDIR)/
+	install -m 644 skins/fonts/web/Inter-Regular.ttf skins/fonts/web/Manrope-Regular.ttf $(FONTDIR)/web/
 	-fc-cache -f $(FONTDIR) 2>/dev/null || true
 	# Cursor themes (.cur / .ani) — default is miku
 	rm -rf $(PREFIX)/share/luna-desktop/cursors/miku
@@ -256,12 +275,9 @@ install: build-desktop
 	# fonts are re-linked below (avoids duplicating OTFs for fontconfig).
 	rm -rf $(PREFIX)/share/luna-desktop/skins/fonts
 	cp -a skins/. $(PREFIX)/share/luna-desktop/skins/
-	# Browser-previewable skins link ../_base/luna-shell.css; replace the
-	# repo symlink with a real copy next to the installed themes.
-	install -d $(PREFIX)/share/luna-desktop/skins/_base
-	install -m 644 ui/luna-shell.css $(PREFIX)/share/luna-desktop/skins/_base/luna-shell.css
 	rm -rf $(PREFIX)/share/luna-desktop/skins/fonts
 	ln -sfn $(FONTDIR) $(PREFIX)/share/luna-desktop/skins/fonts
+	ln -sfn $(FONTDIR) $(PREFIX)/share/luna-desktop/fonts
 	#install -m 644 README.md $(PREFIX)/share/doc/luna-desktop/README.md 2>/dev/null || true
 	$(install_systemd)
 	@echo "✓ Installed to $(PREFIX)"
@@ -273,17 +289,19 @@ install-system: build-desktop-system
 	install -d $(PREFIX)/bin $(LUNA_LIB) $(PREFIX)/share/luna-desktop/shell \
 	            $(PREFIX)/share/luna-desktop/cursors $(PREFIX)/share/luna-desktop/skins \
 	            $(PREFIX)/share/doc/luna-desktop
-	install -d $(FONTDIR)
+	install -d $(FONTDIR)/web
 	install -m 755 luna-session $(PREFIX)/bin/luna-session
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
 	install -D -m 644 tray/luna-tray-notify.desktop $(PREFIX)/share/applications/luna-tray-notify.desktop
-	install -m 644 ui/luna-shell.html ui/luna-shell.css $(PREFIX)/share/luna-desktop/shell/
+	install -m 644 $(DEFAULT_SKIN_DIR)/layout.html $(PREFIX)/share/luna-desktop/shell/luna-shell.html
+	install -m 644 $(DEFAULT_SKIN_DIR)/style.css $(PREFIX)/share/luna-desktop/shell/luna-shell.css
 	install -m 644 ui/luna-ui/luna-ui.h ui/luna-ui/cssparser.h $(PREFIX)/share/luna-desktop/shell/
 	install -m 644 skins/fonts/LunaSymbols-Solid.otf skins/fonts/LunaSymbols-Regular.otf \
 	               skins/fonts/LunaSymbols-Brands.otf $(FONTDIR)/
+	install -m 644 skins/fonts/web/Inter-Regular.ttf skins/fonts/web/Manrope-Regular.ttf $(FONTDIR)/web/
 	-fc-cache -f $(FONTDIR) 2>/dev/null || true
 	rm -rf $(PREFIX)/share/luna-desktop/cursors/miku
 	cp -a cursors/miku $(PREFIX)/share/luna-desktop/cursors/
@@ -291,12 +309,9 @@ install-system: build-desktop-system
 	# fonts are re-linked below (avoids duplicating OTFs for fontconfig).
 	rm -rf $(PREFIX)/share/luna-desktop/skins/fonts
 	cp -a skins/. $(PREFIX)/share/luna-desktop/skins/
-	# Browser-previewable skins link ../_base/luna-shell.css; replace the
-	# repo symlink with a real copy next to the installed themes.
-	install -d $(PREFIX)/share/luna-desktop/skins/_base
-	install -m 644 ui/luna-shell.css $(PREFIX)/share/luna-desktop/skins/_base/luna-shell.css
 	rm -rf $(PREFIX)/share/luna-desktop/skins/fonts
 	ln -sfn $(FONTDIR) $(PREFIX)/share/luna-desktop/skins/fonts
+	ln -sfn $(FONTDIR) $(PREFIX)/share/luna-desktop/fonts
 	#install -m 644 README.md $(PREFIX)/share/doc/luna-desktop/README.md 2>/dev/null || true
 	$(install_systemd)
 	@echo "✓ Installed to $(PREFIX) (using system libwayland)"
@@ -315,3 +330,86 @@ clean:
 	cargo clean
 	rm -f luna-shell luna-clipboard luna-tray-notify \
 	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
+	rm -rf $(RPMBUILD_DIR) $(RPM_DIST)
+	rm -f $(TARBALL) $(RPM_NAME)-$(RPM_VERSION)-$(RPM_RELEASE).*.rpm
+
+# Source tarball consumed by luna-shell.spec (Source0).  Cargo crates are
+# vendored so rpmbuild can run with CARGO_NET_OFFLINE=true.
+dist:
+	@command -v cargo >/dev/null || { echo 'cargo is required for make dist'; exit 1; }
+	rm -rf $(RPM_DIST) $(TARBALL)
+	mkdir -p $(RPM_DIST)/$(DIST_NAME)
+	tar -C . \
+	  --exclude-vcs \
+	  --exclude='.rpm-dist' \
+	  --exclude='rpmbuild' \
+	  --exclude='target' \
+	  --exclude='vendor' \
+	  --exclude='.cargo' \
+	  --exclude='$(DIST_NAME)' \
+	  --exclude='$(TARBALL)' \
+	  --exclude='luna-shell' \
+	  --exclude='luna-clipboard' \
+	  --exclude='luna-tray-notify' \
+	  --exclude='hello-gtk' \
+	  --exclude='opengl-webui-ultralight' \
+	  --exclude='*.tar' \
+	  --exclude='*.rpm' \
+	  -cf - . | tar -C $(RPM_DIST)/$(DIST_NAME) -xf -
+	@if [ -L $(RPM_DIST)/$(DIST_NAME)/ui/luna-ui ] || \
+	    [ ! -f $(RPM_DIST)/$(DIST_NAME)/ui/luna-ui/luna-ui.h ]; then \
+	  if [ ! -f ../luna-ui/luna-ui.h ]; then \
+	    echo 'error: ui/luna-ui is a symlink; ../luna-ui is required to build the RPM tarball'; \
+	    exit 1; \
+	  fi; \
+	  rm -rf $(RPM_DIST)/$(DIST_NAME)/ui/luna-ui; \
+	  cp -a ../luna-ui $(RPM_DIST)/$(DIST_NAME)/ui/luna-ui; \
+	fi
+	rm -f $(RPM_DIST)/$(DIST_NAME)/ui/luna-editor.c \
+	      $(RPM_DIST)/$(DIST_NAME)/ui/luna-view.c \
+	      $(RPM_DIST)/$(DIST_NAME)/ui/luna-fm.c
+	rm -f $(RPM_DIST)/$(DIST_NAME)/rust-toolchain.toml \
+	      $(RPM_DIST)/$(DIST_NAME)/rust-toolchain
+	sed -i 's/, "hello-gtk"//' $(RPM_DIST)/$(DIST_NAME)/Cargo.toml
+	cd $(RPM_DIST)/$(DIST_NAME) && cargo generate-lockfile
+	cd $(RPM_DIST)/$(DIST_NAME) && cargo vendor --locked vendor
+	mkdir -p $(RPM_DIST)/$(DIST_NAME)/.cargo
+	printf '%s\n' \
+	  '[source.crates-io]' \
+	  'replace-with = "vendored-sources"' \
+	  '' \
+	  '[source.vendored-sources]' \
+	  'directory = "vendor"' \
+	  > $(RPM_DIST)/$(DIST_NAME)/.cargo/config.toml
+	tar -C $(RPM_DIST) -cf $(TARBALL) $(DIST_NAME)
+	rm -rf $(RPM_DIST)
+	@echo "✓ Created $(TARBALL)"
+
+rpm: dist
+	@command -v rpmbuild >/dev/null || { echo 'rpmbuild is required (dnf install rpm-build)'; exit 1; }
+	rm -rf $(RPMBUILD_DIR)
+	mkdir -p $(RPMBUILD_DIR)/BUILD $(RPMBUILD_DIR)/BUILDROOT \
+	         $(RPMBUILD_DIR)/RPMS $(RPMBUILD_DIR)/SOURCES \
+	         $(RPMBUILD_DIR)/SPECS $(RPMBUILD_DIR)/SRPMS
+	cp -f $(TARBALL) $(RPMBUILD_DIR)/SOURCES/
+	cp -f $(SPECFILE) $(RPMBUILD_DIR)/SPECS/
+	rpmbuild -bb $(RPMBUILD_FLAGS) \
+	  --define "_topdir $(RPMBUILD_DIR)" \
+	  $(RPMBUILD_DIR)/SPECS/$(notdir $(SPECFILE))
+	@find $(RPMBUILD_DIR)/RPMS -name '*.rpm' -exec cp -f {} . \;
+	@echo "✓ RPM:"
+	@find . -maxdepth 1 -name '$(RPM_NAME)-$(RPM_VERSION)-$(RPM_RELEASE).*.rpm' -print
+
+srpm: dist
+	@command -v rpmbuild >/dev/null || { echo 'rpmbuild is required (dnf install rpm-build)'; exit 1; }
+	mkdir -p $(RPMBUILD_DIR)/BUILD $(RPMBUILD_DIR)/BUILDROOT \
+	         $(RPMBUILD_DIR)/RPMS $(RPMBUILD_DIR)/SOURCES \
+	         $(RPMBUILD_DIR)/SPECS $(RPMBUILD_DIR)/SRPMS
+	cp -f $(TARBALL) $(RPMBUILD_DIR)/SOURCES/
+	cp -f $(SPECFILE) $(RPMBUILD_DIR)/SPECS/
+	rpmbuild -bs $(RPMBUILD_FLAGS) \
+	  --define "_topdir $(RPMBUILD_DIR)" \
+	  $(RPMBUILD_DIR)/SPECS/$(notdir $(SPECFILE))
+	@find $(RPMBUILD_DIR)/SRPMS -name '*.src.rpm' -exec cp -f {} . \;
+	@echo "✓ SRPM:"
+	@find . -maxdepth 1 -name '$(RPM_NAME)-$(RPM_VERSION)-$(RPM_RELEASE).*.src.rpm' -print

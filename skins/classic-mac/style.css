@@ -44,13 +44,6 @@
 }
 
 html, body { background: var(--mac-desk); color: var(--mac-ink); }
-#wallpaper,
-#wallpaper.ocean,
-#wallpaper.forest,
-#wallpaper.sunset {
-  background: linear-gradient(180deg, var(--mac-desk) 0%, var(--mac-desk-lo) 100%);
-}
-#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none; }
 
 #menubar {
   height: 22px; top: 0; bottom: auto; padding: 0 6px;
