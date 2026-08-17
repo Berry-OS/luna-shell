@@ -1,0 +1,49 @@
+name: Refresh README screenshots
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Luna Shell and pinned Luna UI
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install luna-shell X11/EGL build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config xvfb x11-utils \
+            libx11-dev libgl1-mesa-dev libegl1-mesa-dev libgbm-dev libdrm-dev \
+            libinput-dev libudev-dev libxkbcommon-dev libwayland-dev libwayland-bin
+          echo "GLFW is intentionally not installed: current luna-shell has its own X11/EGL host."
+
+      - name: Build luna-shell and capture every bundled skin
+        run: ./tools/capture-shell-skins.sh
+
+      - name: Validate generated skin gallery
+        run: |
+          for skin in default nocturne-atelier windows-xp windows-95 classic-mac beos amiga-workbench; do
+            test -s "docs/screenshots/luna-shell-skin-${skin}.png"
+          done
+          grep -q 'luna-shell-skin-default.png' README.md
+          git diff --check
+
+      - name: Commit generated screenshots and README gallery
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md docs/screenshots/luna-shell-skin-*.png
+          if git diff --cached --quiet; then
+            echo "Screenshots are already current."
+            exit 0
+          fi
+          git commit -m "Refresh real luna-shell skin screenshots"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
