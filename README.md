@@ -4,10 +4,38 @@ A **pure Rust** Wayland compositor + custom `libwayland-client` implementation +
 
 [![Sponsor](https://img.shields.io/badge/Sponsor%20this%20project-%E2%9D%A4%EF%B8%8F-white?logo=githubsponsors&logoColor=EA4AAA&labelColor=EA4AAA)](https://github.com/sponsors/yui0)
 
-![Screenshot](ui/sample_01.png)
-![Screenshot](ui/sample_02.png)
-![Screenshot](screenshot.png)
-![Screenshot](luna-shell.png)
+<!-- readme-screenshot-gallery:start -->
+## ✨ Luna Desktop skins
+
+Every image below is a **real `luna-shell` framebuffer capture**. The shell is
+built with its X11/EGL backend and run under Xvfb with the named skin; these are
+not browser previews or recreated mockups. The current shell uses its own
+KMS/Wayland/X11 hosts, so the capture path does **not** require GLFW.
+
+### Luna — Default
+
+<p align="center">
+  <img src="docs/screenshots/luna-shell-skin-default.png" alt="Luna Desktop default skin" width="96%">
+</p>
+
+| Nocturne Atelier | Windows XP |
+| --- | --- |
+| ![Nocturne Atelier skin](docs/screenshots/luna-shell-skin-nocturne-atelier.png) | ![Windows XP skin](docs/screenshots/luna-shell-skin-windows-xp.png) |
+
+| Windows 95 | Classic Mac OS |
+| --- | --- |
+| ![Windows 95 skin](docs/screenshots/luna-shell-skin-windows-95.png) | ![Classic Mac OS skin](docs/screenshots/luna-shell-skin-classic-mac.png) |
+
+| BeOS | Amiga Workbench |
+| --- | --- |
+| ![BeOS skin](docs/screenshots/luna-shell-skin-beos.png) | ![Amiga Workbench skin](docs/screenshots/luna-shell-skin-amiga-workbench.png) |
+
+Regenerate the full gallery with:
+
+```bash
+./tools/capture-shell-skins.sh
+```
+<!-- readme-screenshot-gallery:end -->
 
 ---
 
