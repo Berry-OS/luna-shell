@@ -47,7 +47,10 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          make ui/luna-shell.css.h ui/luna-shell.html.h 2>&1 | tee tools/agent_headers_run.log
+          {
+            sh ui/gen_include.sh -o ui/luna-shell.css.h skins/default/style.css
+            sh ui/gen_include.sh -o ui/luna-shell.html.h skins/default/layout.html
+          } 2>&1 | tee tools/agent_headers_run.log
 
       - name: Check compositor
         if: steps.gate.outputs.run == 'true'
