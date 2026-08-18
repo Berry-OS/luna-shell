@@ -68,15 +68,17 @@ jobs:
         run: |
           set -o pipefail
           {
-            test -n "$(grep -F 'id=\"dock_email\"' skins/default/layout.html)"
-            test -n "$(grep -F 'id=\"settings_panel_display\"' skins/default/layout.html)"
-            test -n "$(grep -F 'id=\"wm_focus_outline\"' skins/default/layout.html)"
-            test -n "$(grep -F 'id=\"wm_window_tray\"' skins/default/layout.html)"
-            test -n "$(grep -F 'id=\"wm_cascade\"' skins/default/layout.html)"
+            for token in dock_email settings_panel_display wm_focus_outline wm_window_tray wm_cascade; do
+              echo "checking layout token: $token"
+              grep -F "id=\"$token\"" skins/default/layout.html
+            done
+            echo "checking shell WM commands"
             grep -F 'wm_config focus_outline' ui/luna-shell.c
             grep -F 'wm_config cascade_windows' ui/luna-shell.c
+            echo "checking compositor settings"
             grep -F 'wm_focus_outline' wayland-server-rs/src/server.rs
             grep -F 'wm_cascade_windows' wayland-server-rs/src/server.rs
+            echo "checking whitespace"
             git diff --check
           } 2>&1 | tee tools/agent_validate_run.log
 
