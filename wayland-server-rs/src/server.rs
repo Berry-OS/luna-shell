@@ -1701,10 +1701,10 @@ impl Server {
         self.track_mapped_toplevel(fd, parent_id, true);
         if !parent_was {
           let cascade = if self.wm_cascade_windows {
-          (self.window_stack.len().saturating_sub(1) as i32) * 28
-        } else {
-          0
-        };
+            (self.window_stack.len().saturating_sub(1) as i32) * 28
+          } else {
+            0
+          };
           let (buf_w, buf_h) = Self::surface_tree_size(client, parent_id)
             .unwrap_or((960, 640));
           let (ux, uy, uw, uh) = self.usable_area();

@@ -1317,8 +1317,8 @@ static int g_stab_apps_idx         = -1;
 static int g_stab_disp_idx         = -1;
 static int g_stab_lang_idx         = -1;
 static int g_stab_kb_idx           = -1;
-static int g_stab_sound_idx = -1;
-static int g_stab_display_idx = -1;
+static int g_stab_sound_idx        = -1;
+static int g_stab_display_idx      = -1;
 static int g_stab_wm_idx           = -1;
 static int g_win_menu_idx  = -1;
 static int g_clip_menu_idx = -1;
@@ -2599,18 +2599,25 @@ static LunaTrayEntry* tray_entry_for_key(const char* key) {
 }
 
 static void tray_sync_window_tips_and_visibility(void) {
+    int visible = 0;
     for (int s = 0; s < MAX_TRAY_SLOTS; s++) {
         const char* key = g_tray_slot_key[s];
         int is_window = tray_key_is_window(key);
+        int hide_window = !g_settings.window_tray_icons && is_window;
         LunaTrayEntry* t = is_window ? tray_entry_for_key(key) : NULL;
         if (g_tray_tip_idx[s] >= 0) {
             const char* tip = t ? (t->tooltip[0] ? t->tooltip : t->label) : "";
             luna_set_text(g_tray_tip_idx[s], tip);
             set_hidden(g_tray_tip_idx[s], !tip[0]);
         }
-        if (!g_settings.window_tray_icons && is_window && g_tray_slot_idx[s] >= 0)
+        if (hide_window && g_tray_slot_idx[s] >= 0) {
             set_hidden(g_tray_slot_idx[s], 1);
+        } else if (key && *key && g_tray_slot_idx[s] >= 0) {
+            visible++;
+        }
     }
+    if (g_tray_area_idx >= 0)
+        set_hidden(g_tray_area_idx, visible == 0);
 }
 
 static void update_tray_ui(void) {
@@ -2694,9 +2701,9 @@ static void update_tray_ui(void) {
         g_tray_sni_kind[s] = 0;
     }
     if (g_tray_area_idx >= 0) set_hidden(g_tray_area_idx, used == 0);
+    tray_sync_window_tips_and_visibility();
     luna_mark_layout_dirty();
     shell_request_repaint(1);
-    tray_sync_window_tips_and_visibility();
 }
 
 static double g_toast_deadline = 0.0;
@@ -6839,6 +6846,11 @@ static void apply_wm_settings(void) {
                                 g_settings.dock_magnification ? "dock_animated" : NULL);
     }
 
+    snprintf(cmd, sizeof(cmd), "wm_config focus_outline %d", g_settings.active_window_outline);
+    ok &= shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config cascade_windows %d", g_settings.cascade_new_windows);
+    ok &= shell_send_cmd(cmd);
+
     if (ok) {
         if (g_wm_settings_pending)
             fprintf(stderr, "[luna-shell] compositor WM settings applied after retry\n");
@@ -6854,10 +6866,6 @@ static void apply_wm_settings(void) {
         g_wm_settings_retry_at = g_now +
             (g_wm_settings_retry_count < 8 ? 0.25 : 1.0);
     }
-    snprintf(cmd, sizeof(cmd), "wm_config focus_outline %d", g_settings.active_window_outline);
-    ok &= shell_send_cmd(cmd);
-    snprintf(cmd, sizeof(cmd), "wm_config cascade_windows %d", g_settings.cascade_new_windows);
-    ok &= shell_send_cmd(cmd);
 }
 
 static void wm_settings_retry_tick(void) {
@@ -9450,8 +9458,8 @@ static void bind_indices(void) {
     g_stab_disp_idx     = luna_get_element_by_id("stab_disp");
     g_stab_lang_idx     = luna_get_element_by_id("stab_language");
     g_stab_kb_idx       = luna_get_element_by_id("stab_keyboard");
-    g_stab_sound_idx = luna_get_element_by_id("stab_sound");
-    g_stab_display_idx = luna_get_element_by_id("stab_display");
+    g_stab_sound_idx    = luna_get_element_by_id("stab_sound");
+    g_stab_display_idx  = luna_get_element_by_id("stab_display");
     g_stab_wm_idx       = luna_get_element_by_id("stab_wm");
     g_win_menu_idx      = luna_get_element_by_id("win_menu");
     g_clip_menu_idx     = luna_get_element_by_id("clip_menu");
