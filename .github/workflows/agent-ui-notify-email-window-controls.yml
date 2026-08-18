@@ -1,0 +1,51 @@
+name: Apply shell UI and window controls improvements
+
+on:
+  push:
+    branches:
+      - agent/ui-notify-email-window-controls
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: startsWith(github.event.head_commit.message, 'bootstrap: apply UI and window controls improvements')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply targeted shell changes
+        run: python3 tools/agent_patch_ui.py
+
+      - name: Regenerate bundled default layout and style headers
+        run: make ui/luna-shell.css.h ui/luna-shell.html.h
+
+      - name: Check compositor
+        run: |
+          cargo check --manifest-path wayland-server-rs/Cargo.toml
+          cargo test --manifest-path wayland-server-rs/Cargo.toml
+
+      - name: Validate generated UI and patch hygiene
+        run: |
+          test -n "$(grep -F 'id=\"dock_email\"' skins/default/layout.html)"
+          test -n "$(grep -F 'id=\"settings_panel_display\"' skins/default/layout.html)"
+          test -n "$(grep -F 'id=\"wm_focus_outline\"' skins/default/layout.html)"
+          test -n "$(grep -F 'id=\"wm_window_tray\"' skins/default/layout.html)"
+          test -n "$(grep -F 'id=\"wm_cascade\"' skins/default/layout.html)"
+          grep -F 'wm_config focus_outline' ui/luna-shell.c
+          grep -F 'wm_config cascade_windows' ui/luna-shell.c
+          grep -F 'wm_focus_outline' wayland-server-rs/src/server.rs
+          grep -F 'wm_cascade_windows' wayland-server-rs/src/server.rs
+          git diff --check
+
+      - name: Commit validated implementation
+        run: |
+          rm -f tools/agent_patch_ui.py .github/workflows/agent-ui-notify-email-window-controls.yml
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: refine notifications and window controls"
+          git push origin HEAD:agent/ui-notify-email-window-controls
