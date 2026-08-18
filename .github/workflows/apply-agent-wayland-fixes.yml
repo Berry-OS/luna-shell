@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/fix-wayland-pacing-focus-status
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: write
@@ -52,4 +55,5 @@ jobs:
           git add -A
           git diff --cached --check
           git commit -m "wayland: smooth pacing and fix window focus tracking"
-          git push origin HEAD:${GITHUB_REF_NAME}
+          HEAD_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          git push origin HEAD:"$HEAD_BRANCH"
