@@ -37,7 +37,9 @@ jobs:
           python3 /tmp/wayland_fixes.py
 
       - name: Regenerate embedded layout
-        run: make ui/luna-shell.html.h
+        run: |
+          chmod +x ui/gen_include.sh
+          make ui/luna-shell.html.h
 
       - name: Validate DRI compositor
         run: |
