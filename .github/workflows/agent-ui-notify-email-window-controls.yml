@@ -43,7 +43,7 @@ jobs:
 
       - name: Commit validated implementation
         run: |
-          rm -f tools/agent_patch_ui.py .github/workflows/agent-ui-notify-email-window-controls.yml
+          rm -f tools/agent_patch_ui.py tools/agent_trigger.txt .github/workflows/agent-ui-notify-email-window-controls.yml
           git add -A
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
