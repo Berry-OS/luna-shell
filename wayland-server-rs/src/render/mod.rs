@@ -399,6 +399,30 @@ pub enum InputEvent {
     VtSwitch(u8),
 }
 
+/// Completion feedback for one asynchronous display presentation.
+///
+/// `timestamp_ms` is in CLOCK_MONOTONIC milliseconds (wrapping to u32, just
+/// like Wayland input/frame timestamps).  Synchronous backends never need to
+/// construct this: the server completes their frame callbacks immediately
+/// after `present*()` returns.
+#[derive(Clone, Copy, Debug)]
+pub struct PresentationFeedback {
+    pub timestamp_ms: u32,
+}
+
+/// Monotonic timestamp shared by input events and presentation feedback.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn monotonic_millis() -> u32 {
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return 0;
+    }
+    let ms = (ts.tv_sec.max(0) as u64)
+        .saturating_mul(1000)
+        .saturating_add((ts.tv_nsec.max(0) as u64) / 1_000_000);
+    ms as u32
+}
+
 pub trait Backend {
     fn size(&self) -> (u32, u32);
     fn present(&mut self, fb: &Framebuffer);
@@ -449,9 +473,21 @@ pub trait Backend {
         None
     }
 
-    /// Consume whatever `event_fd` signalled.
+    /// Consume whatever `event_fd` signalled.  Asynchronous backends return
+    /// feedback only when the frame has actually reached scanout (for DRM,
+    /// DRM_EVENT_FLIP_COMPLETE), not when it was merely submitted.
     #[cfg(not(target_arch = "wasm32"))]
-    fn dispatch_events(&mut self) {}
+    fn dispatch_events(&mut self) -> Option<PresentationFeedback> {
+        None
+    }
+
+    /// Recover an asynchronous completion whose event was lost/delayed.
+    /// Called after the event-loop watchdog timeout.  The default backend has
+    /// no asynchronous presentation and therefore nothing to recover.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_presentation(&mut self) -> Option<PresentationFeedback> {
+        None
+    }
 
     /// True while a previous `present` is still being taken over by the
     /// scanout hardware.  Compositing again before it clears would overwrite
