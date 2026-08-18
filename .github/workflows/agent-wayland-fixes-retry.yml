@@ -17,6 +17,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: fix/wayland-jank-notification-history-widgets
+          submodules: recursive
 
       - name: Extract guarded patch script
         shell: bash
