@@ -1,0 +1,50 @@
+name: Re-run root keyboard focus validation
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: agent/fix-refresh-thunderbird-status-width
+      - name: Apply protocol-correct keyboard resource fix
+        shell: bash
+        run: |
+          awk '/^          python3 <<'\''PY'\''$/{take=1; next} take && /^          PY$/{exit} take {sub(/^          /, ""); print}' \
+            .github/workflows/agent-root-keyboard-focus.yml > /tmp/root_keyboard_fix.py
+          test -s /tmp/root_keyboard_fix.py
+          sed -i 's/"Self::keyboard_id" in text/"Self::keyboard_id(" in text/' /tmp/root_keyboard_fix.py
+          python3 /tmp/root_keyboard_fix.py
+      - name: Check compositor and tests
+        run: |
+          cargo check --manifest-path wayland-server-rs/Cargo.toml
+          cargo check --manifest-path wayland-server-rs/Cargo.toml --features dri
+          cargo test --manifest-path wayland-server-rs/Cargo.toml --features dri
+      - name: Verify root fix shape
+        run: |
+          grep -q 'fn keyboard_ids(client: &Client) -> Vec<u32>' wayland-server-rs/src/server.rs
+          grep -q 'keyboard_ids_include_every_bound_resource' wayland-server-rs/src/server.rs
+          ! grep -q 'fn keyboard_id(' wayland-server-rs/src/server.rs
+          ! grep -q 'Self::keyboard_id(' wayland-server-rs/src/server.rs
+          python3 - <<'PY'
+          from pathlib import Path
+          shell = Path('ui/luna-shell.c').read_text()
+          browser = shell[shell.index('static int is_browser_cmd'):shell.index('/* Remove one exact path entry')]
+          assert 'thunderbird' not in browser.lower()
+          assert 'betterbird' not in browser.lower()
+          PY
+      - name: Commit tested root fix
+        run: |
+          git config user.name "OpenAI"
+          git config user.email "noreply@openai.com"
+          git add wayland-server-rs/src/server.rs ui/luna-shell.c
+          git commit -m "fix wl_keyboard resource focus delivery"
+          git push origin HEAD:agent/fix-refresh-thunderbird-status-width
