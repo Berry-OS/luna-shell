@@ -6,10 +6,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#define LUNA_GPU_TEXTURE_CACHE 32
+#define LUNA_GPU_TEXTURE_CACHE 16
+#define LUNA_GPU_TEXTURE_CACHE_BYTES (64ull * 1024ull * 1024ull)
 
 struct luna_gpu_texture {
-  uint64_t dev, ino, serial, used;
+  uint64_t dev, ino, serial, used, bytes;
   uintptr_t pixels;
   uint32_t width, height, stride, offset, fourcc;
   EGLImageKHR image;
@@ -32,6 +33,7 @@ struct luna_gpu {
   PFNGLEGLIMAGETARGETTEXTURE2DOESPROC image_texture;
   struct luna_gpu_texture textures[LUNA_GPU_TEXTURE_CACHE];
   uint64_t texture_clock;
+  uint64_t texture_bytes;
 };
 struct luna_gpu_output { void *bo; uint32_t handle, stride; };
 struct luna_gpu_plane { int fd; const void *pixels; uint64_t dev,ino,serial; uint32_t width,height,stride,offset,fourcc; int32_t x,y; };
@@ -45,18 +47,25 @@ static GLuint shader(GLenum kind, const char *src) {
 }
 
 static void texture_drop(struct luna_gpu *g, struct luna_gpu_texture *t) {
-  if (t->texture) glDeleteTextures(1,&t->texture);
+  if (t->texture) {
+    if (g->texture_bytes >= t->bytes) g->texture_bytes -= t->bytes;
+    else g->texture_bytes = 0;
+    glDeleteTextures(1,&t->texture);
+  }
   if (t->image!=EGL_NO_IMAGE_KHR && g->destroy_image) g->destroy_image(g->display,t->image);
   *t=(struct luna_gpu_texture){0};
 }
 
 /* Keep EGLImage/texture objects alive across frames.  dmabuf pixels then stay
  * zero-copy and SHM uploads update existing storage instead of feeding Mesa a
- * stream of allocations for deferred destruction.  The cache is deliberately
- * bounded; dev+ino prevents a recycled fd number from aliasing an old image. */
+ * stream of allocations for deferred destruction.  Bound both entry count and
+ * estimated texture bytes: a fixed 32-entry cache could retain hundreds of MiB
+ * (or around a GiB with 4K buffers) after large windows had disappeared.
+ * dev+ino prevents a recycled fd number from aliasing an old image. */
 static GLuint texture_for_plane(struct luna_gpu *g,const struct luna_gpu_plane *p) {
   uint64_t dev=p->fd>=0?p->dev:0,ino=p->fd>=0?p->ino:0;
   uintptr_t pixels=p->fd<0?(uintptr_t)p->pixels:0;
+  uint64_t bytes=(uint64_t)p->width*(uint64_t)p->height*4ull;
   struct luna_gpu_texture *slot=NULL,*oldest=NULL;
   for(unsigned i=0;i<LUNA_GPU_TEXTURE_CACHE;i++){
     struct luna_gpu_texture *t=&g->textures[i];
@@ -68,32 +77,58 @@ static GLuint texture_for_plane(struct luna_gpu *g,const struct luna_gpu_plane *
     if(!t->texture){if(!slot)slot=t;continue;}
     if(!oldest||t->used<oldest->used)oldest=t;
   }
-  if(!slot){slot=oldest;texture_drop(g,slot);}
-  int fresh=!slot->texture;
-  if(fresh){
-    slot->dev=dev;slot->ino=ino;slot->pixels=pixels;slot->width=p->width;
-    slot->height=p->height;slot->stride=p->stride;slot->offset=p->offset;
-    slot->fourcc=p->fourcc;slot->dmabuf=p->fd>=0;slot->image=EGL_NO_IMAGE_KHR;
-    glGenTextures(1,&slot->texture);glBindTexture(GL_TEXTURE_2D,slot->texture);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
-    if(p->fd>=0){
-      EGLint a[]={EGL_WIDTH,(EGLint)p->width,EGL_HEIGHT,(EGLint)p->height,
-        EGL_LINUX_DRM_FOURCC_EXT,(EGLint)p->fourcc,EGL_DMA_BUF_PLANE0_FD_EXT,p->fd,
-        EGL_DMA_BUF_PLANE0_OFFSET_EXT,(EGLint)p->offset,EGL_DMA_BUF_PLANE0_PITCH_EXT,(EGLint)p->stride,EGL_NONE};
-      slot->image=g->create_image(g->display,EGL_NO_CONTEXT,EGL_LINUX_DMA_BUF_EXT,NULL,a);
-      if(slot->image==EGL_NO_IMAGE_KHR){texture_drop(g,slot);return 0;}
-      g->image_texture(GL_TEXTURE_2D,slot->image);
-    }else{
-      glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,p->width,p->height,0,GL_BGRA_EXT,GL_UNSIGNED_BYTE,NULL);
+  if(slot && slot->texture){
+    glBindTexture(GL_TEXTURE_2D,slot->texture);
+    slot->used=++g->texture_clock;
+    if(p->fd<0 && slot->serial!=p->serial){
+      glTexSubImage2D(GL_TEXTURE_2D,0,0,0,p->width,p->height,GL_BGRA_EXT,GL_UNSIGNED_BYTE,p->pixels);
+      slot->serial=p->serial;
     }
-  }else glBindTexture(GL_TEXTURE_2D,slot->texture);
+    return slot->texture;
+  }
+  if(!slot){slot=oldest;texture_drop(g,slot);}
+
+  /* Evict least-recently-used entries until the new texture fits the memory
+   * budget.  If one texture alone is larger than the budget, keep that single
+   * entry rather than thrashing on every frame. */
+  while(g->texture_bytes &&
+        (bytes>LUNA_GPU_TEXTURE_CACHE_BYTES ||
+         g->texture_bytes>LUNA_GPU_TEXTURE_CACHE_BYTES-bytes)){
+    struct luna_gpu_texture *victim=NULL;
+    for(unsigned i=0;i<LUNA_GPU_TEXTURE_CACHE;i++){
+      struct luna_gpu_texture *t=&g->textures[i];
+      if(!t->texture || t==slot) continue;
+      if(!victim||t->used<victim->used)victim=t;
+    }
+    if(!victim)break;
+    texture_drop(g,victim);
+  }
+
+  slot->dev=dev;slot->ino=ino;slot->pixels=pixels;slot->width=p->width;
+  slot->height=p->height;slot->stride=p->stride;slot->offset=p->offset;
+  slot->fourcc=p->fourcc;slot->dmabuf=p->fd>=0;slot->image=EGL_NO_IMAGE_KHR;
+  slot->bytes=bytes;
+  glGenTextures(1,&slot->texture);glBindTexture(GL_TEXTURE_2D,slot->texture);
+  if(!slot->texture){*slot=(struct luna_gpu_texture){0};return 0;}
+  g->texture_bytes+=bytes;
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+  if(p->fd>=0){
+    EGLint a[]={EGL_WIDTH,(EGLint)p->width,EGL_HEIGHT,(EGLint)p->height,
+      EGL_LINUX_DRM_FOURCC_EXT,(EGLint)p->fourcc,EGL_DMA_BUF_PLANE0_FD_EXT,p->fd,
+      EGL_DMA_BUF_PLANE0_OFFSET_EXT,(EGLint)p->offset,EGL_DMA_BUF_PLANE0_PITCH_EXT,(EGLint)p->stride,EGL_NONE};
+    slot->image=g->create_image(g->display,EGL_NO_CONTEXT,EGL_LINUX_DMA_BUF_EXT,NULL,a);
+    if(slot->image==EGL_NO_IMAGE_KHR){texture_drop(g,slot);return 0;}
+    g->image_texture(GL_TEXTURE_2D,slot->image);
+  }else{
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,p->width,p->height,0,GL_BGRA_EXT,GL_UNSIGNED_BYTE,NULL);
+  }
   slot->used=++g->texture_clock;
   /* SHM content only changes when that wl_buffer is committed again.  Do not
    * upload every visible surface merely because some other surface damaged a
    * few pixels.  Cursor bitmaps use serial 0 and a stable pointer, so they are
    * uploaded once as well. */
-  if(p->fd<0 && (fresh || slot->serial!=p->serial)){
+  if(p->fd<0){
     glTexSubImage2D(GL_TEXTURE_2D,0,0,0,p->width,p->height,GL_BGRA_EXT,GL_UNSIGNED_BYTE,p->pixels);
     slot->serial=p->serial;
   }
