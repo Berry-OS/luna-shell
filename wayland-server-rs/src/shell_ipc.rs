@@ -276,12 +276,16 @@ impl ShellIpc {
         if is_shell_surface(&title, &app_id) {
           continue;
         }
-        if title.is_empty() && app_id.is_empty() {
-          continue;
-        }
+        let display_title = if !title.is_empty() {
+          title
+        } else if !app_id.is_empty() {
+          app_id.clone()
+        } else {
+          "Window".to_string()
+        };
         windows.push(WindowInfo {
           id: window_id(fd, surface_id),
-          title: if title.is_empty() { app_id.clone() } else { title },
+          title: display_title,
           app_id,
           x: s.x,
           y: s.y,

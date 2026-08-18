@@ -9019,7 +9019,7 @@ static void update_async_status(void) {
         idx = g_ui_idx[UI_MB_BAT];
         const char* bat_icon = g_cached_bat >= 0 ? "\uf240" : "\uf1e6";
         if (g_cached_bat >= 0) snprintf(buf, sizeof(buf), "%d%%", g_cached_bat);
-        else snprintf(buf, sizeof(buf), "AC");
+        else buf[0] = '\0';
         if (g_mb_bat_icon_idx >= 0 &&
             text_would_change(g_mb_bat_icon_idx, bat_icon)) {
             luna_set_text_paint_only(g_mb_bat_icon_idx, bat_icon);
@@ -9038,8 +9038,10 @@ static void update_async_status(void) {
             luna_set_text_paint_only(g_mb_wifi_icon_idx, net_icon);
             dirty_mb |= repaint_matters(g_mb_wifi_icon_idx);
         }
-        if (text_would_change(idx, g_cached_net)) {
-            luna_set_text_paint_only(idx, g_cached_net);
+        // The network glyph already distinguishes Wi-Fi/Ethernet.  Keep the
+        // compact menubar icon-only instead of repeating the connection name.
+        if (text_would_change(idx, "")) {
+            luna_set_text_paint_only(idx, "");
             dirty_mb |= repaint_matters(idx);
         }
     }
