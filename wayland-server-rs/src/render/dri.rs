@@ -276,6 +276,10 @@ pub struct DriBackend {
   pending_fb_id: u32,
   flip_started: std::time::Instant,
   use_page_flip: bool,
+  /// Page-flip-less hardware uses front-buffer updates after one initial
+  /// SetCrtc. This synthetic pending flag keeps wl_callback pacing near the
+  /// display refresh rate without running a blocking modeset every frame.
+  front_present_pending: bool,
   /// LUNA_PRESENT_TRACE=1: log submit->actual-scanout latency and watchdog
   /// recoveries without putting logging on the normal fast path.
   present_trace: bool,
@@ -665,6 +669,7 @@ impl DriBackend {
         pending_fb_id: 0,
         flip_started: std::time::Instant::now(),
         use_page_flip: true,
+        front_present_pending: false,
         present_trace: std::env::var("LUNA_PRESENT_TRACE")
           .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off"))
           .unwrap_or(false),
@@ -702,10 +707,18 @@ impl Backend for DriBackend {
     // reserved for present_dmabufs() (zero-copy plane composition).
     // Draw into the back buffer, then flip.  Never rewrite the front buffer
     // while the CRTC is scanning it out (that was the window flicker).
-    let back = 1 - self.front;
+    // If legacy KMS cannot queue page flips, the current front dumb
+    // buffer is already scanned out. Updating it in place avoids the very
+    // expensive per-frame SetCrtc fallback used previously.
+    let back = if self.use_page_flip { 1 - self.front } else { self.front };
     if !self.copy_damaged(fb, back, damage) {
       // Shadow already matched: nothing reached write-combined scanout memory,
       // so a page flip would only stall the pipeline for identical pixels.
+      return;
+    }
+    if !self.use_page_flip {
+      self.front_present_pending = true;
+      self.flip_started = std::time::Instant::now();
       return;
     }
     if unsafe { self.flip_to(back) } {
@@ -720,7 +733,10 @@ impl Backend for DriBackend {
   }
 
   fn present_dmabuf(&mut self, buf: &ShmBuffer) -> bool {
-    if !self.active || buf.width != self.width as i32 || buf.height != self.height as i32 {
+    // Direct scanout would require another blocking SetCrtc when page flips
+    // are unavailable. Fall back to software composition into the persistent
+    // front buffer instead.
+    if !self.active || !self.use_page_flip || buf.width != self.width as i32 || buf.height != self.height as i32 {
       return false;
     }
     let Some(dma_fd) = buf.dmabuf_fd() else { return false };
@@ -748,6 +764,7 @@ impl Backend for DriBackend {
   }
 
   fn present_dmabufs(&mut self, surfaces: &[(i32, i32, ShmBuffer)], bitmap: Option<super::GpuBitmap<'_>>) -> bool {
+    if !self.use_page_flip { return false; }
     #[cfg(feature = "gpu")]
     {
       let Some(output) = self.gpu.as_mut().and_then(|g| g.render_dmabufs(surfaces, bitmap)) else { return false };
@@ -825,10 +842,19 @@ impl Backend for DriBackend {
   }
 
   fn present_busy(&self) -> bool {
-    self.flip_pending
+    self.flip_pending || self.front_present_pending
   }
 
   fn poll_presentation(&mut self) -> Option<PresentationFeedback> {
+    if self.front_present_pending {
+      let refresh = mode_refresh_millihz(&self.mode).max(10_000) as u64;
+      let frame_ms = ((1_000_000u64 + refresh - 1) / refresh).max(1);
+      if self.flip_started.elapsed() < std::time::Duration::from_millis(frame_ms) {
+        return None;
+      }
+      self.front_present_pending = false;
+      return Some(PresentationFeedback { timestamp_ms: monotonic_millis() });
+    }
     if !self.flip_pending {
       return None;
     }
@@ -1030,7 +1056,7 @@ impl DriBackend {
       let own = fb_id == self.bufs[0].fb_id || fb_id == self.bufs[1].fb_id;
       if own && err != libc::EBUSY {
         eprintln!(
-          "[luna-compositor] dri: page flip unavailable ({}), using SetCrtc",
+          "[luna-compositor] dri: page flip unavailable ({}), switching to paced front-buffer updates",
           std::io::Error::from_raw_os_error(err)
         );
         self.use_page_flip = false;

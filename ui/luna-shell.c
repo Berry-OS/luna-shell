@@ -636,6 +636,7 @@ typedef struct {
     int  classic_titlebar;
     int  super_shortcuts;
     int  dock_enabled;       /* show the floating dock bar */
+    int  widgets_enabled;    /* show desktop clock/stats/weather cards */
     int  dock_magnification;
     int  wallpaper_animation; /* animate aurora/stars only while enabled */
     int  session_restore;
@@ -703,6 +704,7 @@ static void settings_defaults(void) {
     g_settings.classic_titlebar = 0;
     g_settings.super_shortcuts = 1;
     g_settings.dock_enabled = 1;
+    g_settings.widgets_enabled = 1;
     g_settings.dock_magnification = 1;
     g_settings.wallpaper_animation = 1;
     g_settings.session_restore = 1;
@@ -805,6 +807,8 @@ static void settings_load(void) {
                 g_settings.super_shortcuts = atoi(val) != 0;
             else if (!strcmp(key, "dock_enabled"))
                 g_settings.dock_enabled = atoi(val) != 0;
+            else if (!strcmp(key, "widgets_enabled"))
+                g_settings.widgets_enabled = atoi(val) != 0;
             else if (!strcmp(key, "dock_magnification"))
                 g_settings.dock_magnification = atoi(val) != 0;
             else if (!strcmp(key, "wallpaper_animation"))
@@ -882,6 +886,7 @@ static void settings_save(void) {
     fprintf(f, "classic_titlebar=%d\n", g_settings.classic_titlebar);
     fprintf(f, "super_shortcuts=%d\n", g_settings.super_shortcuts);
     fprintf(f, "dock_enabled=%d\n", g_settings.dock_enabled);
+    fprintf(f, "widgets_enabled=%d\n", g_settings.widgets_enabled);
     fprintf(f, "dock_magnification=%d\n", g_settings.dock_magnification);
     fprintf(f, "wallpaper_animation=%d\n", g_settings.wallpaper_animation);
     fprintf(f, "session_restore=%d\n", g_settings.session_restore);
@@ -4302,7 +4307,71 @@ static void position_control_center(void) {
 
 /* ── Toast notifications ── */
 
+#define NOTIFICATION_HISTORY_MAX 8
+typedef struct {
+    char title[96];
+    char message[192];
+    char when[16];
+} LunaNotificationHistoryEntry;
+
+static LunaNotificationHistoryEntry g_notification_history[NOTIFICATION_HISTORY_MAX];
+static int g_notification_history_count = 0;
+
+static void notification_history_copy(char* dst, size_t n, const char* src) {
+    if (!dst || n == 0) return;
+    if (!src) src = "";
+    snprintf(dst, n, "%s", src);
+    for (size_t i = 0; dst[i]; i++)
+        if (dst[i] == '\n' || dst[i] == '\r' || dst[i] == '\t') dst[i] = ' ';
+}
+
+static void notification_history_refresh(void) {
+    int empty_idx = luna_get_element_by_id("notify_empty");
+    if (empty_idx >= 0) set_hidden(empty_idx, g_notification_history_count > 0);
+    for (int i = 0; i < NOTIFICATION_HISTORY_MAX; i++) {
+        char row_id[24], text_id[32];
+        snprintf(row_id, sizeof(row_id), "notify_%d", i);
+        snprintf(text_id, sizeof(text_id), "notify_%d_text", i);
+        int row = luna_get_element_by_id(row_id);
+        if (row < 0) continue;
+        if (i >= g_notification_history_count) {
+  set_hidden(row, 1);
+  continue;
+        }
+        const LunaNotificationHistoryEntry* h = &g_notification_history[i];
+        char line[320];
+        if (h->message[0])
+  snprintf(line, sizeof(line), "%s  %s — %s", h->when, h->title, h->message);
+        else
+  snprintf(line, sizeof(line), "%s  %s", h->when, h->title);
+        int text_idx = luna_get_element_by_id(text_id);
+        if (text_idx >= 0) luna_set_text(text_idx, line);
+        set_hidden(row, 0);
+    }
+}
+
+static void notification_history_push(const char* title, const char* msg) {
+    if (g_notification_history_count > 0) {
+        int move = g_notification_history_count;
+        if (move >= NOTIFICATION_HISTORY_MAX) move = NOTIFICATION_HISTORY_MAX - 1;
+        memmove(&g_notification_history[1], &g_notification_history[0],
+      (size_t)move * sizeof(g_notification_history[0]));
+    }
+    LunaNotificationHistoryEntry* h = &g_notification_history[0];
+    memset(h, 0, sizeof(*h));
+    notification_history_copy(h->title, sizeof(h->title), title ? title : "Luna");
+    notification_history_copy(h->message, sizeof(h->message), msg ? msg : "");
+    time_t now = time(NULL);
+    struct tm tm_info;
+    if (localtime_r(&now, &tm_info))
+        (void)strftime(h->when, sizeof(h->when), "%H:%M", &tm_info);
+    if (g_notification_history_count < NOTIFICATION_HISTORY_MAX)
+        g_notification_history_count++;
+    notification_history_refresh();
+}
+
 static void toast_show(const char* title, const char* msg, double secs) {
+    notification_history_push(title, msg);
     int t = luna_get_element_by_id("toast_title");
     int m = luna_get_element_by_id("toast_msg");
     if (t != -1) luna_set_text(t, title);
@@ -6755,6 +6824,7 @@ static void settings_populate_ui(void) {
     settings_mark_toggle("wm_classic_titlebar", g_settings.classic_titlebar);
     settings_mark_toggle("wm_shortcuts", g_settings.super_shortcuts);
     settings_mark_toggle("wm_dock", g_settings.dock_enabled);
+    settings_mark_toggle("wm_widgets", g_settings.widgets_enabled);
     settings_mark_toggle("wm_dock_mag", g_settings.dock_magnification);
     settings_mark_toggle("wm_wallpaper_motion", g_settings.wallpaper_animation);
     settings_mark_toggle("wm_restore", g_settings.session_restore);
@@ -7068,6 +7138,7 @@ static void on_wm_toggle(LunaElement* e) {
     else if (!strcmp(id, "wm_classic_titlebar")) value = &g_settings.classic_titlebar;
     else if (!strcmp(id, "wm_shortcuts")) value = &g_settings.super_shortcuts;
     else if (!strcmp(id, "wm_dock")) value = &g_settings.dock_enabled;
+    else if (!strcmp(id, "wm_widgets")) value = &g_settings.widgets_enabled;
     else if (!strcmp(id, "wm_dock_mag")) value = &g_settings.dock_magnification;
     else if (!strcmp(id, "wm_wallpaper_motion")) value = &g_settings.wallpaper_animation;
     else if (!strcmp(id, "wm_restore")) value = &g_settings.session_restore;
@@ -7076,7 +7147,7 @@ static void on_wm_toggle(LunaElement* e) {
     settings_mark_toggle(id, *value);
     if (!strcmp(id, "wm_wallpaper_motion"))
         apply_wallpaper(g_settings.wallpaper);
-    else if (!strcmp(id, "wm_dock"))
+    else if (!strcmp(id, "wm_dock") || !strcmp(id, "wm_widgets"))
         apply_dock_visibility();
     else
         apply_wm_settings();
@@ -9495,7 +9566,7 @@ static void bind_indices(void) {
     {
         const char* toggle_ids[] = {
             "wm_snap", "wm_tile", "wm_top_maximize", "wm_double_click", "wm_classic_titlebar", "wm_shortcuts",
-            "wm_dock", "wm_dock_mag", "wm_wallpaper_motion", "wm_restore"
+            "wm_dock", "wm_widgets", "wm_dock_mag", "wm_wallpaper_motion", "wm_restore"
         };
         for (size_t i = 0; i < sizeof(toggle_ids) / sizeof(toggle_ids[0]); i++)
             wire_subtree(luna_get_element_by_id(toggle_ids[i]), on_wm_toggle);
@@ -11813,6 +11884,11 @@ static void apply_dock_visibility(void) {
     int dock_idx = luna_get_element_by_id("dock");
     if (dock_idx >= 0)
         set_hidden(dock_idx, dock_hidden);
+    const char* widget_ids[] = { "widget_clock", "widget_stats", "widget_weather" };
+    for (size_t i = 0; i < sizeof(widget_ids) / sizeof(widget_ids[0]); i++) {
+        int idx = luna_get_element_by_id(widget_ids[i]);
+        if (idx >= 0) set_hidden(idx, !g_settings.widgets_enabled);
+    }
     luna_mark_layout_dirty();
 
     if (g_surfs[LUNA_SURF_DOCK].layer_surf) {
