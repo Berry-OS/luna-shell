@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/clock-stopwatch-widget
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: write
@@ -12,9 +15,10 @@ jobs:
   apply-and-validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out Luna Shell
+      - name: Check out Luna Shell head branch
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.head_ref || github.ref_name }}
           submodules: recursive
           fetch-depth: 0
 
@@ -48,11 +52,14 @@ jobs:
           grep -q '#widget_clock.stopwatch_mode' skins/default/style.css
 
       - name: Commit implementation and remove staging helpers
+        env:
+          TARGET_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add skins/default/layout.html skins/default/style.css \
                   ui/luna-shell.c ui/luna-shell.css.h ui/luna-shell.html.h
-          git rm .github/workflows/apply-stopwatch-widget.yml tools/apply-stopwatch-widget.py
+          git rm .github/workflows/apply-stopwatch-widget.yml \
+                 tools/apply-stopwatch-widget.py tools/.stopwatch-trigger
           git commit -m "Add stopwatch mode to clock widget"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git push origin "HEAD:${TARGET_BRANCH}"
