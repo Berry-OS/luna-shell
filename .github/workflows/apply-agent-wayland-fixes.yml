@@ -28,7 +28,7 @@ jobs:
       - name: Replace synchronous DRI pacing with event-loop pacing
         run: |
           git revert --no-commit abdfe3f897bc1ba1f3bd9ff3460fb8064b4696e9
-          git apply .github/agent-async-server.patch
+          git apply --recount .github/agent-async-server.patch
 
       - name: Apply focus, window-list, and status-label fixes
         run: python3 .github/agent-apply-wayland-fixes.py
