@@ -315,6 +315,10 @@ pub struct Server {
   wm_edge_tile: bool,
   wm_top_edge_maximize: bool,
   wm_titlebar_double_click: bool,
+  /// Draw the focused/active color around the outside resize frame.
+  wm_focus_outline: bool,
+  /// Offset newly mapped windows by the traditional cascade amount.
+  wm_cascade_windows: bool,
   /// 0 = dynamic gradient chrome, 1 = original solid traffic-light chrome,
   /// 2 = flat retro titlebar (Win95-style).
   wm_titlebar_style: i32,
@@ -493,6 +497,8 @@ impl Server {
       wm_edge_tile: false,
       wm_top_edge_maximize: false,
       wm_titlebar_double_click: true,
+      wm_focus_outline: true,
+      wm_cascade_windows: true,
       wm_titlebar_style: 0,
       wm_ssd_bar_h: SSD_BAR_H_DEFAULT,
       wm_titlebar_active: 0,
@@ -1569,7 +1575,11 @@ impl Server {
       self.track_mapped_toplevel(fd, id, mapped);
       // First map of a toplevel — raise, place in usable area, activate.
       if mapped && attach && !was_mapped {
-        let cascade = (self.window_stack.len().saturating_sub(1) as i32) * 28;
+        let cascade = if self.wm_cascade_windows {
+          (self.window_stack.len().saturating_sub(1) as i32) * 28
+        } else {
+          0
+        };
         let child_geom = Self::surface_geometry_in(client, id).unwrap_or((0, 0, 640, 480));
         let parent_geom = Self::toplevel_parent_surface_in(client, id)
           .and_then(|parent| Self::surface_geometry_in(client, parent));
@@ -1690,7 +1700,11 @@ impl Server {
         let parent_was = self.window_stack.iter().any(|&(f, s)| f == fd && s == parent_id);
         self.track_mapped_toplevel(fd, parent_id, true);
         if !parent_was {
-          let cascade = (self.window_stack.len().saturating_sub(1) as i32) * 28;
+          let cascade = if self.wm_cascade_windows {
+            (self.window_stack.len().saturating_sub(1) as i32) * 28
+          } else {
+            0
+          };
           let (buf_w, buf_h) = Self::surface_tree_size(client, parent_id)
             .unwrap_or((960, 640));
           let (ux, uy, uw, uh) = self.usable_area();
@@ -2041,6 +2055,13 @@ impl Server {
         }
         (Some("wm_config"), Some(key)) => {
           match key {
+            "focus_outline" => {
+              self.wm_focus_outline = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(1) != 0;
+              self.dirty = true;
+            }
+            "cascade_windows" => {
+              self.wm_cascade_windows = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(1) != 0;
+            }
             "titlebar_colors" => {
               // wm_config titlebar_colors <active> <inactive> <frame>
               let a = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
@@ -5389,13 +5410,14 @@ impl Server {
   /// Visible window frame so the user can see (and grab) resize borders.
   fn draw_window_frame(&mut self, win_x: i32, win_y: i32, win_w: i32, win_h: i32, ssd: bool, focused: bool) {
     const FRAME: i32 = 3;
+    let frame_focused = focused && self.wm_focus_outline;
     let frame_c: u32 = if self.wm_titlebar_frame != 0 {
       self.wm_titlebar_frame
     } else if self.wm_titlebar_style == 1 {
-      if focused { 0xff4d_8fd8 } else { 0xff5a_5a72 }
+      if frame_focused { 0xff4d_8fd8 } else { 0xff5a_5a72 }
     } else if self.wm_titlebar_style == 2 {
-      if focused { 0xff00_0080 } else { 0xff80_8080 }
-    } else if focused {
+      if frame_focused { 0xff00_0080 } else { 0xff80_8080 }
+    } else if frame_focused {
       0xff39_829c
     } else {
       0xff48_4b58

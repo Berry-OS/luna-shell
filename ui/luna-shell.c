@@ -610,6 +610,7 @@ static LunaApp g_apps[] = {
     { .key = "files",    .name = "Files",     .env = "LUNA_APP_FILES",    .default_cmd = "pcmanfm",              .dock_visible = 1 },
     { .key = "terminal", .name = "Terminal",  .env = "LUNA_APP_TERMINAL", .default_cmd = "sakura",               .dock_visible = 1 },
     { .key = "browser",  .name = "Browser",   .env = "LUNA_APP_BROWSER",  .default_cmd = "firefox",              .dock_visible = 1 },
+    { .key = "email",    .name = "Email",     .env = "LUNA_APP_EMAIL",    .default_cmd = "thunderbird",          .dock_visible = 1 },
     { .key = "editor",   .name = "Editor",    .env = "LUNA_APP_EDITOR",   .default_cmd = "gedit",                .dock_visible = 1 },
     { .key = "music",    .name = "Music",     .env = "LUNA_APP_MUSIC",    .default_cmd = "aplay+ui",             .dock_visible = 1 },
     { .key = "settings", .name = "Settings",  .env = "LUNA_APP_SETTINGS", .default_cmd = "gnome-control-center", .dock_visible = 1 },
@@ -635,6 +636,9 @@ typedef struct {
     int  titlebar_double_click;
     int  classic_titlebar;
     int  super_shortcuts;
+    int  active_window_outline; /* draw the focused-window frame */
+    int  window_tray_icons;     /* compact running-app icons in status area */
+    int  cascade_new_windows;   /* offset newly mapped windows */
     int  dock_enabled;       /* show the floating dock bar */
     int  widgets_enabled;    /* show desktop clock/stats/weather cards */
     int  dock_magnification;
@@ -703,6 +707,9 @@ static void settings_defaults(void) {
     g_settings.titlebar_double_click = 1;
     g_settings.classic_titlebar = 0;
     g_settings.super_shortcuts = 1;
+    g_settings.active_window_outline = 1;
+    g_settings.window_tray_icons = 1;
+    g_settings.cascade_new_windows = 1;
     g_settings.dock_enabled = 1;
     g_settings.widgets_enabled = 1;
     g_settings.dock_magnification = 1;
@@ -805,6 +812,12 @@ static void settings_load(void) {
                 g_settings.classic_titlebar = atoi(val) != 0;
             else if (!strcmp(key, "super_shortcuts"))
                 g_settings.super_shortcuts = atoi(val) != 0;
+            else if (!strcmp(key, "active_window_outline"))
+                g_settings.active_window_outline = atoi(val) != 0;
+            else if (!strcmp(key, "window_tray_icons"))
+                g_settings.window_tray_icons = atoi(val) != 0;
+            else if (!strcmp(key, "cascade_new_windows"))
+                g_settings.cascade_new_windows = atoi(val) != 0;
             else if (!strcmp(key, "dock_enabled"))
                 g_settings.dock_enabled = atoi(val) != 0;
             else if (!strcmp(key, "widgets_enabled"))
@@ -885,6 +898,9 @@ static void settings_save(void) {
     fprintf(f, "titlebar_double_click=%d\n", g_settings.titlebar_double_click);
     fprintf(f, "classic_titlebar=%d\n", g_settings.classic_titlebar);
     fprintf(f, "super_shortcuts=%d\n", g_settings.super_shortcuts);
+    fprintf(f, "active_window_outline=%d\n", g_settings.active_window_outline);
+    fprintf(f, "window_tray_icons=%d\n", g_settings.window_tray_icons);
+    fprintf(f, "cascade_new_windows=%d\n", g_settings.cascade_new_windows);
     fprintf(f, "dock_enabled=%d\n", g_settings.dock_enabled);
     fprintf(f, "widgets_enabled=%d\n", g_settings.widgets_enabled);
     fprintf(f, "dock_magnification=%d\n", g_settings.dock_magnification);
@@ -1295,12 +1311,14 @@ static int g_settings_panel_disp   = -1;
 static int g_settings_panel_lang   = -1;
 static int g_settings_panel_kb     = -1;
 static int g_settings_panel_sound  = -1;
+static int g_settings_panel_display = -1;
 static int g_settings_panel_wm     = -1;
 static int g_stab_apps_idx         = -1;
 static int g_stab_disp_idx         = -1;
 static int g_stab_lang_idx         = -1;
 static int g_stab_kb_idx           = -1;
 static int g_stab_sound_idx        = -1;
+static int g_stab_display_idx      = -1;
 static int g_stab_wm_idx           = -1;
 static int g_win_menu_idx  = -1;
 static int g_clip_menu_idx = -1;
@@ -1333,6 +1351,7 @@ static int g_cal_selected_day = 0;
 static int g_win_label_idx[MAX_WIN_SLOTS];          /* span.win_label child of win_N */
 static int g_win_glyph_idx[MAX_WIN_SLOTS];          /* span.win_glyph child of win_N */
 static int g_tray_glyph_idx[MAX_TRAY_SLOTS];        /* span.tray_glyph child of tray_N */
+static int g_tray_tip_idx[MAX_TRAY_SLOTS];          /* span.tray_tip child of tray_N */
 static int g_tray_area_idx          = -1;           /* #tray_area container */
 static int g_mb_app_idx             = -1;           /* mb_app element */
 static int g_mb_bat_icon_idx        = -1;           /* luna_icon child of mb_bat */
@@ -2382,6 +2401,9 @@ static void sanitize_browser_ld_library_path(void) {
 static int app_id_matches_key(const char* app_id, const char* key) {
     if (!app_id || !*app_id || !key || !*key) return 0;
     if (str_contains_ci(app_id, key)) return 1;
+    if (!strcmp(key, "email"))
+        return str_contains_ci(app_id, "thunderbird") || str_contains_ci(app_id, "betterbird") ||
+               str_contains_ci(app_id, "geary") || str_contains_ci(app_id, "evolution");
     if (!strcmp(key, "files"))
         return str_contains_ci(app_id, "pcmanfm") || str_contains_ci(app_id, "thunar") ||
                str_contains_ci(app_id, "nautilus") || str_contains_ci(app_id, "nemo") ||
@@ -2564,6 +2586,40 @@ static int tray_compositor_is_status(const LunaTrayEntry* t) {
     return 1;
 }
 
+
+static int tray_key_is_window(const char* key) {
+    return key && (!strncmp(key, "win:", 4) || !strncmp(key, "app:", 4));
+}
+
+static LunaTrayEntry* tray_entry_for_key(const char* key) {
+    if (!key || !*key) return NULL;
+    for (int i = 0; i < g_tray_count; i++)
+        if (!strcmp(g_tray[i].id, key)) return &g_tray[i];
+    return NULL;
+}
+
+static void tray_sync_window_tips_and_visibility(void) {
+    int visible = 0;
+    for (int s = 0; s < MAX_TRAY_SLOTS; s++) {
+        const char* key = g_tray_slot_key[s];
+        int is_window = tray_key_is_window(key);
+        int hide_window = !g_settings.window_tray_icons && is_window;
+        LunaTrayEntry* t = is_window ? tray_entry_for_key(key) : NULL;
+        if (g_tray_tip_idx[s] >= 0) {
+            const char* tip = t ? (t->tooltip[0] ? t->tooltip : t->label) : "";
+            luna_set_text(g_tray_tip_idx[s], tip);
+            set_hidden(g_tray_tip_idx[s], !tip[0]);
+        }
+        if (hide_window && g_tray_slot_idx[s] >= 0) {
+            set_hidden(g_tray_slot_idx[s], 1);
+        } else if (key && *key && g_tray_slot_idx[s] >= 0) {
+            visible++;
+        }
+    }
+    if (g_tray_area_idx >= 0)
+        set_hidden(g_tray_area_idx, visible == 0);
+}
+
 static void update_tray_ui(void) {
     /* Windowed GLFW/X11 preview is not a session host: leave the tray
      * collapsed so it neither paints empty chrome nor steals clicks.
@@ -2645,6 +2701,7 @@ static void update_tray_ui(void) {
         g_tray_sni_kind[s] = 0;
     }
     if (g_tray_area_idx >= 0) set_hidden(g_tray_area_idx, used == 0);
+    tray_sync_window_tips_and_visibility();
     luna_mark_layout_dirty();
     shell_request_repaint(1);
 }
@@ -4329,23 +4386,39 @@ static void notification_history_refresh(void) {
     int empty_idx = luna_get_element_by_id("notify_empty");
     if (empty_idx >= 0) set_hidden(empty_idx, g_notification_history_count > 0);
     for (int i = 0; i < NOTIFICATION_HISTORY_MAX; i++) {
-        char row_id[24], text_id[32];
+        char row_id[24], time_id[32], title_id[32], message_id[32], legacy_id[32];
         snprintf(row_id, sizeof(row_id), "notify_%d", i);
-        snprintf(text_id, sizeof(text_id), "notify_%d_text", i);
+        snprintf(time_id, sizeof(time_id), "notify_%d_time", i);
+        snprintf(title_id, sizeof(title_id), "notify_%d_title", i);
+        snprintf(message_id, sizeof(message_id), "notify_%d_message", i);
+        snprintf(legacy_id, sizeof(legacy_id), "notify_%d_text", i);
         int row = luna_get_element_by_id(row_id);
         if (row < 0) continue;
         if (i >= g_notification_history_count) {
-  set_hidden(row, 1);
-  continue;
+            set_hidden(row, 1);
+            continue;
         }
         const LunaNotificationHistoryEntry* h = &g_notification_history[i];
-        char line[320];
-        if (h->message[0])
-  snprintf(line, sizeof(line), "%s  %s — %s", h->when, h->title, h->message);
-        else
-  snprintf(line, sizeof(line), "%s  %s", h->when, h->title);
-        int text_idx = luna_get_element_by_id(text_id);
-        if (text_idx >= 0) luna_set_text(text_idx, line);
+        int time_idx = luna_get_element_by_id(time_id);
+        int title_idx = luna_get_element_by_id(title_id);
+        int message_idx = luna_get_element_by_id(message_id);
+        if (time_idx >= 0 && title_idx >= 0 && message_idx >= 0) {
+            luna_set_text(time_idx, h->when[0] ? h->when : "Now");
+            luna_set_text(title_idx, h->title[0] ? h->title : "Notification");
+            luna_set_text(message_idx, h->message);
+            set_hidden(message_idx, h->message[0] ? 0 : 1);
+        } else {
+            /* Third-party skins may still expose only notify_N_text. */
+            int legacy_idx = luna_get_element_by_id(legacy_id);
+            if (legacy_idx >= 0) {
+                char line[320];
+                if (h->message[0])
+                    snprintf(line, sizeof(line), "%s  %s — %s", h->when, h->title, h->message);
+                else
+                    snprintf(line, sizeof(line), "%s  %s", h->when, h->title);
+                luna_set_text(legacy_idx, line);
+            }
+        }
         set_hidden(row, 0);
     }
 }
@@ -6773,6 +6846,11 @@ static void apply_wm_settings(void) {
                                 g_settings.dock_magnification ? "dock_animated" : NULL);
     }
 
+    snprintf(cmd, sizeof(cmd), "wm_config focus_outline %d", g_settings.active_window_outline);
+    ok &= shell_send_cmd(cmd);
+    snprintf(cmd, sizeof(cmd), "wm_config cascade_windows %d", g_settings.cascade_new_windows);
+    ok &= shell_send_cmd(cmd);
+
     if (ok) {
         if (g_wm_settings_pending)
             fprintf(stderr, "[luna-shell] compositor WM settings applied after retry\n");
@@ -6823,6 +6901,9 @@ static void settings_populate_ui(void) {
     settings_mark_toggle("wm_double_click", g_settings.titlebar_double_click);
     settings_mark_toggle("wm_classic_titlebar", g_settings.classic_titlebar);
     settings_mark_toggle("wm_shortcuts", g_settings.super_shortcuts);
+    settings_mark_toggle("wm_focus_outline", g_settings.active_window_outline);
+    settings_mark_toggle("wm_window_tray", g_settings.window_tray_icons);
+    settings_mark_toggle("wm_cascade", g_settings.cascade_new_windows);
     settings_mark_toggle("wm_dock", g_settings.dock_enabled);
     settings_mark_toggle("wm_widgets", g_settings.widgets_enabled);
     settings_mark_toggle("wm_dock_mag", g_settings.dock_magnification);
@@ -6846,12 +6927,14 @@ static void settings_populate_ui(void) {
     set_hidden(g_settings_panel_lang, 1);
     set_hidden(g_settings_panel_kb, 1);
     set_hidden(g_settings_panel_sound, 1);
+    set_hidden(g_settings_panel_display, 1);
     set_hidden(g_settings_panel_wm, 1);
     if (g_stab_apps_idx  >= 0) luna_update_classes(g_stab_apps_idx,  "active", "active");
     if (g_stab_disp_idx  >= 0) luna_update_classes(g_stab_disp_idx,  "active", NULL);
     if (g_stab_lang_idx  >= 0) luna_update_classes(g_stab_lang_idx,  "active", NULL);
     if (g_stab_kb_idx    >= 0) luna_update_classes(g_stab_kb_idx,    "active", NULL);
     if (g_stab_sound_idx >= 0) luna_update_classes(g_stab_sound_idx, "active", NULL);
+    if (g_stab_display_idx >= 0) luna_update_classes(g_stab_display_idx, "active", NULL);
     if (g_stab_wm_idx    >= 0) luna_update_classes(g_stab_wm_idx,    "active", NULL);
 }
 
@@ -6946,6 +7029,7 @@ static void on_settings_tab(LunaElement* e) {
     int is_lang = !strcmp(id, "stab_language");
     int is_kb = !strcmp(id, "stab_keyboard");
     int is_sound = !strcmp(id, "stab_sound");
+    int is_display = !strcmp(id, "stab_display");
     int is_wm = !strcmp(id, "stab_wm");
 
     if (g_stab_apps_idx >= 0)
@@ -6958,6 +7042,8 @@ static void on_settings_tab(LunaElement* e) {
         luna_update_classes(g_stab_kb_idx, "active", is_kb ? "active" : NULL);
     if (g_stab_sound_idx >= 0)
         luna_update_classes(g_stab_sound_idx, "active", is_sound ? "active" : NULL);
+    if (g_stab_display_idx >= 0)
+        luna_update_classes(g_stab_display_idx, "active", is_display ? "active" : NULL);
     if (g_stab_wm_idx >= 0)
         luna_update_classes(g_stab_wm_idx, "active", is_wm ? "active" : NULL);
     set_hidden(g_settings_panel_apps, !is_apps);
@@ -6965,8 +7051,9 @@ static void on_settings_tab(LunaElement* e) {
     set_hidden(g_settings_panel_lang, !is_lang);
     set_hidden(g_settings_panel_kb, !is_kb);
     set_hidden(g_settings_panel_sound, !is_sound);
+    set_hidden(g_settings_panel_display, !is_display);
     set_hidden(g_settings_panel_wm, !is_wm);
-    if (is_sound) settings_update_sound_status();
+    if (is_sound || is_display) settings_update_sound_status();
 }
 
 static void on_locale_select(LunaElement* e) {
@@ -7142,6 +7229,9 @@ static void on_wm_toggle(LunaElement* e) {
     else if (!strcmp(id, "wm_dock_mag")) value = &g_settings.dock_magnification;
     else if (!strcmp(id, "wm_wallpaper_motion")) value = &g_settings.wallpaper_animation;
     else if (!strcmp(id, "wm_restore")) value = &g_settings.session_restore;
+    else if (!strcmp(id, "wm_focus_outline")) value = &g_settings.active_window_outline;
+    else if (!strcmp(id, "wm_window_tray")) value = &g_settings.window_tray_icons;
+    else if (!strcmp(id, "wm_cascade")) value = &g_settings.cascade_new_windows;
     if (!value) return;
     *value = !*value;
     settings_mark_toggle(id, *value);
@@ -7151,6 +7241,7 @@ static void on_wm_toggle(LunaElement* e) {
         apply_dock_visibility();
     else
         apply_wm_settings();
+    if (!strcmp(id, "wm_window_tray")) update_tray_ui();
     settings_save();
     shell_request_repaint(-1);
 }
@@ -8970,24 +9061,34 @@ static void on_tray_click(LunaElement* e) {
                                           g_tray_sni_path[slot], ax, ay);
                 return;
             }
-            if (slot >= g_tray_count) return;
-            uint64_t sid = g_tray[slot].surface_id
-                ? g_tray[slot].surface_id
-                : tray_lookup_surface(g_tray[slot].id);
+
+            const char* key = g_tray_slot_key[slot];
+            LunaTrayEntry* t = tray_entry_for_key(key);
+            uint64_t sid = tray_lookup_surface(key);
             if (sid) {
+                LunaWinEntry* w = NULL;
+                for (int i = 0; i < g_win_count; i++) {
+                    if (g_wins[i].id == sid) { w = &g_wins[i]; break; }
+                }
+                if (luna_last_click_button() == LUNA_MOUSE_BUTTON_RIGHT) {
+                    win_menu_open(sid, idx,
+                                  w ? w->title :
+                                  (t ? (t->tooltip[0] ? t->tooltip : t->label) : NULL));
+                    return;
+                }
                 char cmd[64];
                 snprintf(cmd, sizeof(cmd), "activate %" PRIu64, sid);
                 shell_send_cmd(cmd);
                 return;
             }
-            if (!strncmp(g_tray[slot].id, "service:", 8)) {
-                tray_send_action(g_tray[slot].id, "activate");
-                if (!strcmp(g_tray[slot].id, "service:luna-wifi"))
+            if (t && !strncmp(t->id, "service:", 8)) {
+                tray_send_action(t->id, "activate");
+                if (!strcmp(t->id, "service:luna-wifi"))
                     on_wifi_menu(e);
                 return;
             }
-            if (g_tray[slot].tooltip[0])
-                toast_show(g_tray[slot].label, g_tray[slot].tooltip, 3.0);
+            if (t && t->tooltip[0])
+                toast_show(t->label, t->tooltip, 3.0);
             return;
         }
     }
@@ -9351,12 +9452,14 @@ static void bind_indices(void) {
     g_settings_panel_lang = luna_get_element_by_id("settings_panel_language");
     g_settings_panel_kb   = luna_get_element_by_id("settings_panel_keyboard");
     g_settings_panel_sound = luna_get_element_by_id("settings_panel_sound");
+    g_settings_panel_display = luna_get_element_by_id("settings_panel_display");
     g_settings_panel_wm   = luna_get_element_by_id("settings_panel_wm");
     g_stab_apps_idx     = luna_get_element_by_id("stab_apps");
     g_stab_disp_idx     = luna_get_element_by_id("stab_disp");
     g_stab_lang_idx     = luna_get_element_by_id("stab_language");
     g_stab_kb_idx       = luna_get_element_by_id("stab_keyboard");
     g_stab_sound_idx    = luna_get_element_by_id("stab_sound");
+    g_stab_display_idx  = luna_get_element_by_id("stab_display");
     g_stab_wm_idx       = luna_get_element_by_id("stab_wm");
     g_win_menu_idx      = luna_get_element_by_id("win_menu");
     g_clip_menu_idx     = luna_get_element_by_id("clip_menu");
@@ -9533,6 +9636,7 @@ static void bind_indices(void) {
     wire_subtree(g_stab_lang_idx, on_settings_tab);
     wire_subtree(g_stab_kb_idx, on_settings_tab);
     wire_subtree(g_stab_sound_idx, on_settings_tab);
+    wire_subtree(g_stab_display_idx, on_settings_tab);
     wire_subtree(g_stab_wm_idx, on_settings_tab);
     {
         const char* locale_ids[] = { "locale_ja", "locale_en", "locale_c" };
@@ -9566,7 +9670,8 @@ static void bind_indices(void) {
     {
         const char* toggle_ids[] = {
             "wm_snap", "wm_tile", "wm_top_maximize", "wm_double_click", "wm_classic_titlebar", "wm_shortcuts",
-            "wm_dock", "wm_widgets", "wm_dock_mag", "wm_wallpaper_motion", "wm_restore"
+            "wm_dock", "wm_widgets", "wm_dock_mag", "wm_wallpaper_motion", "wm_restore",
+            "wm_focus_outline", "wm_window_tray", "wm_cascade"
         };
         for (size_t i = 0; i < sizeof(toggle_ids) / sizeof(toggle_ids[0]); i++)
             wire_subtree(luna_get_element_by_id(toggle_ids[i]), on_wm_toggle);
@@ -9616,6 +9721,7 @@ static void bind_indices(void) {
     memset(g_win_label_idx,  -1, sizeof(g_win_label_idx));
     memset(g_win_glyph_idx,  -1, sizeof(g_win_glyph_idx));
     memset(g_tray_glyph_idx, -1, sizeof(g_tray_glyph_idx));
+    memset(g_tray_tip_idx,   -1, sizeof(g_tray_tip_idx));
     memset(g_sw_title_idx,   -1, sizeof(g_sw_title_idx));
     memset(g_sw_app_idx,     -1, sizeof(g_sw_app_idx));
     g_mb_bat_icon_idx        = -1;
@@ -9655,6 +9761,11 @@ static void bind_indices(void) {
         if (strstr(e->class_name, "tray_glyph")) {
             for (int s = 0; s < MAX_TRAY_SLOTS; s++)
                 if (g_tray_slot_idx[s] == p) { g_tray_glyph_idx[s] = i; break; }
+            continue;
+        }
+        if (strstr(e->class_name, "tray_tip")) {
+            for (int s = 0; s < MAX_TRAY_SLOTS; s++)
+                if (g_tray_slot_idx[s] == p) { g_tray_tip_idx[s] = i; break; }
             continue;
         }
         /* switcher title / app labels */
