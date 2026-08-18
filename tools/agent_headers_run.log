@@ -1,3 +1,2 @@
-cd ui && ./gen_include.sh -o luna-shell.css.h ../skins/default/style.css
-/bin/sh: 1: ./gen_include.sh: Permission denied
-make: *** [Makefile:106: ui/luna-shell.css.h] Error 126
+Generated: ui/luna-shell.css.h <- skins/default/style.css
+Generated: ui/luna-shell.html.h <- skins/default/layout.html

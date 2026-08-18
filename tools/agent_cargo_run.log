@@ -1,0 +1,66 @@
+info: syncing channel updates for nightly-x86_64-unknown-linux-gnu
+info: latest update on 2026-08-18 for version 1.100.0-nightly (8fa1c96cf 2026-08-17)
+info: downloading 3 components
+    Updating crates.io index
+     Locking 104 packages to highest compatible versions
+      Adding generic-array v0.14.7 (available: v0.14.9)
+      Adding gtk4 v0.9.7 (available: v0.11.4)
+      Adding tungstenite v0.24.0 (available: v0.30.0)
+ Downloading crates ...
+  Downloaded find-msvc-tools v0.1.11
+  Downloaded shlex v2.0.1
+  Downloaded cc v1.4.3
+  Downloaded libc v0.2.189
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.11
+   Compiling libc v0.2.189
+   Compiling cc v1.4.3
+   Compiling wayland-server-rs v0.1.0 (/home/runner/work/luna-shell/luna-shell/wayland-server-rs)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.12s
+   Compiling libc v0.2.189
+   Compiling wayland-server-rs v0.1.0 (/home/runner/work/luna-shell/luna-shell/wayland-server-rs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.25s
+     Running unittests src/lib.rs (target/debug/build/wayland-server-rs/2d2a5811b0d4c17e/out/wayland_server-2d2a5811b0d4c17e)
+
+running 26 tests
+test input::evdev::tests::ctrl_alt_function_key_is_consumed_as_vt_switch ... ok
+test input::evdev::tests::maps_function_keys_to_vts ... ok
+test render::tests::clear_only_touches_the_clip ... ok
+test render::tests::premultiplied_source_over_preserves_channels ... ok
+test render::tests::put_outside_the_clip_is_dropped ... ok
+test render::tests::rect_intersect_of_disjoint_is_empty ... ok
+test render::tests::rect_translation_saturates_full_surface_damage ... ok
+test render::tests::rect_union_ignores_empty_operands ... ok
+test render::tests::set_clip_is_clamped_and_reset_restores_the_screen ... ok
+test server::tests::a_dragged_window_reports_the_box_it_left_and_the_box_it_entered ... ok
+test server::tests::a_still_window_beside_a_dragged_one_contributes_nothing ... ok
+test server::tests::an_appearing_or_vanishing_window_damages_its_own_box ... ok
+test server::tests::an_unchanged_scene_reports_no_moved_damage ... ok
+test server::tests::format_table_can_be_transferred_repeatedly ... ok
+test server::tests::keyboard_ids_include_every_bound_resource ... ok
+test server::tests::layout_group_count_matches_comma_separated_xkb_layouts ... ok
+test server::tests::numlock_uses_the_standard_locked_mod2_mask ... ok
+test input::evdev::tests::input_burst_never_drops_button_release ... ok
+test server::tests::popup_flip_y_when_it_would_overflow_bottom ... ok
+test server::tests::popup_menu_bar_dropdown_drops_below_anchor ... ok
+test server::tests::popup_offset_is_applied ... ok
+test server::tests::popup_submenu_flies_out_to_the_right ... ok
+test server::tests::trailing_entries_on_either_side_are_not_dropped ... ok
+test shell_ipc::tests::shell_window_ids_are_client_scoped_and_reversible ... ok
+test wire::tests::append_message_writes_header_and_padded_payload_in_place ... ok
+test wire::tests::decode_args_reuses_existing_vector_storage ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/server.rs (target/debug/build/wayland-server-rs/0b5104f12b42c1a5/out/luna_compositor-0b5104f12b42c1a5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests wayland_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
