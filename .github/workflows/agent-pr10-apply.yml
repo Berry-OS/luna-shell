@@ -1,4 +1,4 @@
-name: Apply PR 10 shell UI changes
+name: Validate and clean PR 10 shell UI changes
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  patch-and-validate:
+  validate-and-clean:
     if: github.event.pull_request.head.ref == 'agent/ui-notify-email-window-controls'
     runs-on: ubuntu-latest
     steps:
@@ -18,85 +18,57 @@ jobs:
         with:
           ref: agent/ui-notify-email-window-controls
           fetch-depth: 0
+          submodules: recursive
 
-      - name: Gate bootstrap synchronization
+      - name: Gate cleanup synchronization
         id: gate
         shell: bash
         run: |
           subject="$(git log -1 --pretty=%s)"
-          if [[ "$subject" == bootstrap:\ apply\ UI\ and\ window\ controls\ improvements* ]]; then
+          if [[ "$subject" == bootstrap:\ cleanup\ PR\ 10\ build\ artifacts* ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "Skipping non-bootstrap synchronization: $subject"
+            echo "Skipping non-cleanup synchronization: $subject"
           fi
 
-      - name: Normalize patch helper anchors
+      - name: Remove validation artifacts from the PR
         if: steps.gate.outputs.run == 'true'
-        run: python3 tools/agent_patch_fixup.py
-
-      - name: Apply targeted shell changes
-        if: steps.gate.outputs.run == 'true'
-        shell: bash
         run: |
-          set -o pipefail
-          python3 tools/agent_patch_ui.py 2>&1 | tee tools/agent_patch_run.log
+          git rm -r --ignore-unmatch target Cargo.lock tools/agent_cleanup_trigger.txt
 
-      - name: Regenerate bundled default layout and style headers
+      - name: Install luna-shell build dependencies
         if: steps.gate.outputs.run == 'true'
-        shell: bash
         run: |
-          set -o pipefail
-          {
-            sh ui/gen_include.sh -o ui/luna-shell.css.h skins/default/style.css
-            sh ui/gen_include.sh -o ui/luna-shell.html.h skins/default/layout.html
-          } 2>&1 | tee tools/agent_headers_run.log
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libx11-dev libgl1-mesa-dev libegl1-mesa-dev libgbm-dev libdrm-dev \
+            libinput-dev libudev-dev libxkbcommon-dev libwayland-dev libwayland-bin \
+            libdbus-1-dev libssl-dev
 
-      - name: Check compositor
+      - name: Build C luna-shell
         if: steps.gate.outputs.run == 'true'
         shell: bash
         run: |
-          set -o pipefail
-          {
-            cargo check --manifest-path wayland-server-rs/Cargo.toml
-            cargo test --manifest-path wayland-server-rs/Cargo.toml
-          } 2>&1 | tee tools/agent_cargo_run.log
+          chmod +x ui/gen_include.sh
+          make luna-shell
+          rm -f luna-shell
 
-      - name: Validate generated UI and patch hygiene
+      - name: Verify generated headers and staged cleanup
         if: steps.gate.outputs.run == 'true'
         shell: bash
         run: |
-          set -o pipefail
-          {
-            for token in dock_email settings_panel_display wm_focus_outline wm_window_tray wm_cascade; do
-              echo "checking layout token: $token"
-              grep -F "id=\"$token\"" skins/default/layout.html
-            done
-            echo "checking shell WM commands"
-            grep -F 'wm_config focus_outline' ui/luna-shell.c
-            grep -F 'wm_config cascade_windows' ui/luna-shell.c
-            echo "checking compositor settings"
-            grep -F 'wm_focus_outline' wayland-server-rs/src/server.rs
-            grep -F 'wm_cascade_windows' wayland-server-rs/src/server.rs
-            echo "checking whitespace"
-            git diff --check
-          } 2>&1 | tee tools/agent_validate_run.log
+          git diff --check
+          git diff --cached --check
+          test -z "$(git diff --name-only -- ui/luna-shell.css.h ui/luna-shell.html.h)"
+          bad="$(git diff --cached --name-only | grep -Ev '^(Cargo.lock|target/|tools/agent_cleanup_trigger.txt$)' || true)"
+          test -z "$bad"
 
-      - name: Preserve diagnostics on failure
-        if: failure() && steps.gate.outputs.run == 'true'
-        run: |
-          git add tools/agent_*_run.log || true
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "debug: capture UI patch failure" || true
-          git push origin HEAD:agent/ui-notify-email-window-controls || true
-
-      - name: Commit validated implementation
+      - name: Commit cleanup
         if: success() && steps.gate.outputs.run == 'true'
         run: |
-          rm -f tools/agent_patch_ui.py tools/agent_patch_fixup.py tools/agent_trigger.txt tools/agent_*_run.log
-          git add -A
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "feat: refine notifications and window controls"
+          git commit -m "chore: remove validation artifacts"
           git push origin HEAD:agent/ui-notify-email-window-controls
