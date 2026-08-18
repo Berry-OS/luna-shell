@@ -1,0 +1,154 @@
+name: Repair Wayland widget layout move
+
+on:
+  push:
+    branches:
+      - fix/wayland-jank-notification-history-widgets
+
+permissions:
+  contents: write
+
+jobs:
+  repair-and-validate:
+    if: startsWith(github.event.head_commit.message, 'bootstrap: repair layout move')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: fix/wayland-jank-notification-history-widgets
+          submodules: recursive
+
+      - name: Rebuild layouts from master with a minimal widget move
+        shell: bash
+        run: |
+          git checkout origin/master -- \
+            ui/luna-shell.html \
+            skins/amiga-workbench/layout.html \
+            skins/beos/layout.html \
+            skins/classic-mac/layout.html \
+            skins/default/layout.html \
+            skins/nocturne-atelier/layout.html
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          layouts = [
+              Path('ui/luna-shell.html'),
+              Path('skins/amiga-workbench/layout.html'),
+              Path('skins/beos/layout.html'),
+              Path('skins/classic-mac/layout.html'),
+              Path('skins/default/layout.html'),
+              Path('skins/nocturne-atelier/layout.html'),
+          ]
+
+          def div_close(text, element_id):
+              start = text.index(f'<div id="{element_id}"')
+              depth = 0
+              for m in re.finditer(r'<div\b|</div\s*>', text[start:]):
+                  token = m.group(0)
+                  if token.startswith('<div'):
+                      depth += 1
+                  else:
+                      depth -= 1
+                      if depth == 0:
+                          return start + m.start()
+              raise RuntimeError(f'unclosed div: {element_id}')
+
+          for path in layouts:
+              html = path.read_text()
+
+              # Move only the three desktop widget cards.  Dock, menus, dialogs,
+              # settings, and toast remain top-level sibling surfaces.
+              start = html.index('  <!-- Desktop Widgets -->')
+              end = html.index('  <!-- Dock -->', start)
+              widget_block = html[start:end]
+              html = html[:start] + html[end:]
+              bg_end = div_close(html, 'bg_layer')
+              html = html[:bg_end] + widget_block + html[bg_end:]
+
+              # Settings switch for widget visibility.
+              if 'id="wm_widgets"' not in html:
+                  marker = '            <div class="wm_pref" id="wm_dock_mag" role="switch" tabindex="0">'
+                  pref = (
+                      '            <div class="wm_pref" id="wm_widgets" role="switch" tabindex="0">\n'
+                      '              <div class="wm_pref_text"><span class="wm_pref_name">Show desktop widgets</span><span class="wm_pref_desc">Display clock, system statistics, and weather cards on the desktop.</span></div>\n'
+                      '              <div class="wm_switch"><div class="wm_switch_knob"></div></div>\n'
+                      '            </div>\n'
+                  )
+                  if html.count(marker) != 1:
+                      raise RuntimeError(f'{path}: wm_dock_mag marker count={html.count(marker)}')
+                  html = html.replace(marker, pref + marker, 1)
+
+              # Notification history lives inside the top-right Control Center.
+              if 'id="notify_0"' not in html:
+                  cc_end = div_close(html, 'control_center')
+                  rows = [
+                      '    <span class="cc_section">Notifications</span>',
+                      '    <div id="notify_empty" class="cc_stat_row"><span class="cc_stat_label">No recent notifications</span></div>',
+                  ]
+                  for i in range(8):
+                      rows.append(f'    <div id="notify_{i}" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_{i}_text">—</span></div>')
+                  html = html[:cc_end] + '\n'.join(rows) + '\n' + html[cc_end:]
+
+              # Structural assertions: only widgets are inside bg_layer.
+              bg_start = html.index('<div id="bg_layer"')
+              bg_end = div_close(html, 'bg_layer')
+              for wid in ('widget_clock', 'widget_stats', 'widget_weather'):
+                  pos = html.index(f'id="{wid}"')
+                  assert bg_start < pos < bg_end, (path, wid)
+              for outside in ('menubar', 'dock', 'control_center', 'settings_win', 'toast'):
+                  pos = html.index(f'id="{outside}"')
+                  assert pos > bg_end, (path, outside)
+              assert 'id="wm_widgets"' in html
+              assert 'id="notify_7"' in html
+
+              path.write_text(html)
+              print('repaired', path)
+          PY
+
+      - name: Regenerate embedded default layout
+        run: |
+          chmod +x ui/gen_include.sh
+          make ui/luna-shell.html.h
+
+      - name: Validate Rust compositor
+        run: |
+          cargo check -p wayland-server-rs --features dri
+          cargo test -p wayland-server-rs --features dri
+
+      - name: Install shell build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdrm-dev libgbm-dev libegl1-mesa-dev libgl-dev libinput-dev libudev-dev libxkbcommon-dev libwayland-dev libdbus-1-dev libssl-dev libx11-dev wayland-protocols
+
+      - name: Build shell
+        run: make luna-shell
+
+      - name: Review diff shape and commit
+        shell: bash
+        run: |
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          diff = subprocess.check_output(['git','diff','--stat','origin/master']).decode()
+          print(diff)
+          # A widget relocation should not turn each ~1k-line layout into a
+          # wholesale rewrite.  Catch accidental broad moves before committing.
+          for p in [
+              'skins/amiga-workbench/layout.html', 'skins/beos/layout.html',
+              'skins/classic-mac/layout.html', 'skins/default/layout.html',
+              'skins/nocturne-atelier/layout.html', 'ui/luna-shell.html'
+          ]:
+              out = subprocess.check_output(['git','diff','--numstat','origin/master','--',p]).decode().strip()
+              if out:
+                  adds, dels, _ = out.split('\t')
+                  assert int(adds) < 160 and int(dels) < 130, (p, adds, dels)
+          PY
+          git config user.name "OpenAI"
+          git config user.email "noreply@openai.com"
+          git add ui/luna-shell.html ui/luna-shell.html.h skins/amiga-workbench/layout.html skins/beos/layout.html skins/classic-mac/layout.html skins/default/layout.html skins/nocturne-atelier/layout.html
+          git commit -m "fix: keep Wayland widget relocation minimal"
+          git push origin HEAD:fix/wayland-jank-notification-history-widgets
