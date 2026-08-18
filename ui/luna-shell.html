@@ -23,7 +23,51 @@
       <div id="wp_moon_halo"></div>
       <div id="wp_moon"></div>
     </div>
+    <!-- Desktop Widgets -->
+  <div id="widget_clock" class="widget">
+    <div id="wg_time">23:00</div>
+    <div id="wg_date">Tuesday, July 28</div>
   </div>
+
+  <div id="widget_stats" class="widget">
+    <div class="st_row">
+      <span class="st_label">CPU Usage</span>
+      <span class="st_val" id="st_cpu_val">24%</span>
+    </div>
+    <div class="st_bar"><div class="st_fill" id="st_cpu_fill" style="width: 24%;"></div></div>
+
+    <div class="st_row" style="margin-top: 12px;">
+      <span class="st_label">Memory</span>
+      <span class="st_val" id="st_mem_val">7.8 / 16 GB</span>
+    </div>
+    <div class="st_bar"><div class="st_fill g_mem" id="st_mem_fill" style="width: 48%;"></div></div>
+
+    <div class="st_row" style="margin-top: 12px;">
+      <span class="st_label">Storage</span>
+      <span class="st_val">142 / 512 GB</span>
+    </div>
+    <div class="st_bar"><div class="st_fill g_disk" style="width: 28%;"></div></div>
+  </div>
+
+  <div id="widget_weather" class="widget">
+    <div class="st_row">
+      <span class="st_label" id="wg_wx_city">Weather</span>
+      <span class="st_val" id="wg_wx_temp">—</span>
+    </div>
+    <div id="wg_wx_main">
+      <span class="luna_icon" id="wg_wx_icon">&#xf2c9;</span>
+      <span id="wg_wx_desc">Fetching…</span>
+    </div>
+    <div id="wg_wx_forecast">
+      <div id="wg_wf_0" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_1" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_2" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_3" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+      <div id="wg_wf_4" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+    </div>
+  </div>
+
+</div>
 
   <!-- Top Menu Bar -->
   <div id="menubar">
@@ -214,7 +258,17 @@
       <span class="cc_stat_label">RAM</span>
       <div class="cc_bar"><div class="cc_bar_fill" id="cc_mem_fill" style="width: 48%;"></div></div>
     </div>
-  </div>
+      <span class="cc_section">Notifications</span>
+    <div id="notify_empty" class="cc_stat_row"><span class="cc_stat_label">No recent notifications</span></div>
+    <div id="notify_0" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_0_text">—</span></div>
+    <div id="notify_1" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_1_text">—</span></div>
+    <div id="notify_2" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_2_text">—</span></div>
+    <div id="notify_3" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_3_text">—</span></div>
+    <div id="notify_4" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_4_text">—</span></div>
+    <div id="notify_5" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_5_text">—</span></div>
+    <div id="notify_6" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_6_text">—</span></div>
+    <div id="notify_7" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_7_text">—</span></div>
+</div>
 
   <!-- Weather popover (Open-Meteo; mirrors qberry-weather.js) -->
   <div id="weather_menu" class="menu_panel hidden">
@@ -247,50 +301,6 @@
         </div>
       </div>
       <span id="weather_error" class="hidden">Weather unavailable</span>
-    </div>
-  </div>
-
-  <!-- Desktop Widgets -->
-  <div id="widget_clock" class="widget">
-    <div id="wg_time">23:00</div>
-    <div id="wg_date">Tuesday, July 28</div>
-  </div>
-
-  <div id="widget_stats" class="widget">
-    <div class="st_row">
-      <span class="st_label">CPU Usage</span>
-      <span class="st_val" id="st_cpu_val">24%</span>
-    </div>
-    <div class="st_bar"><div class="st_fill" id="st_cpu_fill" style="width: 24%;"></div></div>
-
-    <div class="st_row" style="margin-top: 12px;">
-      <span class="st_label">Memory</span>
-      <span class="st_val" id="st_mem_val">7.8 / 16 GB</span>
-    </div>
-    <div class="st_bar"><div class="st_fill g_mem" id="st_mem_fill" style="width: 48%;"></div></div>
-
-    <div class="st_row" style="margin-top: 12px;">
-      <span class="st_label">Storage</span>
-      <span class="st_val">142 / 512 GB</span>
-    </div>
-    <div class="st_bar"><div class="st_fill g_disk" style="width: 28%;"></div></div>
-  </div>
-
-  <div id="widget_weather" class="widget">
-    <div class="st_row">
-      <span class="st_label" id="wg_wx_city">Weather</span>
-      <span class="st_val" id="wg_wx_temp">—</span>
-    </div>
-    <div id="wg_wx_main">
-      <span class="luna_icon" id="wg_wx_icon">&#xf2c9;</span>
-      <span id="wg_wx_desc">Fetching…</span>
-    </div>
-    <div id="wg_wx_forecast">
-      <div id="wg_wf_0" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
-      <div id="wg_wf_1" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
-      <div id="wg_wf_2" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
-      <div id="wg_wf_3" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
-      <div id="wg_wf_4" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
     </div>
   </div>
 
@@ -766,6 +776,10 @@
             <span class="pref_section">Desktop behavior</span>
             <div class="wm_pref" id="wm_dock" role="switch" tabindex="0">
               <div class="wm_pref_text"><span class="wm_pref_name">Show dock</span><span class="wm_pref_desc">Display the floating application dock at the bottom of the screen.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_widgets" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Show desktop widgets</span><span class="wm_pref_desc">Display clock, system statistics, and weather cards on the desktop.</span></div>
               <div class="wm_switch"><div class="wm_switch_knob"></div></div>
             </div>
             <div class="wm_pref" id="wm_dock_mag" role="switch" tabindex="0">
