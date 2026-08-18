@@ -1,0 +1,97 @@
+name: Apply PR 10 shell UI changes
+
+on:
+  pull_request:
+    branches:
+      - master
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: github.event.pull_request.head.ref == 'agent/ui-notify-email-window-controls'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/ui-notify-email-window-controls
+          fetch-depth: 0
+
+      - name: Gate bootstrap synchronization
+        id: gate
+        shell: bash
+        run: |
+          subject="$(git log -1 --pretty=%s)"
+          if [[ "$subject" == bootstrap:\ apply\ UI\ and\ window\ controls\ improvements* ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping non-bootstrap synchronization: $subject"
+          fi
+
+      - name: Normalize patch helper anchors
+        if: steps.gate.outputs.run == 'true'
+        run: python3 tools/agent_patch_fixup.py
+
+      - name: Apply targeted shell changes
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 tools/agent_patch_ui.py 2>&1 | tee tools/agent_patch_run.log
+
+      - name: Regenerate bundled default layout and style headers
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          make ui/luna-shell.css.h ui/luna-shell.html.h 2>&1 | tee tools/agent_headers_run.log
+
+      - name: Check compositor
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            cargo check --manifest-path wayland-server-rs/Cargo.toml
+            cargo test --manifest-path wayland-server-rs/Cargo.toml
+          } 2>&1 | tee tools/agent_cargo_run.log
+
+      - name: Validate generated UI and patch hygiene
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          {
+            test -n "$(grep -F 'id=\"dock_email\"' skins/default/layout.html)"
+            test -n "$(grep -F 'id=\"settings_panel_display\"' skins/default/layout.html)"
+            test -n "$(grep -F 'id=\"wm_focus_outline\"' skins/default/layout.html)"
+            test -n "$(grep -F 'id=\"wm_window_tray\"' skins/default/layout.html)"
+            test -n "$(grep -F 'id=\"wm_cascade\"' skins/default/layout.html)"
+            grep -F 'wm_config focus_outline' ui/luna-shell.c
+            grep -F 'wm_config cascade_windows' ui/luna-shell.c
+            grep -F 'wm_focus_outline' wayland-server-rs/src/server.rs
+            grep -F 'wm_cascade_windows' wayland-server-rs/src/server.rs
+            git diff --check
+          } 2>&1 | tee tools/agent_validate_run.log
+
+      - name: Preserve diagnostics on failure
+        if: failure() && steps.gate.outputs.run == 'true'
+        run: |
+          git add tools/agent_*_run.log || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "debug: capture UI patch failure" || true
+          git push origin HEAD:agent/ui-notify-email-window-controls || true
+
+      - name: Commit validated implementation
+        if: success() && steps.gate.outputs.run == 'true'
+        run: |
+          rm -f tools/agent_patch_ui.py tools/agent_patch_fixup.py tools/agent_trigger.txt tools/agent_*_run.log
+          git add -A
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: refine notifications and window controls"
+          git push origin HEAD:agent/ui-notify-email-window-controls
