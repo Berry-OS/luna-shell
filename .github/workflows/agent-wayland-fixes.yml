@@ -1,0 +1,281 @@
+name: Apply Wayland rendering and shell fixes
+
+on:
+  push:
+    branches:
+      - fix/wayland-jank-notification-history-widgets
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: startsWith(github.event.head_commit.message, 'bootstrap: apply Wayland fixes')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply targeted source fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import glob
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          # 1) DRI: avoid a blocking legacy SetCrtc on every frame when the
+          # hardware rejects DRM page flips. Keep one initial modeset, then
+          # update the already-scanned front buffer and pace completion at the
+          # output refresh cadence so clients do not run uncapped.
+          path = Path('wayland-server-rs/src/render/dri.rs')
+          text = path.read_text()
+          text = replace_once(
+              text,
+              '  use_page_flip: bool,\n  /// LUNA_PRESENT_TRACE=1:',
+              '  use_page_flip: bool,\n  /// Page-flip-less hardware uses front-buffer updates after one initial\n  /// SetCrtc. This synthetic pending flag keeps wl_callback pacing near the\n  /// display refresh rate without running a blocking modeset every frame.\n  front_present_pending: bool,\n  /// LUNA_PRESENT_TRACE=1:',
+              'dri field')
+          text = replace_once(
+              text,
+              '        use_page_flip: true,\n        present_trace:',
+              '        use_page_flip: true,\n        front_present_pending: false,\n        present_trace:',
+              'dri init')
+          text = replace_once(
+              text,
+              '    let back = 1 - self.front;\n',
+              '    // If legacy KMS cannot queue page flips, the current front dumb\n    // buffer is already scanned out. Updating it in place avoids the very\n    // expensive per-frame SetCrtc fallback used previously.\n    let back = if self.use_page_flip { 1 - self.front } else { self.front };\n',
+              'dri back buffer selection')
+          text = replace_once(
+              text,
+              '    if unsafe { self.flip_to(back) } {\n',
+              '    if !self.use_page_flip {\n      self.front_present_pending = true;\n      self.flip_started = std::time::Instant::now();\n      return;\n    }\n    if unsafe { self.flip_to(back) } {\n',
+              'dri front-buffer present')
+          text = replace_once(
+              text,
+              '  fn present_dmabuf(&mut self, buf: &ShmBuffer) -> bool {\n    if !self.active || buf.width != self.width as i32 || buf.height != self.height as i32 {',
+              '  fn present_dmabuf(&mut self, buf: &ShmBuffer) -> bool {\n    // Direct scanout would require another blocking SetCrtc when page flips\n    // are unavailable. Fall back to software composition into the persistent\n    // front buffer instead.\n    if !self.active || !self.use_page_flip || buf.width != self.width as i32 || buf.height != self.height as i32 {',
+              'dri direct scanout guard')
+          text = replace_once(
+              text,
+              '  fn present_dmabufs(&mut self, surfaces: &[(i32, i32, ShmBuffer)], bitmap: Option<super::GpuBitmap<\'_>>) -> bool {\n    #[cfg(feature = "gpu")]',
+              '  fn present_dmabufs(&mut self, surfaces: &[(i32, i32, ShmBuffer)], bitmap: Option<super::GpuBitmap<\'_>>) -> bool {\n    if !self.use_page_flip { return false; }\n    #[cfg(feature = "gpu")]',
+              'dri gpu scanout guard')
+          text = replace_once(
+              text,
+              '          "[luna-compositor] dri: page flip unavailable ({}), using SetCrtc",',
+              '          "[luna-compositor] dri: page flip unavailable ({}), switching to paced front-buffer updates",',
+              'dri fallback log')
+          text = replace_once(
+              text,
+              '  fn present_busy(&self) -> bool {\n    self.flip_pending\n  }\n\n  fn poll_presentation(&mut self) -> Option<PresentationFeedback> {\n    if !self.flip_pending {',
+              '  fn present_busy(&self) -> bool {\n    self.flip_pending || self.front_present_pending\n  }\n\n  fn poll_presentation(&mut self) -> Option<PresentationFeedback> {\n    if self.front_present_pending {\n      let refresh = mode_refresh_millihz(&self.mode).max(10_000) as u64;\n      let frame_ms = ((1_000_000u64 + refresh - 1) / refresh).max(1);\n      if self.flip_started.elapsed() < std::time::Duration::from_millis(frame_ms) {\n        return None;\n      }\n      self.front_present_pending = false;\n      return Some(PresentationFeedback { timestamp_ms: monotonic_millis() });\n    }\n    if !self.flip_pending {',
+              'dri presentation pacing')
+          path.write_text(text)
+
+          # 2) Bundled layouts: desktop widgets were siblings of #bg_layer.
+          # The Wayland backend renders only registered subtree roots, so those
+          # widgets never reached the background layer even though GLFW renders
+          # the whole document. Move the existing widget block inside bg_layer.
+          # Also expose notification history in the top-right Control Center and
+          # a widget visibility switch in System Settings.
+          layouts = [Path('ui/luna-shell.html')] + [Path(p) for p in glob.glob('skins/*/layout.html')]
+          touched_layouts = []
+          for layout in layouts:
+              if not layout.exists():
+                  continue
+              html = layout.read_text()
+              changed = False
+
+              if '<!-- Desktop Widgets -->' in html and '<!-- Notification Toast -->' in html:
+                  start = html.index('  <!-- Desktop Widgets -->')
+                  end = html.index('  <!-- Notification Toast -->', start)
+                  top = html.index('  <!-- Top Menu Bar -->')
+                  # Only relocate layouts that still have the widgets outside bg_layer.
+                  if start > top:
+                      block = html[start:end].rstrip() + '\n'
+                      html = html[:start] + html[end:]
+                      top = html.index('  <!-- Top Menu Bar -->')
+                      close = html.rfind('  </div>', 0, top)
+                      if close < 0:
+                          raise SystemExit(f'{layout}: cannot find bg_layer closing div')
+                      html = html[:close] + block + html[close:]
+                      changed = True
+
+              if 'id="wm_widgets"' not in html and 'id="wm_dock_mag"' in html:
+                  marker = '            <div class="wm_pref" id="wm_dock_mag" role="switch" tabindex="0">'
+                  widget_pref = (
+                      '            <div class="wm_pref" id="wm_widgets" role="switch" tabindex="0">\n'
+                      '              <div class="wm_pref_text"><span class="wm_pref_name">Show desktop widgets</span><span class="wm_pref_desc">Display clock, system statistics, and weather cards on the desktop.</span></div>\n'
+                      '              <div class="wm_switch"><div class="wm_switch_knob"></div></div>\n'
+                      '            </div>\n'
+                  )
+                  if marker not in html:
+                      raise SystemExit(f'{layout}: wm_dock_mag marker changed')
+                  html = html.replace(marker, widget_pref + marker, 1)
+                  changed = True
+
+              if 'id="notify_0"' not in html and '<!-- Calendar popover' in html and 'id="control_center"' in html:
+                  marker = '  <!-- Calendar popover'
+                  pos = html.index(marker)
+                  close = html.rfind('  </div>', 0, pos)
+                  if close < 0:
+                      raise SystemExit(f'{layout}: cannot find Control Center closing div')
+                  rows = [
+                      '    <span class="cc_section">Notifications</span>',
+                      '    <div id="notify_empty" class="cc_stat_row"><span class="cc_stat_label">No recent notifications</span></div>',
+                  ]
+                  for i in range(8):
+                      rows.append(f'    <div id="notify_{i}" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_{i}_text">—</span></div>')
+                  notify_html = '\n'.join(rows) + '\n'
+                  html = html[:close] + notify_html + html[close:]
+                  changed = True
+
+              if changed:
+                  layout.write_text(html)
+                  touched_layouts.append(str(layout))
+
+          if not touched_layouts:
+              raise SystemExit('no layout files changed')
+          print('updated layouts:', ', '.join(touched_layouts))
+
+          # 3) Shell settings + notification ring buffer.
+          path = Path('ui/luna-shell.c')
+          text = path.read_text()
+          text = replace_once(
+              text,
+              '    int  dock_enabled;       /* show the floating dock bar */\n    int  dock_magnification;',
+              '    int  dock_enabled;       /* show the floating dock bar */\n    int  widgets_enabled;    /* show desktop clock/stats/weather cards */\n    int  dock_magnification;',
+              'settings struct widgets')
+          text = replace_once(text,
+              '    g_settings.dock_enabled = 1;\n    g_settings.dock_magnification = 1;',
+              '    g_settings.dock_enabled = 1;\n    g_settings.widgets_enabled = 1;\n    g_settings.dock_magnification = 1;',
+              'settings default widgets')
+          text = replace_once(text,
+              '            else if (!strcmp(key, "dock_enabled"))\n                g_settings.dock_enabled = atoi(val) != 0;\n            else if (!strcmp(key, "dock_magnification"))',
+              '            else if (!strcmp(key, "dock_enabled"))\n                g_settings.dock_enabled = atoi(val) != 0;\n            else if (!strcmp(key, "widgets_enabled"))\n                g_settings.widgets_enabled = atoi(val) != 0;\n            else if (!strcmp(key, "dock_magnification"))',
+              'settings load widgets')
+          text = replace_once(text,
+              '    fprintf(f, "dock_enabled=%d\\n", g_settings.dock_enabled);\n    fprintf(f, "dock_magnification=%d\\n", g_settings.dock_magnification);',
+              '    fprintf(f, "dock_enabled=%d\\n", g_settings.dock_enabled);\n    fprintf(f, "widgets_enabled=%d\\n", g_settings.widgets_enabled);\n    fprintf(f, "dock_magnification=%d\\n", g_settings.dock_magnification);',
+              'settings save widgets')
+          text = replace_once(text,
+              '    settings_mark_toggle("wm_dock", g_settings.dock_enabled);\n    settings_mark_toggle("wm_dock_mag", g_settings.dock_magnification);',
+              '    settings_mark_toggle("wm_dock", g_settings.dock_enabled);\n    settings_mark_toggle("wm_widgets", g_settings.widgets_enabled);\n    settings_mark_toggle("wm_dock_mag", g_settings.dock_magnification);',
+              'settings mark widgets')
+          text = replace_once(text,
+              '    else if (!strcmp(id, "wm_dock")) value = &g_settings.dock_enabled;\n    else if (!strcmp(id, "wm_dock_mag"))',
+              '    else if (!strcmp(id, "wm_dock")) value = &g_settings.dock_enabled;\n    else if (!strcmp(id, "wm_widgets")) value = &g_settings.widgets_enabled;\n    else if (!strcmp(id, "wm_dock_mag"))',
+              'settings toggle widgets')
+          text = replace_once(text,
+              '    else if (!strcmp(id, "wm_dock"))\n        apply_dock_visibility();',
+              '    else if (!strcmp(id, "wm_dock") || !strcmp(id, "wm_widgets"))\n        apply_dock_visibility();',
+              'settings apply widgets')
+          text = replace_once(text,
+              '            "wm_dock", "wm_dock_mag", "wm_wallpaper_motion", "wm_restore"',
+              '            "wm_dock", "wm_widgets", "wm_dock_mag", "wm_wallpaper_motion", "wm_restore"',
+              'settings wire widgets')
+          text = replace_once(text,
+              '    if (dock_idx >= 0)\n        set_hidden(dock_idx, dock_hidden);\n    luna_mark_layout_dirty();',
+              '    if (dock_idx >= 0)\n        set_hidden(dock_idx, dock_hidden);\n    const char* widget_ids[] = { "widget_clock", "widget_stats", "widget_weather" };\n    for (size_t i = 0; i < sizeof(widget_ids) / sizeof(widget_ids[0]); i++) {\n        int idx = luna_get_element_by_id(widget_ids[i]);\n        if (idx >= 0) set_hidden(idx, !g_settings.widgets_enabled);\n    }\n    luna_mark_layout_dirty();',
+              'apply widget visibility')
+
+          notify_code = r'''#define NOTIFICATION_HISTORY_MAX 8
+typedef struct {
+    char title[96];
+    char message[192];
+    char when[16];
+} LunaNotificationHistoryEntry;
+
+static LunaNotificationHistoryEntry g_notification_history[NOTIFICATION_HISTORY_MAX];
+static int g_notification_history_count = 0;
+
+static void notification_history_copy(char* dst, size_t n, const char* src) {
+    if (!dst || n == 0) return;
+    if (!src) src = "";
+    snprintf(dst, n, "%s", src);
+    for (size_t i = 0; dst[i]; i++)
+        if (dst[i] == '\n' || dst[i] == '\r' || dst[i] == '\t') dst[i] = ' ';
+}
+
+static void notification_history_refresh(void) {
+    int empty_idx = luna_get_element_by_id("notify_empty");
+    if (empty_idx >= 0) set_hidden(empty_idx, g_notification_history_count > 0);
+    for (int i = 0; i < NOTIFICATION_HISTORY_MAX; i++) {
+        char row_id[24], text_id[32];
+        snprintf(row_id, sizeof(row_id), "notify_%d", i);
+        snprintf(text_id, sizeof(text_id), "notify_%d_text", i);
+        int row = luna_get_element_by_id(row_id);
+        if (row < 0) continue;
+        if (i >= g_notification_history_count) {
+            set_hidden(row, 1);
+            continue;
+        }
+        const LunaNotificationHistoryEntry* h = &g_notification_history[i];
+        char line[320];
+        if (h->message[0])
+            snprintf(line, sizeof(line), "%s  %s — %s", h->when, h->title, h->message);
+        else
+            snprintf(line, sizeof(line), "%s  %s", h->when, h->title);
+        int text_idx = luna_get_element_by_id(text_id);
+        if (text_idx >= 0) luna_set_text(text_idx, line);
+        set_hidden(row, 0);
+    }
+}
+
+static void notification_history_push(const char* title, const char* msg) {
+    if (g_notification_history_count > 0) {
+        int move = g_notification_history_count;
+        if (move >= NOTIFICATION_HISTORY_MAX) move = NOTIFICATION_HISTORY_MAX - 1;
+        memmove(&g_notification_history[1], &g_notification_history[0],
+                (size_t)move * sizeof(g_notification_history[0]));
+    }
+    LunaNotificationHistoryEntry* h = &g_notification_history[0];
+    memset(h, 0, sizeof(*h));
+    notification_history_copy(h->title, sizeof(h->title), title ? title : "Luna");
+    notification_history_copy(h->message, sizeof(h->message), msg ? msg : "");
+    time_t now = time(NULL);
+    struct tm tm_info;
+    if (localtime_r(&now, &tm_info))
+        (void)strftime(h->when, sizeof(h->when), "%H:%M", &tm_info);
+    if (g_notification_history_count < NOTIFICATION_HISTORY_MAX)
+        g_notification_history_count++;
+    notification_history_refresh();
+}
+
+'''
+          text = replace_once(text,
+              '/* ── Toast notifications ── */\n\nstatic void toast_show(const char* title, const char* msg, double secs) {',
+              '/* ── Toast notifications ── */\n\n' + notify_code + 'static void toast_show(const char* title, const char* msg, double secs) {\n    notification_history_push(title, msg);',
+              'notification history')
+          path.write_text(text)
+          PY
+
+      - name: Regenerate embedded default layout
+        run: make ui/luna-shell.html.h
+
+      - name: Check Rust DRI compositor
+        run: cargo check -p wayland-server-rs --features dri
+
+      - name: Install shell build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdrm-dev libgbm-dev libegl1-mesa-dev libgl-dev libinput-dev libudev-dev libxkbcommon-dev libwayland-dev libdbus-1-dev libssl-dev libx11-dev wayland-protocols
+
+      - name: Build Luna shell
+        run: make luna-shell
+
+      - name: Commit validated changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add wayland-server-rs/src/render/dri.rs ui/luna-shell.c ui/luna-shell.html ui/luna-shell.html.h skins/*/layout.html
+          git diff --cached --check
+          git commit -m "fix: smooth DRI fallback and restore desktop widgets"
+          git push
