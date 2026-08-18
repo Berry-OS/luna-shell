@@ -1025,3 +1025,35 @@ input:focus-visible,
  * not retain their old text-sized minimum hit boxes. */
 #mb_wifi { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
 #mb_bat.icon_only { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
+
+
+/* Luna shell UX refinements: notifications, tray tips, Email app. */
+.g_email { background: linear-gradient(145deg, #71b7ff, #5268df); }
+
+.notify_card {
+  display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  padding: 8px 10px; margin: 3px 0; border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.055);
+}
+.notify_meta { display: flex; flex-direction: row; align-items: center; gap: 8px; min-width: 0; }
+.notify_when { flex: 0 0 auto; font-size: 10px; line-height: 14px; opacity: 0.58; white-space: nowrap; }
+.notify_title {
+  flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 700; line-height: 15px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.notify_message {
+  display: block; min-width: 0; font-size: 11px; line-height: 15px; opacity: 0.78;
+  white-space: normal; overflow-wrap: anywhere;
+}
+.notify_legacy { display: none; }
+
+.tray_item { position: relative; }
+.tray_tip {
+  position: absolute; top: 30px; right: 0; min-width: 72px; max-width: 260px;
+  padding: 5px 8px; border-radius: 6px; background-color: rgba(17, 18, 28, 0.94);
+  color: rgba(255, 255, 255, 0.96); font-size: 11px; line-height: 14px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  opacity: 0; pointer-events: none; z-index: 1200;
+  transition: opacity 120ms ease-out;
+}
+.tray_item:hover .tray_tip, .tray_item:focus-visible .tray_tip { opacity: 1; }
