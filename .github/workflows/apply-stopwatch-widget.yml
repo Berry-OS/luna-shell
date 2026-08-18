@@ -28,8 +28,8 @@ jobs:
       - name: Regenerate embedded UI resources
         run: |
           cd ui
-          ./gen_include.sh -o luna-shell.css.h ../skins/default/style.css
-          ./gen_include.sh -o luna-shell.html.h ../skins/default/layout.html
+          sh ./gen_include.sh -o luna-shell.css.h ../skins/default/style.css
+          sh ./gen_include.sh -o luna-shell.html.h ../skins/default/layout.html
 
       - name: Install luna-shell build dependencies
         run: |
