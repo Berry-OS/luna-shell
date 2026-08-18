@@ -2330,10 +2330,7 @@ static int str_contains_ci(const char* hay, const char* needle) {
 
 static int is_browser_cmd(const LunaApp* app, const char* cmd) {
     if (app && !strcmp(app->key, "browser")) return 1;
-    return cmd && (str_contains_ci(cmd, "firefox") ||
-                   str_contains_ci(cmd, "thunderbird") ||
-                   str_contains_ci(cmd, "betterbird") ||
-                   str_contains_ci(cmd, "mozilla") ||
+    return cmd && (str_contains_ci(cmd, "firefox") || str_contains_ci(cmd, "mozilla") ||
                    str_contains_ci(cmd, "chrom") || str_contains_ci(cmd, "brave"));
 }
 
