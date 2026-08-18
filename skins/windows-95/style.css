@@ -364,7 +364,7 @@ body {
 }
 
 #mb_left { flex: 0 0 auto !important; }
-#mb_center { flex: 1 1 auto !important; min-width: 0 !important; }
+#mb_center { flex: 1 1 auto !important; min-width: 0 !important; overflow: hidden !important; }
 
 #mb_logo {
   position: relative !important;
@@ -415,7 +415,9 @@ body {
 #mb_app { display: none !important; }
 
 #win_list {
+  flex: 1 1 auto !important;
   width: 100% !important;
+  min-width: 0 !important;
   height: 24px !important;
   display: flex !important;
   align-items: stretch !important;
@@ -444,6 +446,10 @@ body {
 
 /* .win_item sets display:flex !important after .hidden; beat it explicitly. */
 .win_item.hidden { display: none !important; }
+.win_glyph {
+  width: 14px; flex: 0 0 14px; margin-right: 3px;
+  font-size: 11px; line-height: 14px; text-align: center; color: inherit;
+}
 
 .win_item.active {
   padding: 3px 6px 1px 8px !important;
@@ -506,6 +512,8 @@ body {
 }
 
 .tray_item { width: 19px !important; padding: 0 !important; }
+.tray_item.hidden { display: none !important; }
+#tray_area.hidden { display: none !important; }
 .tray_glyph,
 .mb_status .luna_icon { color: #000 !important; font-size: 11px !important; }
 
@@ -606,7 +614,9 @@ body {
   bottom: var(--w95-taskbar-height) !important;
   width: 252px !important;
   min-width: 252px !important;
+  max-height: calc(100vh - var(--w95-taskbar-height) - 6px) !important;
   padding: 2px 2px 2px 29px !important;
+  overflow: auto !important;
 }
 
 #luna_menu::before {
@@ -642,7 +652,11 @@ body {
 #clip_menu,
 #control_center,
 #weather_menu,
-#win_menu { max-height: calc(100vh - 36px) !important; overflow: auto !important; }
+#win_menu,
+#calendar_menu {
+  max-height: calc(100vh - var(--w95-taskbar-height) - 6px) !important;
+  overflow: auto !important;
+}
 
 /* Remove modern desktop furniture -------------------------------------- */
 #dock,
@@ -954,6 +968,8 @@ input:focus-visible,
   display: grid !important;
   grid-template-columns: repeat(4, minmax(86px, 1fr)) !important;
   gap: 6px !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
   overflow: auto !important;
   background: #fff !important;
   border-top: 2px solid var(--w95-button-shadow) !important;

@@ -56,9 +56,10 @@ html, body { background: var(--mac-desk); color: var(--mac-ink); }
   width: 22px; height: 18px; border-radius: 0;
   background: transparent; border: 0; box-shadow: none;
 }
-#mb_logo_glyph, #mb_app, .mb_app_name, .mb_item, .mb_status, .tray_glyph, .win_label {
+#mb_logo_glyph, #mb_app, .mb_app_name, .mb_item, .mb_status, .win_label {
   color: var(--mac-ink); font-family: "Chicago", "Charcoal", Geneva, sans-serif;
 }
+.tray_glyph { color: var(--mac-ink); }
 .mb_app_name { font-weight: 700; }
 .mb_item { border-radius: 0; height: 18px; padding: 0 8px; }
 .mb_item:hover, .tray_item:hover { background-color: var(--mac-sel); color: var(--mac-white); }
@@ -69,6 +70,11 @@ html, body { background: var(--mac-desk); color: var(--mac-ink); }
 }
 .win_item.active { background: var(--mac-sel); }
 .win_item.active .win_label { color: var(--mac-white); }
+.win_item.hidden, .tray_item.hidden, #tray_area.hidden { display: none !important; }
+.win_glyph {
+  width: 12px; flex: 0 0 12px; margin-right: 3px;
+  font-size: 11px; line-height: 12px; text-align: center;
+}
 
 .menu_panel {
   top: 22px; bottom: auto;

@@ -285,14 +285,44 @@ static int acquire_singleton_lock(void) {
     return fd;
 }
 
+static int mkdir_p(const char *path) {
+    char tmp[512];
+    size_t len;
+    if (!path || path[0] != '/')
+        return -1;
+    len = strlen(path);
+    if (len == 0 || len >= sizeof(tmp))
+        return -1;
+    memcpy(tmp, path, len + 1);
+    while (len > 1 && tmp[len - 1] == '/')
+        tmp[--len] = 0;
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = 0;
+        if (mkdir(tmp, 0700) != 0 && errno != EEXIST)
+            return -1;
+        *p = '/';
+    }
+    if (mkdir(tmp, 0700) != 0 && errno != EEXIST)
+        return -1;
+    return 0;
+}
+
 static void history_save(void) {
-    char dir[512], path[576];
+    char dir[512], path[576], tmp[580];
     history_path(dir, sizeof(dir));
-    mkdir(dir, 0700);
-    snprintf(path, sizeof(path), "%s/history", dir);
-    FILE *f = fopen(path, "w");
-    if (!f)
+    if (mkdir_p(dir) != 0) {
+        fprintf(stderr, "luna-clipboard: cannot create %s: %s\n", dir, strerror(errno));
         return;
+    }
+    snprintf(path, sizeof(path), "%s/history", dir);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) {
+        fprintf(stderr, "luna-clipboard: cannot write %s: %s\n", tmp, strerror(errno));
+        return;
+    }
     for (int i = 0; i < g.hist_count; i++) {
         ClipEntry *e = &g.history[i];
         if (!e->data)
@@ -301,7 +331,15 @@ static void history_save(void) {
         fwrite(e->data, 1, e->len, f);
         fputc('\n', f);
     }
-    fclose(f);
+    if (fflush(f) != 0 || fclose(f) != 0) {
+        fprintf(stderr, "luna-clipboard: write failed %s: %s\n", tmp, strerror(errno));
+        unlink(tmp);
+        return;
+    }
+    if (rename(tmp, path) != 0) {
+        fprintf(stderr, "luna-clipboard: cannot replace %s: %s\n", path, strerror(errno));
+        unlink(tmp);
+    }
 }
 
 static void become_selection_owner(void); /* forward */
@@ -392,10 +430,30 @@ static int open_cmd_socket(void) {
     return fd;
 }
 
-static void handle_cmd_line(const char *line) {
+static void write_clip_entry(int fd, const ClipEntry *e) {
+    if (!e || !e->data || e->len == 0)
+        return;
+    char hdr[320];
+    int n = snprintf(hdr, sizeof(hdr), "%zu\n%s\n", e->len,
+                     e->mime ? e->mime : "text/plain");
+    if (n > 0)
+        (void)write(fd, hdr, (size_t)n);
+    (void)write(fd, e->data, e->len);
+    (void)write(fd, "\n", 1);
+}
+
+static void handle_cmd_line(const char *line, int reply_fd) {
     if (!line || !*line)
         return;
-    if (!strncmp(line, "select ", 7)) {
+    if (!strcmp(line, "list")) {
+        /* In-memory history — the menu must work even when history_save fails. */
+        if (g.hist_count > 0) {
+            for (int i = 0; i < g.hist_count; i++)
+                write_clip_entry(reply_fd, &g.history[i]);
+        } else if (g.current.data) {
+            write_clip_entry(reply_fd, &g.current);
+        }
+    } else if (!strncmp(line, "select ", 7)) {
         int idx = atoi(line + 7);
         if (idx < 0 || idx >= g.hist_count || !g.history[idx].data)
             return;
@@ -435,17 +493,19 @@ static void poll_cmd_socket(void) {
             break;
         char buf[256];
         ssize_t n = read(cfd, buf, sizeof(buf) - 1);
-        close(cfd);
-        if (n <= 0)
+        if (n <= 0) {
+            close(cfd);
             continue;
+        }
         buf[n] = 0;
         for (char *p = buf; *p; ) {
             char *nl = strchr(p, '\n');
             if (nl) *nl = 0;
-            handle_cmd_line(p);
+            handle_cmd_line(p, cfd);
             if (!nl) break;
             p = nl + 1;
         }
+        close(cfd);
     }
 }
 
@@ -484,7 +544,7 @@ static const char *pick_mime(void) {
 }
 
 static int receive_offer(struct wl_data_offer *offer, const char *mime,
-                         char **out, size_t *out_len) {
+                         char **out, size_t *out_len, int timeout_ms) {
     int fds[2];
     if (pipe(fds) < 0)
         return -1;
@@ -549,7 +609,7 @@ static int receive_offer(struct wl_data_offer *offer, const char *mime,
         pfds[0].events = POLLIN;
         pfds[1].fd = fds[0];
         pfds[1].events = POLLIN;
-        int pr = poll(pfds, 2, 5000);
+        int pr = poll(pfds, 2, timeout_ms > 0 ? timeout_ms : 400);
         if (pr < 0) {
             wl_display_cancel_read(g.display);
             if (errno == EINTR)
@@ -560,6 +620,10 @@ static int receive_offer(struct wl_data_offer *offer, const char *mime,
         }
         if (pr == 0) {
             wl_display_cancel_read(g.display);
+            /* Writer never closed; keep a complete payload rather than
+             * discarding a successful image/text transfer. */
+            if (len > 0)
+                break;
             free(buf);
             close(fds[0]);
             if (g.verbose)
@@ -726,15 +790,15 @@ static void take_offer(struct wl_data_offer *offer) {
     }
     ClipEntry incoming = {0};
     size_t total = 0;
-    /* Receive the preferred representation first, then preserve every other
-     * advertised MIME independently (PNG, HTML, URI lists, app formats, ...). */
+    /* Preferred first (so the history preview appears immediately), then every
+     * other advertised type — PNG, HTML, URI lists, GTK buffer formats, … */
     for (size_t pass = 0; pass <= g.offer_mime_count; pass++) {
         const char *mime = pass == 0 ? preferred : g.offer_mimes[pass - 1];
         if (!strcmp(mime, preferred) && pass != 0)
             continue;
         char *data = NULL;
         size_t len = 0;
-        if (receive_offer(offer, mime, &data, &len) == 0 && data && len &&
+        if (receive_offer(offer, mime, &data, &len, pass == 0 ? 2000 : 400) == 0 && data && len &&
             len <= CLIP_MAX_BYTES && total + len <= CLIP_MAX_TOTAL_BYTES) {
             if (clip_add(&incoming, mime, data, len, pass == 0))
                 total += len;
@@ -899,7 +963,7 @@ static void usage(const char *argv0) {
         "Runs in the foreground and owns the Wayland seat selection so\n"
         "clipboard contents survive after the copying app exits.\n"
         "History: $XDG_DATA_HOME/luna-clipboard/history\n"
-        "Commands: $XDG_RUNTIME_DIR/luna-clipboard.sock  (select N / clear)\n"
+        "Commands: $XDG_RUNTIME_DIR/luna-clipboard.sock  (list / select N / clear)\n"
         "Opt out from luna-session with LUNA_CLIPBOARD=none\n",
         argv0);
 }

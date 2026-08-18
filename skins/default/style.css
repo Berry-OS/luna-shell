@@ -36,6 +36,9 @@
 }
 .luna_icon { font-family: "Luna Symbols"; font-style: normal; speak: never; }
 .luna_brand { font-family: "Luna Brands"; font-style: normal; speak: never; }
+.tray_glyph.luna_icon, .win_glyph.luna_icon {
+  font-family: "Luna Symbols"; font-style: normal; speak: never;
+}
 
 :root {
   /* Signature accent: moonlight gradient (violet → gold) */
@@ -61,7 +64,7 @@
   --radius-lg:        18px;
   --radius-md:        12px;
   --radius-sm:        8px;
-  --shadow-dialog:    0 32px 96px rgba(0, 0, 0, 0.68), 0 8px 32px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.20);
+  --shadow-dialog:    0 16px 40px rgba(0, 0, 0, 0.28), 0 4px 12px rgba(0, 0, 0, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.20);
   --dialog-radius:    14px;
   --dialog-titlebar:  52px;
   --dialog-surface:   rgba(31, 32, 46, 0.94);
@@ -184,7 +187,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   backdrop-filter: blur(30px) saturate(1.8);
   -webkit-backdrop-filter: blur(30px) saturate(1.8);
   border-bottom: 1px solid var(--luna-glass-edge);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 8px 24px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 4px 12px rgba(0, 0, 0, 0.14);
   display: flex; flex-direction: row; align-items: center; justify-content: space-between;
   padding: 0 12px;
   z-index: 400;
@@ -195,10 +198,14 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   top: auto; bottom: 0;
   border-bottom: 0;
   border-top: 1px solid var(--luna-glass-edge);
-  box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.05) inset, 0 -8px 24px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.05) inset, 0 -4px 12px rgba(0, 0, 0, 0.14);
 }
 #mb_left  { display: flex; flex-direction: row; align-items: center; gap: 4px; height: 32px; flex: 0 0 auto; min-width: 80px; }
-#mb_center { flex: 1 1 auto; display: flex; flex-direction: row; align-items: center; justify-content: center; height: 32px; padding: 0 12px; }
+#mb_center {
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+  display: flex; flex-direction: row; align-items: center; justify-content: center;
+  height: 32px; padding: 0 12px;
+}
 #mb_right { display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 4px; height: 32px; flex: 0 0 auto; }
 
 .mb_item {
@@ -224,15 +231,18 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #mb_cc      { width: 30px; font-size: 14px; }
 #mb_clock   { min-width: 136px; font-size: 12px; font-weight: 500; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
 
-/* Window list (center of menubar) */
+/* Window list (center of menubar).  min-width:0 + overflow:hidden lets the
+ * list take leftover space after #mb_left / #mb_right so the clock stays on
+ * screen; chips then shrink instead of pushing the bar. */
 #win_list {
   display: flex; flex-direction: row; align-items: center; justify-content: flex-start;
-  gap: 6px; max-width: 100%; height: 26px; overflow: hidden;
+  flex: 1 1 auto; width: 100%; min-width: 0; max-width: 100%;
+  gap: 6px; height: 26px; overflow: hidden;
 }
 .win_item {
   display: flex; flex-direction: row; align-items: center;
-  flex: 0 0 auto; flex-shrink: 0;
-  width: auto; min-width: 60px; max-width: 140px; height: 24px; padding: 0 10px;
+  flex: 0 1 auto; min-width: 48px; max-width: 140px; overflow: hidden;
+  width: auto; height: 24px; padding: 0 10px;
   border-radius: 7px; cursor: pointer;
   background-color: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -245,10 +255,15 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.20), 0 2px 8px rgba(0,0,0,0.2);
 }
 .win_item.minimized { opacity: 0.50; }
+.win_item.hidden { display: none !important; }
+.win_glyph {
+  width: 14px; flex: 0 0 14px; margin-right: 4px;
+  font-size: 12px; line-height: 14px; text-align: center; color: inherit;
+}
 .win_label {
   color: #ffffff; font-size: 12px; font-weight: 500;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  max-width: 118px; flex-shrink: 0;
+  min-width: 0; max-width: 118px; flex: 1 1 auto;
 }
 
 /* System tray */
@@ -264,6 +279,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .tray_item:hover { background-color: rgba(255, 255, 255, 0.15); }
 .tray_item.active { background-color: rgba(var(--luna-accent-rgb), 0.30); }
+.tray_item.hidden { display: none !important; }
+#tray_area.hidden { display: none !important; }
 .tray_glyph { color: rgba(225, 230, 255, 0.90); font-size: 12px; text-align: center; }
 
 /* ── Menu panels (Dropdowns) ── */
@@ -397,7 +414,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   -webkit-backdrop-filter: blur(24px) saturate(1.6);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 22px;
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   padding: 16px 18px;
 }
 #widget_clock { right: 24px; top: 52px; width: 220px; height: 110px; }
@@ -473,7 +490,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 
 /* ── Calendar popover ── */
 #calendar_menu {
-  right: 8px; width: 292px; height: auto; padding: 12px 14px 14px;
+  right: 8px; width: 300px; height: auto; padding: 12px 14px 14px;
   z-index: 660;
 }
 #cal_head {
@@ -505,12 +522,13 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   width: 252px; margin: 0 auto 10px;
 }
 .cal_day {
+  position: relative;
   width: 36px; height: 32px; flex: 0 0 36px;
   display: flex; align-items: center; justify-content: center;
-  border-radius: 9px; cursor: default;
+  border-radius: 9px; cursor: pointer;
   color: var(--luna-text); font-size: 12px; font-weight: 500;
 }
-.cal_day.other { color: var(--luna-text-muted); opacity: 0.55; }
+.cal_day.other { color: var(--luna-text-muted); opacity: 0.55; cursor: default; }
 .cal_day.today {
   background: linear-gradient(120deg, rgba(var(--luna-accent-rgb), 0.42), rgba(var(--luna-gold-rgb), 0.22));
   border: 1px solid rgba(var(--luna-accent-rgb), 0.55);
@@ -519,7 +537,136 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .cal_day.selected {
   box-shadow: inset 0 0 0 1px rgba(var(--luna-gold-rgb), 0.55);
 }
+.cal_day.has_alarm::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 3px;
+  width: 4px; height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: var(--luna-gold);
+  box-shadow: 0 0 6px rgba(var(--luna-gold-rgb), 0.7);
+}
+.cal_day.today.has_alarm::after { background: #ffffff; }
 #cal_today_btn { width: 100%; height: 30px; }
+
+#cal_alarm {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+#cal_alarm_head {
+  display: flex; flex-direction: row; align-items: center; gap: 8px;
+  margin-bottom: 8px; min-height: 20px;
+}
+#cal_alarm_bell { color: var(--luna-gold); font-size: 12px; width: 16px; text-align: center; }
+#cal_alarm_date {
+  flex: 1 1 auto; color: var(--luna-text); font-size: 12px; font-weight: 650;
+}
+#cal_alarm_count { color: var(--luna-text-muted); font-size: 10px; letter-spacing: 0.04em; }
+#cal_alarm_list { display: flex; flex-direction: column; gap: 4px; }
+.cal_al_row {
+  display: flex; flex-direction: row; align-items: center; gap: 8px;
+  min-height: 30px; padding: 0 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cal_al_time {
+  font-variant-numeric: tabular-nums;
+  color: var(--luna-gold); font-size: 12px; font-weight: 700;
+  width: 42px; flex: 0 0 42px;
+}
+.cal_al_label {
+  flex: 1 1 auto; min-width: 0;
+  color: var(--luna-text); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cal_al_repeat { color: var(--luna-text-muted); font-size: 10px; letter-spacing: 0.03em; }
+.cal_al_del {
+  width: 22px; height: 22px; flex: 0 0 22px; border-radius: 50%;
+  color: var(--luna-text-muted); font-size: 11px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+.cal_al_del:hover { background: rgba(255, 107, 99, 0.18); color: #ff8b84; }
+#cal_alarm_empty {
+  color: var(--luna-text-muted); font-size: 11px; text-align: center;
+  padding: 6px 0 8px;
+}
+#cal_alarm_composer {
+  display: flex; flex-direction: row; align-items: center; gap: 6px;
+  margin-top: 6px;
+}
+#cal_alarm_time, #cal_alarm_note {
+  height: 30px; padding: 0 8px; border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.35);
+  color: #fff; font-size: 12px;
+}
+#cal_alarm_time { width: 58px; flex: 0 0 58px; font-variant-numeric: tabular-nums; }
+#cal_alarm_note { flex: 1 1 auto; min-width: 0; }
+.cal_chip {
+  height: 30px; padding: 0 8px; border-radius: 8px;
+  background: rgba(var(--luna-gold-rgb), 0.12);
+  border: 1px solid rgba(var(--luna-gold-rgb), 0.28);
+  color: var(--luna-gold); font-size: 11px; font-weight: 650;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; flex: 0 0 auto;
+}
+.cal_chip:hover { background: rgba(var(--luna-gold-rgb), 0.22); }
+#cal_alarm_add { flex: 0 0 auto; height: 30px; padding: 0 10px; font-size: 12px; }
+
+#mb_clock.ringing { color: var(--luna-gold); }
+
+#alarm_ring { z-index: 900; }
+#alarm_ring_card {
+  position: relative; z-index: 910;
+  width: 320px; padding: 28px 24px 22px;
+  border-radius: var(--dialog-radius);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: linear-gradient(180deg, rgba(58, 48, 28, 0.92), rgba(22, 20, 32, 0.96) 42%);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38), inset 0 1px rgba(255, 255, 255, 0.14);
+  display: flex; flex-direction: column; align-items: center;
+  animation: alarmCardIn 0.28s var(--ease-out);
+}
+@keyframes alarmCardIn {
+  from { opacity: 0; transform: scale(0.94) translateY(12px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+#alarm_ring_orb {
+  width: 56px; height: 56px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px; color: #1a1408;
+  background: radial-gradient(circle at 30% 30%, #ffe7b0, var(--luna-gold) 58%, #c4923a);
+  box-shadow: 0 0 0 8px rgba(var(--luna-gold-rgb), 0.16), 0 10px 24px rgba(0, 0, 0, 0.28);
+  animation: alarmOrb 1.4s var(--ease-in-out) infinite alternate;
+}
+@keyframes alarmOrb {
+  from { transform: scale(1); }
+  to   { transform: scale(1.06); }
+}
+#alarm_ring_time {
+  font-family: var(--display-font); font-style: normal;
+  font-size: 44px; font-weight: 700; letter-spacing: -0.03em;
+  color: var(--luna-gold); margin-top: 16px; line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+#alarm_ring_label {
+  color: var(--luna-text); font-size: 15px; font-weight: 650;
+  margin-top: 8px; text-align: center;
+}
+#alarm_ring_when {
+  color: var(--luna-text-muted); font-size: 12px; margin-top: 4px;
+}
+#alarm_ring_actions {
+  display: flex; flex-direction: row; gap: 8px; width: 100%;
+  margin-top: 20px;
+}
+#alarm_snooze, #alarm_dismiss { flex: 1 1 50%; height: 34px; }
+@media (prefers-reduced-motion: reduce) {
+  #alarm_ring_card, #alarm_ring_orb { animation: none; }
+}
 
 /* Network detail dialog reuses About chrome sizing */
 #net_detail_box.about_box {
@@ -617,7 +764,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border: 1px solid var(--dialog-divider);
   border-radius: var(--dialog-radius);
   background: linear-gradient(180deg, rgba(53, 54, 70, 0.96), var(--dialog-surface) 14%, rgba(26, 27, 39, 0.97));
-  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58), 0 8px 24px rgba(0, 0, 0, 0.34), inset 0 1px rgba(255, 255, 255, 0.15);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28), 0 4px 12px rgba(0, 0, 0, 0.14), inset 0 1px rgba(255, 255, 255, 0.15);
   overflow: hidden;
   animation: dialogScale 0.24s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -886,6 +1033,39 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #audio_backend_status, #bright_backend_status { margin-top: 4px; }
 .pref_section { color: var(--luna-text-dim); font-size: 11.5px; font-weight: 600; margin: 16px 0 8px 0; }
 
+.shortcut_row {
+  display: flex; flex-direction: row; align-items: center; gap: 12px;
+  width: 100%; min-height: 52px; padding: 8px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: var(--radius-sm);
+  background-color: rgba(0, 0, 0, 0.16);
+  cursor: pointer;
+}
+.shortcut_row:hover { background-color: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.18); }
+.shortcut_row:focus-visible { outline: 3px solid var(--luna-accent); outline-offset: 2px; }
+.shortcut_row.capturing {
+  border-color: var(--luna-accent);
+  box-shadow: 0 0 0 3px rgba(var(--luna-accent-rgb), 0.22);
+  background-color: rgba(var(--luna-accent-rgb), 0.12);
+}
+.shortcut_text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.shortcut_name { color: #ffffff; font-size: 13px; font-weight: 600; }
+.shortcut_desc { color: var(--luna-text-muted); font-size: 11px; }
+.shortcut_key {
+  flex: 0 0 auto; min-width: 92px; height: 28px; padding: 0 10px;
+  border-radius: 8px; background-color: rgba(255, 255, 255, 0.10);
+  color: #ffffff; font-size: 12px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  letter-spacing: 0.02em;
+}
+.shortcut_row.capturing .shortcut_key { background-color: rgba(var(--luna-accent-rgb), 0.35); }
+
+.scale_pref { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px 0; }
+.scale_pref .pref_section { margin: 10px 0 0 0; }
+.scale_pref_head { display: flex; flex-direction: row; align-items: baseline; justify-content: space-between; gap: 12px; }
+.scale_val { color: #ffffff; font-size: 12.5px; font-weight: 700; min-width: 48px; text-align: right; }
+.scale_track { margin: 4px 0 2px 0; }
+
 /* Hallmark · macrostructure: Catalogue · tone: quiet-utilitarian · anchor hue: violet
  * component: skin picker · states: default · hover · focus · active · disabled · loading · error · success
  */
@@ -1138,22 +1318,31 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   backdrop-filter: blur(40px) saturate(1.6);
   -webkit-backdrop-filter: blur(40px) saturate(1.6);
   display: flex; flex-direction: column; align-items: center;
-  padding-top: 60px; z-index: 700;
+  padding-top: 48px; padding-bottom: 16px; z-index: 700;
+  overflow: hidden;
 }
 #lp_search {
-  width: 280px; height: 36px;
+  width: 280px; height: 36px; flex: 0 0 36px;
   background-color: rgba(255, 255, 255, 0.12);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: var(--radius-md); color: #ffffff; font-size: 13.5px; text-align: center;
   padding: 0 16px; transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
 #lp_search:focus { outline: none; border-color: var(--luna-accent); box-shadow: 0 0 0 4px rgba(var(--luna-accent-rgb), 0.20); background-color: rgba(255, 255, 255, 0.18); }
-#lp_grid { width: 820px; display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 28px; margin-top: 48px; }
+#lp_grid {
+  width: 820px; max-width: 94%;
+  flex: 1 1 auto; min-height: 0;
+  display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center;
+  align-content: flex-start; gap: 28px;
+  margin-top: 32px; padding: 4px 8px 24px;
+  overflow-x: hidden; overflow-y: auto;
+  scrollbar-width: thin;
+}
 .lp_app { width: 110px; display: flex; flex-direction: column; align-items: center; gap: 10px; cursor: pointer; }
-.lp_app:hover .lp_icon { transform: translateY(-4px) scale(1.05); box-shadow: 0 20px 48px rgba(0, 0, 0, 0.70), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.50); }
-.lp_icon { width: 72px; height: 72px; border-radius: 20px; color: #ffffff; font-size: 28px; text-align: center; padding-top: 20px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.50); transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
+.lp_app:hover .lp_icon { transform: translateY(-4px) scale(1.05); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.50); }
+.lp_icon { width: 72px; height: 72px; border-radius: 20px; color: #ffffff; font-size: 28px; text-align: center; padding-top: 20px; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28); transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
 .lp_label { width: 110px; color: var(--luna-text); font-size: 12.5px; font-weight: 500; text-align: center; }
-#lp_hint  { color: var(--luna-text-muted); font-size: 12px; margin-top: 40px; }
+#lp_hint  { color: var(--luna-text-muted); font-size: 12px; margin-top: 12px; flex: 0 0 auto; }
 
 /* ── Notification toast ── */
 #toast {
@@ -1164,7 +1353,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   -webkit-backdrop-filter: blur(28px) saturate(1.6);
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: var(--radius-lg);
-  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.60), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.10);
   display: flex; flex-direction: row; align-items: center; gap: 14px;
   padding: 14px 16px; z-index: 600;
 }
@@ -1185,7 +1374,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   -webkit-backdrop-filter: blur(36px) saturate(1.8);
   border: 1px solid rgba(255, 255, 255, 0.20);
   border-radius: 28px;
-  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.18);
   display: flex; flex-direction: row; align-items: center; gap: 10px;
   padding: 8px 14px; z-index: 450;
 }
@@ -1202,14 +1391,14 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #dock.dock_animated .dock_item:hover .dock_icon,
 #dock.dock_animated .dock_item:focus-visible .dock_icon {
   transform: translateY(-8px) scale(1.28);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.66), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.45), 0 0 24px rgba(var(--luna-gold-rgb), 0.25);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.45), 0 0 24px rgba(var(--luna-gold-rgb), 0.25);
 }
 #dock.dock_animated .dock_item:active .dock_icon {
   transform: translateY(-2px) scale(1.12);
 }
 .dock_icon {
   width: 52px; height: 52px; border-radius: 15px; color: #ffffff; font-size: 20px;
-  text-align: center; padding-top: 14px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.46);
+  text-align: center; padding-top: 14px; box-shadow: 0 5px 14px rgba(0, 0, 0, 0.26);
   transition: transform var(--dur-short) var(--ease-out);
 }
 .dock_dot { width: 4px; height: 4px; border-radius: 50%; background-color: var(--luna-gold); box-shadow: 0 0 6px rgba(var(--luna-gold-rgb), 0.90); transition: opacity var(--dur-fast) var(--ease-out); }

@@ -64,6 +64,11 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
 .mb_item:hover, .tray_item:hover { background-color: var(--atelier-hover); color: var(--atelier-ink); }
 .win_item { background-color: var(--atelier-paper-3); border-color: var(--atelier-rule); border-radius: 4px; }
 .win_item.active { background: var(--atelier-forest); border-color: var(--atelier-brass); box-shadow: none; }
+.win_item.hidden, .tray_item.hidden, #tray_area.hidden { display: none !important; }
+.win_glyph {
+  width: 14px; flex: 0 0 14px; margin-right: 4px;
+  font-size: 12px; line-height: 14px; text-align: center;
+}
 
 .menu_panel, #toast, #switcher_strip {
   background: var(--atelier-paper-2); color: var(--atelier-ink);

@@ -15,9 +15,22 @@ FONTDIR  ?= /usr/share/fonts/luna
 APP      ?= $(TARGET)/hello-gtk
 
 SPECFILE     ?= luna-shell.spec
-RPM_NAME     := $(shell awk '/^Name:/{print $$2; exit}' $(SPECFILE))
-RPM_VERSION  := $(shell awk '/^Version:/{print $$2; exit}' $(SPECFILE))
-RPM_RELEASE  := $(shell awk '/^Release:/{print $$2; exit}' $(SPECFILE))
+# Spec Version is %{build_date} (see %global build_date).  Plain awk leaves the
+# macro literal, so `make dist` would ship luna-shell-%{build_date}.tar while
+# rpmbuild looks for luna-shell-YYYYMMDD.tar.  Expand with rpmspec when
+# available; otherwise mirror the Tokyo-date fallback used in the spec.
+RPM_NAME     := $(shell rpmspec -q --srpm --qf '%{name}\n' $(SPECFILE) 2>/dev/null | head -n1)
+RPM_VERSION  := $(shell rpmspec -q --srpm --qf '%{version}\n' $(SPECFILE) 2>/dev/null | head -n1)
+RPM_RELEASE  := $(shell rpmspec -q --srpm --qf '%{release}\n' $(SPECFILE) 2>/dev/null | head -n1)
+ifeq ($(strip $(RPM_NAME)),)
+RPM_NAME := $(shell awk '/^Name:/{print $$2; exit}' $(SPECFILE))
+endif
+ifeq ($(strip $(RPM_VERSION)),)
+RPM_VERSION := $(shell TZ=Asia/Tokyo date +%Y%m%d)
+endif
+ifeq ($(strip $(RPM_RELEASE)),)
+RPM_RELEASE := $(shell awk '/^Release:/{print $$2; exit}' $(SPECFILE))
+endif
 DIST_NAME    := $(RPM_NAME)-$(RPM_VERSION)
 TARBALL      := $(DIST_NAME).tar
 RPMBUILD_DIR := $(CURDIR)/rpmbuild
@@ -98,9 +111,13 @@ $(UI_DIR)/luna-shell.html.h: $(DEFAULT_SKIN_DIR)/layout.html $(UI_DIR)/gen_inclu
 SHELL_CFLAGS := -pthread \
                 $(shell pkg-config --cflags libdrm 2>/dev/null) \
                 $(SHELL_WL_CFLAGS) \
-                $(shell pkg-config --cflags xkbcommon 2>/dev/null)
+                $(shell pkg-config --cflags xkbcommon 2>/dev/null) \
+                $(shell pkg-config --cflags dbus-1 2>/dev/null) \
+                $(shell pkg-config --cflags openssl 2>/dev/null)
 SHELL_LIBS   := -pthread -lm -lEGL -lgbm -ldrm -linput -ludev -lxkbcommon \
-                $(SHELL_WL_LIBS) -lwayland-egl -lGL
+                $(SHELL_WL_LIBS) -lwayland-egl -lGL \
+                $(shell pkg-config --libs dbus-1 2>/dev/null) \
+                $(shell pkg-config --libs openssl 2>/dev/null || echo -lssl -lcrypto)
 
 LAYER_SHELL_XML  := $(UI_DIR)/protocols/wlr-layer-shell-unstable-v1.xml
 LAYER_SHELL_HDR  := $(UI_DIR)/wlr-layer-shell-unstable-v1-client-protocol.h
@@ -116,7 +133,7 @@ luna-shell: $(SHELL_WL_DEPS) $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
             $(UI_DIR)/luna-client-env-policy.h \
             $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-ethernet.h \
-            $(UI_DIR)/luna-bluetooth.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
+            $(UI_DIR)/luna-bluetooth.h $(UI_DIR)/luna-sni.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
             $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \
             $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
 	@echo "→ Building luna-shell (Luna Desktop shell, $(SHELL_WL_LABEL))"
@@ -342,7 +359,8 @@ dist:
 	tar -C . \
 	  --exclude-vcs \
 	  --exclude='.rpm-dist' \
-	  --exclude='rpmbuild' \
+	  --exclude='patches' \
+	  --exclude='*.patch' \
 	  --exclude='target' \
 	  --exclude='vendor' \
 	  --exclude='.cargo' \

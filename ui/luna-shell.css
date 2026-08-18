@@ -25,6 +25,9 @@
 }
 .luna_icon { font-family: "Luna Symbols"; font-style: normal; speak: never; }
 .luna_brand { font-family: "Luna Brands"; font-style: normal; speak: never; }
+.tray_glyph.luna_icon, .win_glyph.luna_icon {
+  font-family: "Luna Symbols"; font-style: normal; speak: never;
+}
 
 :root {
   /* Signature accent: moonlight gradient (violet → gold) */
@@ -50,7 +53,7 @@
   --radius-lg:        18px;
   --radius-md:        12px;
   --radius-sm:        8px;
-  --shadow-dialog:    0 32px 96px rgba(0, 0, 0, 0.68), 0 8px 32px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.20);
+  --shadow-dialog:    0 16px 40px rgba(0, 0, 0, 0.28), 0 4px 12px rgba(0, 0, 0, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.20);
   --dialog-radius:    14px;
   --dialog-titlebar:  52px;
   --dialog-surface:   rgba(31, 32, 46, 0.94);
@@ -168,7 +171,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   backdrop-filter: blur(30px) saturate(1.8);
   -webkit-backdrop-filter: blur(30px) saturate(1.8);
   border-bottom: 1px solid var(--luna-glass-edge);
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 8px 24px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 4px 12px rgba(0, 0, 0, 0.14);
   display: flex; flex-direction: row; align-items: center; justify-content: space-between;
   padding: 0 12px;
   z-index: 400;
@@ -179,7 +182,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   top: auto; bottom: 0;
   border-bottom: 0;
   border-top: 1px solid var(--luna-glass-edge);
-  box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.05) inset, 0 -8px 24px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.05) inset, 0 -4px 12px rgba(0, 0, 0, 0.14);
 }
 #mb_left  { display: flex; flex-direction: row; align-items: center; gap: 4px; height: 32px; flex: 0 0 auto; min-width: 80px; }
 #mb_center { flex: 1 1 auto; display: flex; flex-direction: row; align-items: center; justify-content: center; height: 32px; padding: 0 12px; }
@@ -229,6 +232,11 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.20), 0 2px 8px rgba(0,0,0,0.2);
 }
 .win_item.minimized { opacity: 0.50; }
+.win_item.hidden { display: none !important; }
+.win_glyph {
+  width: 14px; flex: 0 0 14px; margin-right: 4px;
+  font-size: 12px; line-height: 14px; text-align: center; color: inherit;
+}
 .win_label {
   color: #ffffff; font-size: 12px; font-weight: 500;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -248,6 +256,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .tray_item:hover { background-color: rgba(255, 255, 255, 0.15); }
 .tray_item.active { background-color: rgba(var(--luna-accent-rgb), 0.30); }
+.tray_item.hidden { display: none !important; }
+#tray_area.hidden { display: none !important; }
 .tray_glyph { color: rgba(225, 230, 255, 0.90); font-size: 12px; text-align: center; }
 
 /* ── Menu panels (Dropdowns) ── */
@@ -370,7 +380,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   -webkit-backdrop-filter: blur(24px) saturate(1.6);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 22px;
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   padding: 16px 18px;
 }
 #widget_clock { right: 24px; top: 52px; width: 220px; height: 110px; }
@@ -492,7 +502,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border: 1px solid var(--dialog-divider);
   border-radius: var(--dialog-radius);
   background: linear-gradient(180deg, rgba(53, 54, 70, 0.96), var(--dialog-surface) 14%, rgba(26, 27, 39, 0.97));
-  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58), 0 8px 24px rgba(0, 0, 0, 0.34), inset 0 1px rgba(255, 255, 255, 0.15);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28), 0 4px 12px rgba(0, 0, 0, 0.14), inset 0 1px rgba(255, 255, 255, 0.15);
   overflow: hidden;
   animation: dialogScale 0.24s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -1003,8 +1013,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #lp_search:focus { outline: none; border-color: var(--luna-accent); box-shadow: 0 0 0 4px rgba(var(--luna-accent-rgb), 0.20); background-color: rgba(255, 255, 255, 0.18); }
 #lp_grid { width: 820px; display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 28px; margin-top: 48px; }
 .lp_app { width: 110px; display: flex; flex-direction: column; align-items: center; gap: 10px; cursor: pointer; }
-.lp_app:hover .lp_icon { transform: translateY(-4px) scale(1.05); box-shadow: 0 20px 48px rgba(0, 0, 0, 0.70), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.50); }
-.lp_icon { width: 72px; height: 72px; border-radius: 20px; color: #ffffff; font-size: 28px; text-align: center; padding-top: 20px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.50); transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+.lp_app:hover .lp_icon { transform: translateY(-4px) scale(1.05); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.50); }
+.lp_icon { width: 72px; height: 72px; border-radius: 20px; color: #ffffff; font-size: 28px; text-align: center; padding-top: 20px; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28); transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
 .lp_label { width: 110px; color: var(--luna-text); font-size: 12.5px; font-weight: 500; text-align: center; }
 #lp_hint  { color: var(--luna-text-muted); font-size: 12px; margin-top: 40px; }
 
@@ -1017,7 +1027,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   -webkit-backdrop-filter: blur(28px) saturate(1.6);
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: var(--radius-lg);
-  box-shadow: 0 20px 52px rgba(0, 0, 0, 0.60), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.10);
   display: flex; flex-direction: row; align-items: center; gap: 14px;
   padding: 14px 16px; z-index: 600;
 }
@@ -1038,7 +1048,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   -webkit-backdrop-filter: blur(36px) saturate(1.8);
   border: 1px solid rgba(255, 255, 255, 0.20);
   border-radius: 28px;
-  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.30), inset 0 1px 0 rgba(255, 255, 255, 0.18);
   display: flex; flex-direction: row; align-items: center; gap: 10px;
   padding: 8px 14px; z-index: 450;
 }
@@ -1047,12 +1057,12 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #dock.dock_animated .dock_item:hover .dock_icon,
 #dock.dock_animated .dock_item:focus-visible .dock_icon {
   transform: translateY(-8px) scale(1.28);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.66), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.45), 0 0 24px rgba(var(--luna-gold-rgb), 0.25);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.45), 0 0 24px rgba(var(--luna-gold-rgb), 0.25);
 }
 #dock.dock_animated .dock_item:active .dock_icon {
   transform: translateY(-2px) scale(1.12);
 }
-.dock_icon { width: 52px; height: 52px; border-radius: 15px; color: #ffffff; font-size: 20px; text-align: center; padding-top: 14px; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.46); transition: transform 0.16s ease, box-shadow 0.16s ease; }
+.dock_icon { width: 52px; height: 52px; border-radius: 15px; color: #ffffff; font-size: 20px; text-align: center; padding-top: 14px; box-shadow: 0 5px 14px rgba(0, 0, 0, 0.26); transition: transform 0.16s ease, box-shadow 0.16s ease; }
 .dock_dot { width: 4px; height: 4px; border-radius: 50%; background-color: var(--luna-gold); box-shadow: 0 0 6px rgba(var(--luna-gold-rgb), 0.90); }
 .dock_dot.spacer { background-color: transparent; box-shadow: none; }
 .dock_sep { width: 1px; flex: 0 0 1px; height: 54px; background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.22), transparent); }

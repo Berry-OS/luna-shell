@@ -59,6 +59,9 @@ pub struct Surface {
   /// luna-shell modeless dialogs rely on this so their full-screen overlay
   /// stays click-through outside the dialog chrome.
   pub input_region: Option<Vec<(i32, i32, i32, i32)>>,
+  /// Double-buffered `set_input_region`.  Applied on `wl_surface.commit` so
+  /// `wl_region.add` after the set still takes effect (GTK/Firefox).
+  pub pending_input_region: Option<PendingInputRegion>,
   /// xdg_surface.set_window_geometry — content box relative to buffer origin.
   /// None → whole buffer. GTK CSD uses this to exclude drop-shadow padding.
   pub window_geom: Option<(i32, i32, i32, i32)>,
@@ -73,6 +76,16 @@ pub struct Surface {
   /// This is what lets the compositor repaint a blinking terminal cursor
   /// instead of the entire desktop underneath it.
   pub damage: crate::render::Rect,
+}
+
+/// Pending `wl_surface.set_input_region` until the next commit.
+pub enum PendingInputRegion {
+  /// NULL region → infinite (the whole surface).
+  Infinite,
+  /// Copy this `wl_region` on commit, so later `add`/`subtract` are seen.
+  FromRegion(u32),
+  /// Snapshot taken when the region was destroyed before commit.
+  Rects(Vec<(i32, i32, i32, i32)>),
 }
 
 pub enum Role {
@@ -201,6 +214,10 @@ pub enum Role {
     keyboard: u32,
     configure_serial: u32,
     configured: bool,
+    /// Layer-shell namespace.  `luna.dialog.*` surfaces are treated as normal
+    /// windows (stack with xdg_toplevels, appear in Alt+Tab) rather than
+    /// always-on-top overlays.
+    namespace: String,
   },
   Dmabuf,
   DmabufParams(DmabufParams),
@@ -280,6 +297,7 @@ impl Default for Surface {
       input_method_popup: false,
       layer_surface_id: None,
       input_region: None,
+      pending_input_region: None,
       window_geom: None,
       subsurface_parent: None,
       pending_damage: crate::render::Rect::EMPTY,

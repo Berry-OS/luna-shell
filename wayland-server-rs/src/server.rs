@@ -6,7 +6,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::object::{DmabufParams, DmabufPlane, Object, Role, Surface};
+use crate::object::{DmabufParams, DmabufPlane, Object, PendingInputRegion, Role, Surface};
 use crate::protocol::{self, Interface};
 use crate::render::{probe_render_node, Backend, Framebuffer, InputEvent, Rect};
 use crate::shell_ipc::ShellIpc;
@@ -281,7 +281,9 @@ pub struct Server {
   popup_grab: Option<(RawFd, u32, u32)>,
   wm_grab: WmGrab,
   /// Deferred WM actions while the requesting client is outside `clients`.
-  pending_activate: Option<u32>,
+  /// Stored as (fd, surface) so luna-shell layer-dialog ids do not collide
+  /// with another client's low-numbered xdg_toplevel.
+  pending_activate: Option<(RawFd, u32)>,
   pending_resize_configure: Option<(RawFd, u32, i32, i32)>,
   pending_configure: Vec<(RawFd, u32, Option<(i32, i32)>, bool)>,
   /// set_cursor arrived before the cursor surface had a buffer.
@@ -306,6 +308,7 @@ pub struct Server {
   /// Runtime WM preferences supplied by luna-shell over the existing IPC.
   wm_window_gap: i32,
   wm_edge_snap: bool,
+  wm_edge_tile: bool,
   wm_top_edge_maximize: bool,
   wm_titlebar_double_click: bool,
   /// 0 = dynamic gradient chrome, 1 = original solid traffic-light chrome,
@@ -336,9 +339,10 @@ pub struct Server {
   /// every node, which is quadratic in the object count on clients like
   /// Firefox.  Rebuilt once per composite; the allocation is reused.
   compose_subsurfaces: Vec<SubsurfacePlacement>,
-  /// Flat `(fd, surface, layer, x, y)` index of layer-shell placements, same
-  /// motivation as `compose_subsurfaces`.
-  compose_layer_index: Vec<(RawFd, u32, u32, i32, i32)>,
+  /// Flat `(fd, surface, layer, x, y, windowed)` index of layer-shell placements,
+  /// same motivation as `compose_subsurfaces`.  `windowed` marks `luna.dialog.*`
+  /// surfaces that stack with ordinary xdg_toplevels.
+  compose_layer_index: Vec<(RawFd, u32, u32, i32, i32, bool)>,
   /// Flat `(fd, xdg_surface, ToplevelFlags)` index, sorted for binary search.
   /// The composite asks four separate questions per window — is it minimised,
   /// maximised, fullscreen, server-decorated — and each one used to scan the
@@ -352,14 +356,20 @@ pub struct Server {
 
 /// Client-side decoration strip treated as a draggable titlebar when the
 /// client never issues xdg_toplevel.move (typical of GLFW SetWindowPos apps).
-/// Only reached by toplevels that never negotiated xdg-decoration at all; it
-/// is derived from the skin titlebar height so it tracks the SSD bar.
+/// GLFW frameless windows bind zxdg-decoration in CLIENT mode (1) but still
+/// never send move, so mode 0 *and* mode 1 are included.  SSD (mode 2) is not
+/// — that chrome sits above the buffer and is handled by `hit_ssd`.
+/// Hits on `wl_subsurface` children are excluded so Firefox WebRender tabs
+/// keep their own drag.  Derived from the skin titlebar height so the strip
+/// tracks the SSD bar.
 const CSD_MOVE_STRIP_EXTRA_PX: i32 = 20;
 const CSD_MOVE_THRESHOLD_PX: i32 = 8;
 /// Left/right chrome reserved for client titlebar buttons (traffic lights /
 /// close-min-max).  Outside these zones the compositor owns the drag so
 /// move/snap no longer depend on a luna_wm.start_move round-trip.
 const CSD_BUTTON_ZONE_PX: i32 = 96;
+/// Distance at which a dragged window sticks to the screen or another window.
+const MAGNET_PX: i32 = 16;
 /// Default server-side decoration titlebar height, overridden per skin by
 /// `wm_config titlebar_height`.  See `Server::wm_ssd_bar_h`.
 const SSD_BAR_H_DEFAULT: i32 = 28;
@@ -474,6 +484,7 @@ impl Server {
       show_desktop_ids: Vec::new(),
       wm_window_gap: 8,
       wm_edge_snap: true,
+      wm_edge_tile: false,
       wm_top_edge_maximize: false,
       wm_titlebar_double_click: true,
       wm_titlebar_style: 0,
@@ -789,8 +800,8 @@ impl Server {
   }
 
   fn flush_wm_actions(&mut self) {
-    if let Some(sid) = self.pending_activate.take() {
-      self.activate_surface(sid);
+    if let Some((fd, sid)) = self.pending_activate.take() {
+      self.activate_surface_for(fd, sid);
     }
     if let Some((fd, sid, w, h)) = self.pending_resize_configure.take() {
       self.send_toplevel_configure_for(fd, sid, Some((w, h)), true);
@@ -1325,20 +1336,15 @@ impl Server {
         }
       }
       5 => {
-        // set_input_region: NULL(0) = full surface; otherwise copy the region's
-        // rects (surface-local).  Clients destroy the wl_region afterwards, so
-        // the surface must own its own copy.  Empty rects = no input.
+        // set_input_region is double-buffered: remember the region (or NULL)
+        // and copy rects on commit so region.add after this request is seen.
         let region_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
-        let region = if region_id == 0 {
-          None
-        } else {
-          match client.objects.get(&region_id) {
-            Some(Object { role: Role::Region { rects }, .. }) => Some(rects.clone()),
-            _ => Some(Vec::new()),
-          }
-        };
         if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get_mut(&id) {
-          s.input_region = region;
+          s.pending_input_region = Some(if region_id == 0 {
+            PendingInputRegion::Infinite
+          } else {
+            PendingInputRegion::FromRegion(region_id)
+          });
         }
       }
       6 => self.surface_commit(client, id),
@@ -1437,6 +1443,26 @@ impl Server {
       }
       s.pending_attach = false;
       s.pending_buffer = None;
+    }
+
+    // Apply double-buffered input region after the region object has had a
+    // chance to receive add/subtract in this same request burst.
+    let pending_region = match client.objects.get_mut(&id) {
+      Some(Object { role: Role::Surface(s), .. }) => s.pending_input_region.take(),
+      _ => None,
+    };
+    if let Some(pending) = pending_region {
+      let resolved = match pending {
+        PendingInputRegion::Infinite => None,
+        PendingInputRegion::Rects(r) => Some(r),
+        PendingInputRegion::FromRegion(rid) => match client.objects.get(&rid) {
+          Some(Object { role: Role::Region { rects }, .. }) => Some(rects.clone()),
+          _ => Some(Vec::new()),
+        },
+      };
+      if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get_mut(&id) {
+        s.input_region = resolved;
+      }
     }
 
     // GTK unmaps menus by attaching a NULL buffer before it destroys the
@@ -1559,7 +1585,26 @@ impl Server {
           }
         }
         self.raise_surface(fd, id);
-        self.pending_activate = Some(id);
+        self.pending_activate = Some((fd, id));
+        self.shell_state_dirty = true;
+      } else if was_mapped && !mapped {
+        self.shell_state_dirty = true;
+      }
+    }
+
+    // Modeless shell dialogs (settings/about/…) use layer-shell with a
+    // `luna.dialog.*` namespace so they keep compact placement, but they must
+    // still participate in the normal window stack and Alt+Tab.
+    let is_windowed_layer = Self::surface_is_windowed_layer_in(client, id);
+    if is_windowed_layer {
+      let mapped = matches!(
+        client.objects.get(&id),
+        Some(Object { role: Role::Surface(s), .. }) if s.mapped
+      );
+      self.track_mapped_toplevel(fd, id, mapped);
+      if mapped && attach && !was_mapped {
+        self.raise_surface(fd, id);
+        self.pending_activate = Some((fd, id));
         self.shell_state_dirty = true;
       } else if was_mapped && !mapped {
         self.shell_state_dirty = true;
@@ -1614,7 +1659,7 @@ impl Server {
             }
           }
           self.raise_surface(fd, parent_id);
-          self.pending_activate = Some(parent_id);
+          self.pending_activate = Some((fd, parent_id));
           self.shell_state_dirty = true;
         }
       }
@@ -1962,6 +2007,7 @@ impl Server {
                   match key {
                     "gap" => self.wm_window_gap = value.clamp(0, 32),
                     "edge_snap" => self.wm_edge_snap = value != 0,
+                    "edge_tile" => self.wm_edge_tile = value != 0,
                     "top_edge_maximize" => self.wm_top_edge_maximize = value != 0,
                     "titlebar_double_click" => self.wm_titlebar_double_click = value != 0,
                     "titlebar_style" => {
@@ -2022,7 +2068,7 @@ impl Server {
     if id > u32::MAX as u64 {
       let (fd, sid) = crate::shell_ipc::split_window_id(id);
       let client = self.clients.get(&fd)?;
-      return Self::surface_is_xdg_toplevel_in(client, sid).then_some((fd, sid));
+      return Self::surface_is_stackable_in(client, sid).then_some((fd, sid));
     }
     self.client_for_xdg_surface(id as u32).map(|(fd, _)| (fd, id as u32))
   }
@@ -2082,6 +2128,37 @@ impl Server {
       .unwrap_or(false)
   }
 
+  /// True when the surface is a Luna modeless dialog layer (`luna.dialog.*`).
+  fn is_windowed_layer_namespace(namespace: &str) -> bool {
+    crate::shell_ipc::is_windowed_layer_namespace(namespace)
+  }
+
+  fn surface_is_windowed_layer_in(client: &Client, surface_id: u32) -> bool {
+    let Some(Object {
+      role: Role::Surface(s),
+      ..
+    }) = client.objects.get(&surface_id)
+    else {
+      return false;
+    };
+    let Some(lsid) = s.layer_surface_id else {
+      return false;
+    };
+    matches!(
+      client.objects.get(&lsid),
+      Some(Object {
+        role: Role::LayerSurface { namespace, .. },
+        ..
+      }) if Self::is_windowed_layer_namespace(namespace)
+    )
+  }
+
+  /// Stackable application surface: normal xdg_toplevel or a windowed dialog layer.
+  fn surface_is_stackable_in(client: &Client, surface_id: u32) -> bool {
+    Self::surface_is_xdg_toplevel_in(client, surface_id)
+      || Self::surface_is_windowed_layer_in(client, surface_id)
+  }
+
   fn layer_keyboard_mode(&self, fd: RawFd, surface_id: u32) -> u32 {
     let Some(client) = self.clients.get(&fd) else { return 0 };
     for obj in client.objects.values() {
@@ -2110,7 +2187,10 @@ impl Server {
         .rev()
         .filter_map(|&(fd, sid)| {
           let client = self.clients.get(&fd)?;
-          if Self::surface_is_xdg_toplevel_in(client, sid) {
+          if Self::surface_is_stackable_in(client, sid) {
+            if Self::surface_is_windowed_layer_in(client, sid) {
+              return Some((fd, sid));
+            }
             let (title, app_id, _, _, _) = {
               let xdg = match client.objects.get(&sid)? {
                 Object {
@@ -2260,21 +2340,30 @@ impl Server {
     }
   }
 
-  fn activate_surface(&mut self, surface_id: u32) {
-    let Some((fd, _)) = self.client_for_xdg_surface(surface_id) else { return };
-    self.activate_surface_for(fd, surface_id);
-  }
-
   fn activate_surface_for(&mut self, fd: RawFd, surface_id: u32) {
-    if !self.clients.get(&fd).map(|c| Self::surface_is_xdg_toplevel_in(c, surface_id)).unwrap_or(false) {
+    let is_xdg = self
+      .clients
+      .get(&fd)
+      .map(|c| Self::surface_is_xdg_toplevel_in(c, surface_id))
+      .unwrap_or(false);
+    let is_windowed = self
+      .clients
+      .get(&fd)
+      .map(|c| Self::surface_is_windowed_layer_in(c, surface_id))
+      .unwrap_or(false);
+    if !is_xdg && !is_windowed {
       return;
     }
-    let xdg_id = match self.clients.get(&fd).and_then(|c| c.objects.get(&surface_id)) {
-      Some(Object {
-        role: Role::Surface(s),
-        ..
-      }) => s.xdg_surface_id,
-      _ => None,
+    let xdg_id = if is_xdg {
+      match self.clients.get(&fd).and_then(|c| c.objects.get(&surface_id)) {
+        Some(Object {
+          role: Role::Surface(s),
+          ..
+        }) => s.xdg_surface_id,
+        _ => None,
+      }
+    } else {
+      None
     };
     let mut was_minimized = false;
     if let Some(xdg_id) = xdg_id {
@@ -2311,13 +2400,27 @@ impl Server {
     // keyboard enter alone does not update GTK/Firefox window chrome.  Notify
     // both sides of a real focus transition, while retaining the no-op fast
     // path when the already-focused window is activated again.
-    if focus_changed {
-      if prev_fd >= 0 && prev_sid != 0 {
-        self.send_toplevel_configure_for(prev_fd, prev_sid, None, false);
+    if is_xdg {
+      if focus_changed {
+        if prev_fd >= 0 && prev_sid != 0 {
+          self.send_toplevel_configure_for(prev_fd, prev_sid, None, false);
+        }
+        self.send_toplevel_configure_for(fd, surface_id, None, false);
+      } else if was_minimized {
+        self.send_toplevel_configure_for(fd, surface_id, None, false);
       }
-      self.send_toplevel_configure_for(fd, surface_id, None, false);
-    } else if was_minimized {
-      self.send_toplevel_configure_for(fd, surface_id, None, false);
+    } else if focus_changed {
+      // Leaving a real toplevel: clear its ACTIVATED state.
+      if prev_fd >= 0 && prev_sid != 0 {
+        if self
+          .clients
+          .get(&prev_fd)
+          .map(|c| Self::surface_is_xdg_toplevel_in(c, prev_sid))
+          .unwrap_or(false)
+        {
+          self.send_toplevel_configure_for(prev_fd, prev_sid, None, false);
+        }
+      }
     }
     self.ensure_kbd_entered(fd, surface_id);
   }
@@ -2688,21 +2791,24 @@ impl Server {
   }
 
   /// True when `(px,py)` sits on the compositor-owned CSD drag strip:
-  /// decoration never negotiated (mode 0), inside the top strip, and outside
-  /// the left/right button chrome so luna-ui traffic lights still receive clicks.
+  /// client CSD (mode 0/1), inside the top strip, outside the left/right
+  /// button chrome so luna-ui traffic lights still receive clicks, and not a
+  /// child subsurface (Firefox tabs / libdecor chrome keep their own drags).
   fn csd_title_drag_hit(&self, fd: RawFd, surface_id: u32, px: i32, py: i32) -> bool {
-    if self.toplevel_decoration_mode(fd, surface_id) != 0 {
+    let Some(client) = self.clients.get(&fd) else {
+      return false;
+    };
+    if Self::surface_is_subsurface_in(client, surface_id) {
       return false;
     }
-    if !self
-      .clients
-      .get(&fd)
-      .map(|c| Self::surface_is_xdg_toplevel_in(c, surface_id))
-      .unwrap_or(false)
-    {
+    let surface_id = Self::toplevel_root_of(client, surface_id).unwrap_or(surface_id);
+    if Self::uses_ssd(self.toplevel_decoration_mode(fd, surface_id)) {
       return false;
     }
-    let Some((gx, gy, gw, _)) = self.surface_geometry(fd, surface_id) else {
+    if !Self::surface_is_xdg_toplevel_in(client, surface_id) {
+      return false;
+    }
+    let Some((gx, gy, gw, _)) = Self::surface_geometry_in(client, surface_id) else {
       return false;
     };
     if gw <= CSD_BUTTON_ZONE_PX * 2 {
@@ -2718,24 +2824,31 @@ impl Server {
   /// Full CSD title strip (including traffic-light / toolbar button zones).
   /// Used for the window menu so right-click works anywhere on the bar.
   fn csd_title_menu_hit(&self, fd: RawFd, surface_id: u32, px: i32, py: i32) -> bool {
-    if self.toplevel_decoration_mode(fd, surface_id) != 0 {
+    let Some(client) = self.clients.get(&fd) else {
+      return false;
+    };
+    if Self::surface_is_subsurface_in(client, surface_id) {
       return false;
     }
-    if !self
-      .clients
-      .get(&fd)
-      .map(|c| Self::surface_is_xdg_toplevel_in(c, surface_id))
-      .unwrap_or(false)
-    {
+    let surface_id = Self::toplevel_root_of(client, surface_id).unwrap_or(surface_id);
+    if Self::uses_ssd(self.toplevel_decoration_mode(fd, surface_id)) {
       return false;
     }
-    let Some((gx, gy, gw, _)) = self.surface_geometry(fd, surface_id) else {
+    if !Self::surface_is_xdg_toplevel_in(client, surface_id) {
+      return false;
+    }
+    let Some((gx, gy, gw, _)) = Self::surface_geometry_in(client, surface_id) else {
       return false;
     };
     px >= gx && px < gx + gw && py >= gy && py < gy + self.csd_move_strip_px()
   }
 
   fn begin_move_grab(&mut self, fd: RawFd, surface_id: u32, grab_px: i32, grab_py: i32) {
+    let surface_id = self
+      .clients
+      .get(&fd)
+      .and_then(|c| Self::toplevel_root_of(c, surface_id))
+      .unwrap_or(surface_id);
     let (orig_x, orig_y) = match self.clients.get(&fd).and_then(|c| c.objects.get(&surface_id)) {
       Some(Object {
         role: Role::Surface(s),
@@ -2765,15 +2878,100 @@ impl Server {
     self.dirty = true;
   }
 
-  /// GLFW apps that never bind zxdg-decoration and never send
-  /// xdg_toplevel.move (SetWindowPos on X11) need a compositor-side drag.
-  /// GTK/libdecor negotiate decoration (mode 1/2) and issue move themselves —
-  /// promoting those presses would steal HeaderBar button clicks.
+  /// Stick a dragged window to the usable-area edges and to other windows.
+  /// Pointer-only snap never fired: the cursor stays on the titlebar while the
+  /// window itself kisses an edge.  Tiling on release is a separate option.
+  fn magnet_moved_surface(&mut self, fd: RawFd, surface_id: u32, siblings: &[(u32, i32, i32)]) {
+    let Some((cx, cy, cw, ch)) = self.surface_geometry(fd, surface_id) else {
+      return;
+    };
+    let (ux, uy, uw, uh) = self.usable_area();
+    let mut skip = HashSet::from([surface_id]);
+    for (sid, _, _) in siblings {
+      skip.insert(*sid);
+    }
+    let mut others: Vec<(i32, i32, i32, i32)> = Vec::new();
+    for &(ofd, osid) in &self.window_stack {
+      if ofd == fd && skip.contains(&osid) {
+        continue;
+      }
+      let Some(client) = self.clients.get(&ofd) else {
+        continue;
+      };
+      if self.surface_is_minimized(client, osid) {
+        continue;
+      }
+      let Some(geom) = Self::surface_geometry_in(client, osid) else {
+        continue;
+      };
+      if geom.2 < 8 || geom.3 < 8 {
+        continue;
+      }
+      others.push(geom);
+    }
+
+    let mut best_x: Option<(i32, i32)> = None;
+    let mut best_y: Option<(i32, i32)> = None;
+    let consider = |best: &mut Option<(i32, i32)>, current: i32, target: i32| {
+      let adj = target - current;
+      let d = adj.abs();
+      if d == 0 || d > MAGNET_PX {
+        return;
+      }
+      if best.map_or(true, |(bd, _)| d < bd) {
+        *best = Some((d, adj));
+      }
+    };
+    consider(&mut best_x, cx, ux);
+    consider(&mut best_x, cx, ux + uw - cw);
+    consider(&mut best_y, cy, uy);
+    consider(&mut best_y, cy, uy + uh - ch);
+    for (ox, oy, ow, oh) in others {
+      let y_overlap = cy < oy + oh && oy < cy + ch;
+      let x_overlap = cx < ox + ow && ox < cx + cw;
+      if y_overlap {
+        consider(&mut best_x, cx, ox + ow);      // left → their right
+        consider(&mut best_x, cx, ox - cw);      // right → their left
+        consider(&mut best_x, cx, ox);           // align left
+        consider(&mut best_x, cx, ox + ow - cw); // align right
+      }
+      if x_overlap {
+        consider(&mut best_y, cy, oy + oh);
+        consider(&mut best_y, cy, oy - ch);
+        consider(&mut best_y, cy, oy);
+        consider(&mut best_y, cy, oy + oh - ch);
+      }
+    }
+    let adj_x = best_x.map(|(_, a)| a).unwrap_or(0);
+    let adj_y = best_y.map(|(_, a)| a).unwrap_or(0);
+    if adj_x == 0 && adj_y == 0 {
+      return;
+    }
+    if let Some(Object { role: Role::Surface(s), .. }) =
+      self.clients.get_mut(&fd).and_then(|c| c.objects.get_mut(&surface_id))
+    {
+      s.x += adj_x;
+      s.y += adj_y;
+    }
+    for (sid, _, _) in siblings {
+      if let Some(Object { role: Role::Surface(s), .. }) =
+        self.clients.get_mut(&fd).and_then(|c| c.objects.get_mut(sid))
+      {
+        s.x += adj_x;
+        s.y += adj_y;
+      }
+    }
+  }
+
+  /// GLFW apps that never send xdg_toplevel.move (SetWindowPos on X11) need a
+  /// compositor-side drag.  Frameless GLFW still binds zxdg-decoration in
+  /// CLIENT mode, so mode 1 is included; SSD is not.  Child-subsurface
+  /// presses stay with the client so Firefox tab drags are not stolen.
   fn maybe_promote_csd_move(&mut self, fd: RawFd, surface_id: u32) -> bool {
     let Some((pfd, psid, gpx, gpy, orig_x, orig_y)) = self.csd_press else {
       return false;
     };
-    if pfd != fd || psid != surface_id {
+    if pfd != fd || psid != surface_id || !self.last_button_pressed {
       return false;
     }
     let (px, py) = self.screen_ptr();
@@ -2786,7 +2984,12 @@ impl Server {
       return false;
     }
     let _ = (orig_x, orig_y);
-    self.begin_move_grab(fd, surface_id, gpx, gpy);
+    let toplevel = self
+      .clients
+      .get(&fd)
+      .and_then(|c| Self::toplevel_root_of(c, surface_id))
+      .unwrap_or(surface_id);
+    self.begin_move_grab(fd, toplevel, gpx, gpy);
     true
   }
 
@@ -2817,9 +3020,9 @@ impl Server {
             moved = true;
           }
         }
-        for (sid, ox, oy) in siblings {
+        for (sid, ox, oy) in &siblings {
           if let Some(Object { role: Role::Surface(s), .. }) =
-            self.clients.get_mut(&fd).and_then(|c| c.objects.get_mut(&sid))
+            self.clients.get_mut(&fd).and_then(|c| c.objects.get_mut(sid))
           {
             let nx = ox + dx;
             let ny = oy + dy;
@@ -2831,6 +3034,9 @@ impl Server {
           }
         }
         if moved {
+          if self.wm_edge_snap {
+            self.magnet_moved_surface(fd, surface_id, &siblings);
+          }
           self.dirty = true;
         }
       }
@@ -2938,6 +3144,30 @@ impl Server {
     }
   }
 
+  /// End a move/resize grab on left-button up.  Clients that still have
+  /// pointer enter (CSD / xdg_toplevel.move) must see the matching release
+  /// or they keep an implicit grab and restart the move on the next motion.
+  fn release_wm_grab_pointer(&mut self) {
+    if self.ptr_entered && self.ptr_client_fd >= 0 {
+      let fd = self.ptr_client_fd;
+      let serial = self.next_serial();
+      let ts = now_ms();
+      if let Some(client) = self.clients.get_mut(&fd) {
+        if let Some(ptr_id) = Self::pointer_id(client) {
+          client.send(ptr_id, 3, &[Arg::Uint(serial), Arg::Uint(ts), Arg::Uint(0x110), Arg::Uint(0)]);
+          Self::send_pointer_frame(client, ptr_id);
+          client.conn.flush();
+        }
+      }
+    }
+    self.last_button_pressed = false;
+    self.last_button_code = 0;
+    self.last_button_serial = 0;
+    self.pointer_grab = None;
+    self.csd_press = None;
+    self.end_wm_grab();
+  }
+
   fn end_wm_grab(&mut self) {
     let grab = std::mem::replace(&mut self.wm_grab, WmGrab::None);
     match grab {
@@ -2946,16 +3176,21 @@ impl Server {
         let (px, py) = self.screen_ptr();
         let (ux, uy, uw, uh) = self.usable_area();
         let edge = 24i32;
-        let near_left = px <= ux + edge;
-        let near_right = px >= ux + uw - edge;
-        let near_top = py <= uy + edge;
+        let (cx, cy, cw, _) = self
+          .surface_geometry(fd, surface_id)
+          .unwrap_or((px, py, 0, 0));
+        let win_left = cx <= ux + edge;
+        let win_right = cx + cw >= ux + uw - edge;
+        let near_left = px <= ux + edge || (win_left && !win_right);
+        let near_right = px >= ux + uw - edge || (win_right && !win_left);
+        let near_top = py <= uy + edge || cy <= uy + edge;
         if self.wm_top_edge_maximize && near_top && !near_left && !near_right {
           self.maximize_surface_for(fd, surface_id, true);
-        } else if self.wm_edge_snap && near_left {
+        } else if self.wm_edge_tile && near_left {
           // Use the grab's fd — surface ids are per-client and looking them up
           // globally silently no-oped edge snap for every multi-client session.
           self.tile_surface_for(fd, surface_id, 1);
-        } else if self.wm_edge_snap && near_right {
+        } else if self.wm_edge_tile && near_right {
           self.tile_surface_for(fd, surface_id, 2);
         } else if let Some((ox, oy, w, h)) = self.surface_geometry(fd, surface_id) {
           // Was this window tiled/maximized?  Dragging away restores floating
@@ -3618,6 +3853,9 @@ impl Server {
       }
       off += n as usize;
     }
+    // mmap maps from file offset 0, but clients that read(2) the fd see the
+    // current seek position.  Rewind so both paths observe the keymap.
+    unsafe { libc::lseek(fd, 0, libc::SEEK_SET) };
     client.send(keyboard_id, 0, &[Arg::Uint(1), Arg::Fd(fd), Arg::Uint(data.len() as u32)]);
 
     let repeat_opcode = match client.objects.get(&keyboard_id) {
@@ -4855,9 +5093,8 @@ impl Server {
     Self::toplevel_decoration_mode_in(client, surface_id)
   }
 
-  /// Draggable strip at the top of a toplevel that never negotiated
-  /// xdg-decoration.  Derived from the skin titlebar height so the heuristic
-  /// tracks the SSD bar instead of being a second hardcoded guess.
+  /// Draggable strip at the top of a CSD toplevel (decoration mode 0 or 1).
+  /// Derived from the skin titlebar height so the heuristic tracks the SSD bar.
   #[inline]
   fn csd_move_strip_px(&self) -> i32 {
     self.wm_ssd_bar_h + CSD_MOVE_STRIP_EXTRA_PX
@@ -5127,6 +5364,59 @@ impl Server {
     for &(fd, sid) in self.window_stack.iter().rev() {
       let Some(client) = self.clients.get(&fd) else { continue };
       if self.surface_is_minimized(client, sid) {
+        continue;
+      }
+      // Windowed layer dialogs have no SSD.  Occlude with the real layer-shell
+      // rect so a sheet covering a GTK titlebar still wins, without treating
+      // the buffer as parked at (0,0).
+      if Self::surface_is_windowed_layer_in(client, sid) {
+        let Some(Object {
+          role: Role::Surface(s),
+          ..
+        }) = client.objects.get(&sid)
+        else {
+          continue;
+        };
+        if !s.mapped || s.current_buffer.is_none() {
+          continue;
+        }
+        let Some(lsid) = s.layer_surface_id else { continue };
+        let Some(Object {
+          role: Role::LayerSurface {
+            anchor,
+            size_w,
+            size_h,
+            margin_top,
+            margin_right,
+            margin_bottom,
+            margin_left,
+            ..
+          },
+          ..
+        }) = client.objects.get(&lsid)
+        else {
+          continue;
+        };
+        let (bw, bh) = self.backend.size();
+        let (ox, oy, w, h) = layer_surface_rect(
+          bw,
+          bh,
+          *anchor,
+          *size_w,
+          *size_h,
+          *margin_top,
+          *margin_right,
+          *margin_bottom,
+          *margin_left,
+        );
+        if px >= ox
+          && py >= oy
+          && px < ox + w as i32
+          && py < oy + h as i32
+          && Self::surface_input_hit(s, px - ox, py - oy)
+        {
+          return None;
+        }
         continue;
       }
       let Some((ox, oy, w, h)) = self.surface_geometry(fd, sid) else { continue };
@@ -5482,7 +5772,15 @@ impl Server {
         if nid == 0 {
           return;
         }
-        let surface_id = if self.focused_client_fd == client.conn.fd && self.focused_surface_id != 0 && client.objects.contains_key(&self.focused_surface_id) { Some(self.focused_surface_id) } else { None };
+        let surface_id = if self.kbd_entered
+          && self.kbd_client_fd == client.conn.fd
+          && self.kbd_surface_id != 0
+          && client.objects.contains_key(&self.kbd_surface_id)
+        {
+          Some(self.kbd_surface_id)
+        } else {
+          None
+        };
         client.objects.insert(
           nid,
           Object::new(
@@ -5560,7 +5858,7 @@ impl Server {
       return;
     }
 
-    let (surface_id, enabled) = match client.objects.get_mut(&id) {
+    let (surface_id, enabled, serial) = match client.objects.get_mut(&id) {
       Some(Object {
         role: Role::TextInput {
           surface_id,
@@ -5575,11 +5873,11 @@ impl Server {
           *enabled = value;
         }
         *commit_serial = commit_serial.wrapping_add(1);
-        (*surface_id, *enabled)
+        (*surface_id, *enabled, *commit_serial)
       }
       _ => return,
     };
-    let focused = self.focused_client_fd == client.conn.fd && surface_id == Some(self.focused_surface_id);
+    let focused = surface_id.is_some_and(|sid| self.surface_is_seat_focus(client, sid));
     if enabled && focused {
       let old = self.active_text_input.replace((client.conn.fd, id, surface_id.unwrap_or(0)));
       if old.map(|v| (v.0, v.1)) != Some((client.conn.fd, id)) {
@@ -5595,6 +5893,10 @@ impl Server {
       self.active_text_input = None;
       self.deactivate_input_methods(None);
     }
+    // text-input-v3: every client commit must be acknowledged with done(serial).
+    // GTK/Firefox ignore preedit/commit_string until this handshake completes,
+    // so omitting it makes the IM grab swallow keys with nothing reaching Gecko.
+    client.send(id, 5, &[Arg::Uint(serial)]);
   }
 
   fn req_input_method_manager(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
@@ -5852,6 +6154,9 @@ impl Server {
   }
 
   fn keyboard_id(client: &Client) -> Option<u32> { client.objects.iter().find_map(|(&id, obj)| matches!(obj.role, Role::Keyboard).then_some(id)) }
+  fn pointer_id(client: &Client) -> Option<u32> {
+    client.objects.iter().filter_map(|(&id, obj)| matches!(obj.role, Role::Pointer).then_some(id)).min()
+  }
 
   fn forward_virtual_key(&mut self, virtual_client: &mut Client, time: u32, key: u32, state: u32) {
     let target_fd = self.focused_client_fd;
@@ -5859,14 +6164,15 @@ impl Server {
     if target_fd < 0 || surface_id == 0 {
       return;
     }
-    let serial = self.next_serial();
     if target_fd == virtual_client.conn.fd {
+      let serial = self.next_serial();
       if let Some(keyboard_id) = Self::keyboard_id(virtual_client) {
         virtual_client.send(keyboard_id, 3, &[Arg::Uint(serial), Arg::Uint(time), Arg::Uint(key), Arg::Uint(state)]);
       }
       return;
     }
     self.ensure_kbd_entered(target_fd, surface_id);
+    let serial = self.next_serial();
     if let Some(target) = self.clients.get_mut(&target_fd) {
       if let Some(keyboard_id) = Self::keyboard_id(target) {
         target.send(keyboard_id, 3, &[Arg::Uint(serial), Arg::Uint(time), Arg::Uint(key), Arg::Uint(state)]);
@@ -5885,14 +6191,15 @@ impl Server {
     self.kbd_locked = locked;
     self.kbd_group = group.min(self.kbd_group_count.saturating_sub(1));
     self.sync_keyboard_leds();
-    let serial = self.next_serial();
     if target_fd == virtual_client.conn.fd {
+      let serial = self.next_serial();
       if let Some(keyboard_id) = Self::keyboard_id(virtual_client) {
         virtual_client.send(keyboard_id, 4, &[Arg::Uint(serial), Arg::Uint(depressed), Arg::Uint(latched), Arg::Uint(locked), Arg::Uint(group)]);
       }
       return;
     }
     self.ensure_kbd_entered(target_fd, surface_id);
+    let serial = self.next_serial();
     if let Some(target) = self.clients.get_mut(&target_fd) {
       if let Some(keyboard_id) = Self::keyboard_id(target) {
         target.send(keyboard_id, 4, &[Arg::Uint(serial), Arg::Uint(depressed), Arg::Uint(latched), Arg::Uint(locked), Arg::Uint(group)]);
@@ -5972,6 +6279,39 @@ impl Server {
     self.dirty = true;
   }
 
+  fn text_input_surface_matches(client: &Client, sid: u32, focus: u32) -> bool {
+    sid == focus
+      || Self::toplevel_root_of(client, sid) == Some(focus)
+      || Self::toplevel_root_of(client, focus) == Some(sid)
+  }
+
+  /// Seat focus is the xdg_toplevel, but enable/click may still name a child.
+  fn surface_is_seat_focus(&self, client: &Client, sid: u32) -> bool {
+    let fd = client.conn.fd;
+    (self.focused_client_fd == fd
+      && self.focused_surface_id != 0
+      && Self::text_input_surface_matches(client, sid, self.focused_surface_id))
+      || (self.kbd_entered
+        && self.kbd_client_fd == fd
+        && self.kbd_surface_id != 0
+        && Self::text_input_surface_matches(client, sid, self.kbd_surface_id))
+  }
+
+  fn enabled_text_inputs(client: &Client, focus: u32) -> Vec<u32> {
+    client
+      .objects
+      .iter()
+      .filter_map(|(&id, obj)| match &obj.role {
+        Role::TextInput {
+          enabled: true,
+          surface_id: Some(sid),
+          ..
+        } if Self::text_input_surface_matches(client, *sid, focus) => Some(id),
+        _ => None,
+      })
+      .collect()
+  }
+
   fn forward_input_method_commit(&mut self, im: &mut Client, im_id: u32) {
     let (commit, preedit, delete) = match im.objects.get_mut(&im_id) {
       Some(Object {
@@ -5985,17 +6325,41 @@ impl Server {
       }) => (pending_commit.take(), pending_preedit.take(), pending_delete.take()),
       _ => return,
     };
-    let Some((target_fd, target_id, _)) = self.active_text_input else {
+    let Some((target_fd, target_id, surf_id)) = self.active_text_input else {
       return;
     };
-    let serial = if target_fd == im.conn.fd {
-      Self::forward_to_text_input(im, target_id, commit, preedit, delete)
-    } else if let Some(target) = self.clients.get_mut(&target_fd) {
-      Self::forward_to_text_input(target, target_id, commit, preedit, delete)
+    // Firefox binds a native text-input-v3 *and* GtkIMContextWayland may bind
+    // a second object on the same seat.  Delivering IM commits to only one
+    // of them leaves Gecko silent when GTK won the race.
+    let mut ids = if target_fd == im.conn.fd {
+      Self::enabled_text_inputs(im, surf_id)
     } else {
-      None
+      self
+        .clients
+        .get(&target_fd)
+        .map(|target| Self::enabled_text_inputs(target, surf_id))
+        .unwrap_or_default()
     };
-    if serial.is_none() {
+    if ids.is_empty() {
+      ids.push(target_id);
+    }
+    let mut ok = false;
+    for id in ids {
+      let serial = if target_fd == im.conn.fd {
+        Self::forward_to_text_input(im, id, commit.clone(), preedit.clone(), delete)
+      } else if let Some(target) = self.clients.get_mut(&target_fd) {
+        Self::forward_to_text_input(target, id, commit.clone(), preedit.clone(), delete)
+      } else {
+        None
+      };
+      ok |= serial.is_some();
+    }
+    if target_fd != im.conn.fd {
+      if let Some(target) = self.clients.get_mut(&target_fd) {
+        target.conn.flush();
+      }
+    }
+    if !ok {
       self.active_text_input = None;
     }
   }
@@ -6473,17 +6837,18 @@ impl Server {
           self.pending_shell_menu = Some((fd, sid, sx, sy));
           self.dirty = true;
           self.shell_state_dirty = true;
-          self.pending_activate = Some(sid);
+          self.pending_activate = Some((fd, sid));
         }
       }
       5 => {
         // move(seat, serial) — start interactive move.
         let _seat = args.get(0).map(|a| a.as_object()).unwrap_or(0);
         let serial = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
-        // Serial is the proof of the implicit grab.  Requiring the button to
-        // still be down races with release events already queued in evdev —
-        // title-bar drag then becomes a no-op under console input.
-        if serial == 0 || serial != self.last_button_serial {
+        // Serial proves the implicit grab.  The matching press is still marked
+        // down here because left-button release is deferred until after this
+        // drain; once the button is up the serial is cleared so a client that
+        // never saw the release cannot restart the move.
+        if serial == 0 || serial != self.last_button_serial || !self.last_button_pressed {
           return;
         }
         let Some(surface_id) = self.toplevel_surface_id(client, id) else { return };
@@ -6518,7 +6883,7 @@ impl Server {
         // resize(seat, serial, edges)
         let serial = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
         let edges = args.get(2).map(|a| a.as_uint()).unwrap_or(0);
-        if serial == 0 || serial != self.last_button_serial || edges == 0 {
+        if serial == 0 || serial != self.last_button_serial || !self.last_button_pressed || edges == 0 {
           return;
         }
         let Some(surface_id) = self.toplevel_surface_id(client, id) else { return };
@@ -6929,7 +7294,21 @@ impl Server {
 
   fn req_region(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
     match opcode {
-      0 => { client.objects.remove(&id); }
+      0 => {
+        // Snapshot pending FromRegion(id) before the region object vanishes.
+        let rects = match client.objects.get(&id) {
+          Some(Object { role: Role::Region { rects }, .. }) => rects.clone(),
+          _ => Vec::new(),
+        };
+        for obj in client.objects.values_mut() {
+          if let Role::Surface(s) = &mut obj.role {
+            if matches!(&s.pending_input_region, Some(PendingInputRegion::FromRegion(rid)) if *rid == id) {
+              s.pending_input_region = Some(PendingInputRegion::Rects(rects.clone()));
+            }
+          }
+        }
+        client.objects.remove(&id);
+      }
       1 => { // add(x, y, width, height)
         let x = args.get(0).map(|a| a.as_int()).unwrap_or(0);
         let y = args.get(1).map(|a| a.as_int()).unwrap_or(0);
@@ -6960,6 +7339,11 @@ impl Server {
         let nid    = args.get(0).map(|a| a.as_object()).unwrap_or(0);
         let surf   = args.get(1).map(|a| a.as_object()).unwrap_or(0);
         let layer  = args.get(3).map(|a| a.as_uint()).unwrap_or(0);
+        let namespace = args
+          .get(4)
+          .and_then(|a| a.as_str())
+          .unwrap_or("luna-shell")
+          .to_string();
         if nid == 0 { return; }
         if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get_mut(&surf) {
           s.layer_surface_id = Some(nid);
@@ -6971,6 +7355,7 @@ impl Server {
             exclusive_zone: 0, size_w: 0, size_h: 0,
             margin_top: 0, margin_right: 0, margin_bottom: 0, margin_left: 0,
             keyboard: 0, configure_serial: 0, configured: false,
+            namespace,
           },
         ));
       }
@@ -7086,12 +7471,11 @@ impl Server {
         if surface_id == 0 || !Self::surface_is_xdg_toplevel_in(client, surface_id) {
           return;
         }
-        // Match xdg_toplevel.move exactly (opcode 5 above): the serial proves
-        // the implicit grab and is *not* cleared by the release, so requiring
-        // the button to still be down races with release events already queued
-        // in evdev.  That extra condition made frameless Luna clients — the
-        // only users of this request — see a dead titlebar under console input.
-        if self.last_button_serial == 0 || self.last_button_code != 0x110 {
+        // Deferred left-release keeps last_button_pressed true until the
+        // client's start_move in this drain has been applied.  After release
+        // the serial is cleared so a stuck button-down on the client cannot
+        // start another grab.
+        if self.last_button_serial == 0 || self.last_button_code != 0x110 || !self.last_button_pressed {
           return;
         }
         if !matches!(self.wm_grab, WmGrab::None) {
@@ -7158,29 +7542,53 @@ impl Server {
   }
 
   fn req_layer_surface(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
+    // luna-shell moves compact dialogs with set_margin alone (no new buffer).
+    // Geometry is applied immediately here, so a mapped surface must dirty the
+    // scene even when the following wl_surface.commit carries no pixels.
+    let mut geometry_changed = false;
     match opcode {
       0 => { // set_size(width, height)
+        let nw = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
+        let nh = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
         if let Some(Object { role: Role::LayerSurface { size_w, size_h, .. }, .. }) = client.objects.get_mut(&id) {
-          *size_w = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
-          *size_h = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
+          if *size_w != nw || *size_h != nh {
+            *size_w = nw;
+            *size_h = nh;
+            geometry_changed = true;
+          }
         }
       }
       1 => { // set_anchor(anchor)
+        let na = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
         if let Some(Object { role: Role::LayerSurface { anchor, .. }, .. }) = client.objects.get_mut(&id) {
-          *anchor = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
+          if *anchor != na {
+            *anchor = na;
+            geometry_changed = true;
+          }
         }
       }
       2 => { // set_exclusive_zone(zone)
+        let nz = args.get(0).map(|a| a.as_int()).unwrap_or(0);
         if let Some(Object { role: Role::LayerSurface { exclusive_zone, .. }, .. }) = client.objects.get_mut(&id) {
-          *exclusive_zone = args.get(0).map(|a| a.as_int()).unwrap_or(0);
+          if *exclusive_zone != nz {
+            *exclusive_zone = nz;
+            geometry_changed = true;
+          }
         }
       }
       3 => { // set_margin(top, right, bottom, left)
+        let nt = args.get(0).map(|a| a.as_int()).unwrap_or(0);
+        let nr = args.get(1).map(|a| a.as_int()).unwrap_or(0);
+        let nb = args.get(2).map(|a| a.as_int()).unwrap_or(0);
+        let nl = args.get(3).map(|a| a.as_int()).unwrap_or(0);
         if let Some(Object { role: Role::LayerSurface { margin_top, margin_right, margin_bottom, margin_left, .. }, .. }) = client.objects.get_mut(&id) {
-          *margin_top    = args.get(0).map(|a| a.as_int()).unwrap_or(0);
-          *margin_right  = args.get(1).map(|a| a.as_int()).unwrap_or(0);
-          *margin_bottom = args.get(2).map(|a| a.as_int()).unwrap_or(0);
-          *margin_left   = args.get(3).map(|a| a.as_int()).unwrap_or(0);
+          if *margin_top != nt || *margin_right != nr || *margin_bottom != nb || *margin_left != nl {
+            *margin_top = nt;
+            *margin_right = nr;
+            *margin_bottom = nb;
+            *margin_left = nl;
+            geometry_changed = true;
+          }
         }
       }
       4 => { // set_keyboard_interactivity(ki)
@@ -7206,11 +7614,28 @@ impl Server {
         self.dirty = true;
       }
       8 => { // set_layer(layer)
+        let nl = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
         if let Some(Object { role: Role::LayerSurface { layer, .. }, .. }) = client.objects.get_mut(&id) {
-          *layer = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
+          if *layer != nl {
+            *layer = nl;
+            geometry_changed = true;
+          }
         }
       }
       _ => {}
+    }
+    if geometry_changed {
+      let surf_id = match client.objects.get(&id) {
+        Some(Object { role: Role::LayerSurface { surface_id, .. }, .. }) => *surface_id,
+        _ => return,
+      };
+      let mapped = matches!(
+        client.objects.get(&surf_id),
+        Some(Object { role: Role::Surface(s), .. }) if s.mapped
+      );
+      if mapped {
+        self.dirty = true;
+      }
     }
   }
 
@@ -7740,11 +8165,13 @@ impl Server {
     }
     // Input-method popups belong above ordinary application windows, but not
     // above the shell's own modal layers.  In particular, luna-shell uses
-    // OVERLAY for its launcher, settings and confirmation surfaces; letting a
+    // OVERLAY for its launcher and confirmation surfaces; letting a
     // candidate window paint after those surfaces made the two independent
     // clients appear to tear through one another when they overlapped.
+    // Modeless dialogs (settings/about/…) use the `luna.dialog.*` namespace and
+    // are folded into `toplevels` so they stack with GTK apps.
     //
-    // BACKGROUND(0) < BOTTOM(1) < toplevels < TOP(2) < IM/xdg popups < OVERLAY(3)
+    // BACKGROUND(0) < BOTTOM(1) < toplevels(+windowed dialogs) < TOP(2) < IM/xdg popups < OVERLAY(3)
     let mut layers = std::mem::take(&mut self.compose_layers);
     let mut toplevels = std::mem::take(&mut self.compose_toplevels);
     let mut popups = std::mem::take(&mut self.compose_popups);
@@ -7771,13 +8198,14 @@ impl Server {
           }
           Role::LayerSurface {
             surface_id, layer, anchor, size_w, size_h,
-            margin_top, margin_right, margin_bottom, margin_left, ..
+            margin_top, margin_right, margin_bottom, margin_left, namespace, ..
           } => {
             let (x, y, _, _) = layer_surface_rect(
               w, h, *anchor, *size_w, *size_h,
               *margin_top, *margin_right, *margin_bottom, *margin_left,
             );
-            layer_index.push((fd, *surface_id, *layer, x, y));
+            let windowed = Self::is_windowed_layer_namespace(namespace);
+            layer_index.push((fd, *surface_id, *layer, x, y, windowed));
           }
           Role::XdgToplevel {
             xdg_surface_id, minimized, maximized, fullscreen, decoration_mode, ..
@@ -7798,7 +8226,7 @@ impl Server {
       }
     }
     subs.sort_unstable_by_key(|&(fd, parent, z, child, _, _)| (fd, parent, z, child));
-    layer_index.sort_unstable_by_key(|&(fd, sid, _, _, _)| (fd, sid));
+    layer_index.sort_unstable_by_key(|&(fd, sid, _, _, _, _)| (fd, sid));
     toplevel_index.sort_unstable_by_key(|&(fd, xid, _)| (fd, xid));
 
     // Flags of the toplevel that owns `sid`, or the defaults when the surface
@@ -7826,18 +8254,21 @@ impl Server {
           }
 
           let layer_geometry = layer_index
-            .binary_search_by_key(&(fd, surface_id), |&(f, sid, _, _, _)| (f, sid))
+            .binary_search_by_key(&(fd, surface_id), |&(f, sid, _, _, _, _)| (f, sid))
             .ok()
             .map(|i| {
-              let (_, _, layer, x, y) = layer_index[i];
-              (layer, x, y)
+              let (_, _, layer, x, y, windowed) = layer_index[i];
+              (layer, x, y, windowed)
             });
-          if let Some((layer, dx, dy)) = layer_geometry {
+          if let Some((layer, dx, dy, windowed)) = layer_geometry {
             if !s.mapped && !Self::surface_tree_has_content(client, surface_id) {
               continue;
             }
-            // Layer shell surface
-            if (layer as usize) < 4 {
+            // Windowed dialog layers stack with xdg_toplevels so GTK apps can
+            // cover Settings / About instead of living permanently underneath.
+            if windowed {
+              toplevels.push((fd, surface_id, dx, dy));
+            } else if (layer as usize) < 4 {
               layers[layer as usize].push((fd, surface_id, dx, dy));
             }
           } else if s.input_method_popup {
@@ -8052,12 +8483,19 @@ impl Server {
         }
         // Server-side chrome is not client pixels and carries no damage, so
         // everything it depends on has to live in the fingerprint.
+        let windowed = self
+          .clients
+          .get(&fd)
+          .map(|c| Self::surface_is_windowed_layer_in(c, sid))
+          .unwrap_or(false);
         let tl = flags_of(&self.clients, fd, sid);
-        let ssd = Self::uses_ssd(tl.decoration_mode);
+        let ssd = !windowed && Self::uses_ssd(tl.decoration_mode);
         let focused = self.focused_client_fd == fd && self.focused_surface_id == sid;
         sig = Self::sig_mix(sig, ssd as u64);
         sig = Self::sig_mix(sig, focused as u64);
-        if let Some((gx, gy, gw, gh)) = self.surface_geometry(fd, sid) {
+        if windowed {
+          // Layer-shell origin is already in `dx/dy`; do not hash surface.x/y.
+        } else if let Some((gx, gy, gw, gh)) = self.surface_geometry(fd, sid) {
           // The geometry *inset* into the buffer changes what the chrome frames
           // even when the window has not moved, so it stays in the hash; the
           // absolute origin does not.
@@ -8160,6 +8598,17 @@ impl Server {
         for (fd, sid, dx, dy) in &toplevels[occluder.unwrap_or(0)..] {
           if let Some(client) = self.clients.get(fd) {
             Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, *sid, *dx, *dy, 0);
+          }
+          // Modeless shell dialogs already paint their own chrome and live at
+          // layer-shell margins, not surface.x/y.  Framing them as xdg_toplevels
+          // drew an SSD/focus ring at (0,0) far from the visible sheet.
+          if self
+            .clients
+            .get(fd)
+            .map(|c| Self::surface_is_windowed_layer_in(c, *sid))
+            .unwrap_or(false)
+          {
+            continue;
           }
           // Server-side chrome only when the client explicitly requested SSD (mode 2).
           let tl = flags_of(&self.clients, *fd, *sid);
@@ -8313,14 +8762,20 @@ impl Server {
           // full-composite flag itself whenever the pointer actually changes
           // surface state (window drag, cursor-role handover, SSD hover).
           self.cursor_dirty = true;
-          pending_motion = true;
+          // Motion after a deferred left-release must not keep driving a
+          // live move/resize grab; the cursor still tracks ptr_x/ptr_y.
+          if !deferred_left_release {
+            pending_motion = true;
+          }
         }
         InputEvent::PointerRelative { dx, dy } => {
           let (w, h) = self.backend.size();
           self.ptr_x = (self.ptr_x + dx / w.max(1) as f32).clamp(0.0, 1.0);
           self.ptr_y = (self.ptr_y + dy / h.max(1) as f32).clamp(0.0, 1.0);
           self.cursor_dirty = true;
-          pending_motion = true;
+          if !deferred_left_release {
+            pending_motion = true;
+          }
         }
         InputEvent::PointerButton { button, pressed } => {
           self.flush_pending_motion(&mut pending_motion);
@@ -8360,6 +8815,9 @@ impl Server {
     if deferred_left_release {
       self.poll_clients_nonblocking();
       self.inject_ptr_button(0x110, false);
+      // Grab is gone; deliver the current pointer location to the surface
+      // under the cursor so the client does not keep the press-time enter.
+      self.inject_ptr_motion(self.ptr_x, self.ptr_y);
     }
     self.input_rx = Some(rx);
   }
@@ -8451,6 +8909,116 @@ impl Server {
     }
   }
 
+  /// Walk `subsurface_parent` until an xdg_toplevel.  libdecor / SDL put the
+  /// titlebar on a child surface; WM grabs must target the toplevel.
+  fn toplevel_root_of(client: &Client, mut surface_id: u32) -> Option<u32> {
+    for _ in 0..8 {
+      if Self::surface_is_xdg_toplevel_in(client, surface_id) {
+        return Some(surface_id);
+      }
+      let parent = match client.objects.get(&surface_id) {
+        Some(Object {
+          role: Role::Surface(s),
+          ..
+        }) => s.subsurface_parent?,
+        _ => return None,
+      };
+      surface_id = parent;
+    }
+    None
+  }
+
+  fn surface_is_subsurface_in(client: &Client, surface_id: u32) -> bool {
+    matches!(
+      client.objects.get(&surface_id),
+      Some(Object {
+        role: Role::Surface(s),
+        ..
+      }) if s.subsurface_parent.is_some()
+    )
+  }
+
+  /// Hit-test a surface and its wl_subsurface children in paint order (top
+  /// first).  libdecor draws the frame on a child with a negative Y offset;
+  /// testing only the parent made DOSBox / SDL titlebar clicks fall through.
+  ///
+  /// `require_input`: honour `input_region` (layer-shell click-through, GTK
+  /// chrome).  When false, any mapped buffer at the point hits — Firefox
+  /// WebRender children often advertise an empty region so input "belongs to
+  /// the native widget", which must not punch a hole through to the window
+  /// underneath.
+  fn hit_surface_tree_live(
+    client: &Client,
+    sid: u32,
+    ox: i32,
+    oy: i32,
+    px: i32,
+    py: i32,
+    depth: u32,
+    require_input: bool,
+  ) -> Option<(u32, i32, i32, i32, i32)> {
+    if depth > 8 {
+      return None;
+    }
+    let mut above: Vec<(i32, u32, i32, i32)> = Vec::new();
+    let mut below: Vec<(i32, u32, i32, i32)> = Vec::new();
+    for obj in client.objects.values() {
+      if let Role::Subsurface {
+        surface_id,
+        parent_id,
+        x,
+        y,
+        z,
+        ..
+      } = &obj.role
+      {
+        if *parent_id != sid {
+          continue;
+        }
+        if *z >= 0 {
+          above.push((*z, *surface_id, *x, *y));
+        } else {
+          below.push((*z, *surface_id, *x, *y));
+        }
+      }
+    }
+    above.sort_unstable_by_key(|c| c.0);
+    below.sort_unstable_by_key(|c| c.0);
+    for &(_, child, x, y) in above.iter().rev() {
+      if let Some(hit) =
+        Self::hit_surface_tree_live(client, child, ox + x, oy + y, px, py, depth + 1, require_input)
+      {
+        return Some(hit);
+      }
+    }
+    if let Some(Object {
+      role: Role::Surface(s),
+      ..
+    }) = client.objects.get(&sid)
+    {
+      if s.mapped {
+        if let Some(buf) = &s.current_buffer {
+          if px >= ox
+            && py >= oy
+            && px < ox + buf.width
+            && py < oy + buf.height
+            && (!require_input || Self::surface_input_hit(s, px - ox, py - oy))
+          {
+            return Some((sid, buf.width, buf.height, ox, oy));
+          }
+        }
+      }
+    }
+    for &(_, child, x, y) in below.iter().rev() {
+      if let Some(hit) =
+        Self::hit_surface_tree_live(client, child, ox + x, oy + y, px, py, depth + 1, require_input)
+      {
+        return Some(hit);
+      }
+    }
+    None
+  }
+
   fn find_input_target(&self) -> Option<(RawFd, u32, u32, u32, i32, i32, i32, i32)> {
     let (bw, bh) = self.backend.size();
     let px = (self.ptr_x * bw as f32) as i32;
@@ -8493,6 +9061,7 @@ impl Server {
               margin_right,
               margin_bottom,
               margin_left,
+              namespace,
               ..
             },
             ..
@@ -8500,6 +9069,11 @@ impl Server {
           else {
             continue;
           };
+          // Windowed dialogs participate in the toplevel stack walk below —
+          // treating them as OVERLAY here would keep them permanently on top.
+          if Self::is_windowed_layer_namespace(namespace) {
+            continue;
+          }
           if *layer == 0 || !s.mapped || s.current_buffer.is_none() {
             continue;
           }
@@ -8586,10 +9160,57 @@ impl Server {
         else {
           continue;
         };
-        if s.xdg_surface_id.is_none() || !Self::surface_tree_has_content(client, surf_id) {
-          continue;
+        // Windowed shell dialogs live in window_stack but have layer geometry.
+        if Self::surface_is_windowed_layer_in(client, surf_id) {
+          if matches!(&s.input_region, Some(r) if r.is_empty()) {
+            continue;
+          }
+          if !s.mapped || s.current_buffer.is_none() {
+            continue;
+          }
+          let Some(lsid) = s.layer_surface_id else { continue };
+          let Some(Object {
+            role: Role::LayerSurface {
+              anchor,
+              size_w,
+              size_h,
+              margin_top,
+              margin_right,
+              margin_bottom,
+              margin_left,
+              ..
+            },
+            ..
+          }) = client.objects.get(&lsid)
+          else {
+            continue;
+          };
+          let (ox, oy, w, h) = layer_surface_rect(
+            bw,
+            bh,
+            *anchor,
+            *size_w,
+            *size_h,
+            *margin_top,
+            *margin_right,
+            *margin_bottom,
+            *margin_left,
+          );
+          if px < ox
+            || py < oy
+            || px >= ox + w as i32
+            || py >= oy + h as i32
+            || !Self::surface_input_hit(s, px - ox, py - oy)
+          {
+            continue;
+          }
+          let (ptr_id, kbd_id) = seat_ids(client);
+          let stack = self.stack_index(fd, surf_id);
+          best = Some((10, stack, fd, surf_id, ptr_id, kbd_id, w as i32, h as i32, ox, oy));
+          break;
         }
-        if matches!(&s.input_region, Some(r) if r.is_empty()) {
+
+        if s.xdg_surface_id.is_none() || !Self::surface_tree_has_content(client, surf_id) {
           continue;
         }
         let ssd = Self::uses_ssd(Self::toplevel_decoration_mode_in(client, surf_id));
@@ -8604,19 +9225,25 @@ impl Server {
             }
           }
         }
-        let (w, h) = Self::surface_tree_size(client, surf_id).unwrap_or((0, 0));
-        if px < s.x
-          || py < s.y
-          || px >= s.x + w
-          || py >= s.y + h
-          || !Self::surface_input_hit(s, px - s.x, py - s.y)
-        {
-          // Outside this window's input (e.g. GTK shadow with input_region
-          // trimmed) — keep looking underneath.
-          continue;
-        }
+        // Prefer a child with a real input region (libdecor titlebar).  If
+        // none, still hit by buffer pixels — Firefox/WebRender children often
+        // advertise an empty input_region, and that must not punch a hole
+        // through to the window underneath.
         let (ptr_id, kbd_id) = seat_ids(client);
         let stack = self.stack_index(fd, surf_id);
+        let hit = Self::hit_surface_tree_live(client, surf_id, s.x, s.y, px, py, 0, true)
+          .or_else(|| Self::hit_surface_tree_live(client, surf_id, s.x, s.y, px, py, 0, false));
+        if let Some((hit_sid, w, h, ox, oy)) = hit {
+          best = Some((10, stack, fd, hit_sid, ptr_id, kbd_id, w, h, ox, oy));
+          break;
+        }
+        let Some((gx, gy, gw, gh)) = Self::surface_geometry_in(client, surf_id) else {
+          continue;
+        };
+        if px < gx || py < gy || px >= gx + gw || py >= gy + gh {
+          continue;
+        }
+        let (w, h) = Self::surface_tree_size(client, surf_id).unwrap_or((gw, gh));
         best = Some((10, stack, fd, surf_id, ptr_id, kbd_id, w, h, s.x, s.y));
         break;
       }
@@ -8845,9 +9472,7 @@ impl Server {
     }
     // Left button release ends an interactive move/resize grab.
     if !pressed && button == 0x110 && !matches!(self.wm_grab, WmGrab::None) {
-      self.last_button_pressed = false;
-      self.csd_press = None;
-      self.end_wm_grab();
+      self.release_wm_grab_pointer();
       return;
     }
     // The matching press may have been consumed while dismissing an explicit
@@ -8974,6 +9599,43 @@ impl Server {
         }
       }
     }
+    // Alt+Left drag moves any floating toplevel.  DOSBox / SDL grab the
+    // pointer inside the game buffer, so the SSD bar is otherwise unreachable.
+    if pressed && button == 0x110 && (self.kbd_mods & 8) != 0 && !self.layer_shell_owns_pointer() {
+      let (px, py) = self.screen_ptr();
+      let grab = self.find_input_target().and_then(|(fd, sid, ..)| {
+        let client = self.clients.get(&fd)?;
+        let tid = Self::toplevel_root_of(client, sid)?;
+        let xdg = match client.objects.get(&tid) {
+          Some(Object {
+            role: Role::Surface(s),
+            ..
+          }) => s.xdg_surface_id?,
+          _ => return None,
+        };
+        let blocked = client.objects.values().any(|o| match &o.role {
+          Role::XdgToplevel {
+            xdg_surface_id,
+            maximized,
+            fullscreen,
+            ..
+          } if *xdg_surface_id == xdg => *maximized || *fullscreen,
+          _ => false,
+        });
+        if blocked {
+          None
+        } else {
+          Some((fd, tid))
+        }
+      });
+      if let Some((fd, tid)) = grab {
+        self.last_button_serial = self.next_serial();
+        self.last_button_pressed = true;
+        self.last_button_code = button;
+        self.begin_move_grab(fd, tid, px, py);
+        return;
+      }
+    }
     let target = if !pressed {
       self.pointer_grab
         .map(|(fd, sid, ptr, ox, oy)| (fd, sid, ptr, 0, 0, 0, ox, oy))
@@ -8992,16 +9654,14 @@ impl Server {
       return;
     }
 
-    // Undecorated (mode 0) CSD title strip — compositor owns the drag immediately
-    // so luna-editor / aplay move+snap no longer wait on start_move.  Left/right
-    // button chrome is excluded by csd_title_drag_hit and still reaches the client.
+    // Client CSD title strip (mode 0/1).  A press must still reach the
+    // client (Firefox tabs / URL bar live on child surfaces; luna-editor
+    // Open/Save live on the root).  After a short drag on the root strip,
+    // maybe_promote_csd_move takes over so GLFW SetWindowPos apps still move
+    // without waiting on xdg_toplevel.move.
     if pressed && button == 0x110 {
       let (px, py) = self.screen_ptr();
       if self.csd_title_drag_hit(fd, surf_id, px, py) {
-        let serial = self.next_serial();
-        self.last_button_pressed = true;
-        self.last_button_serial = serial;
-        self.last_button_code = button;
         let now = now_ms();
         let dbl = matches!(
           self.ssd_last_click,
@@ -9010,20 +9670,19 @@ impl Server {
         self.ssd_last_click = Some((now, fd, surf_id));
         if dbl && self.wm_titlebar_double_click {
           self.ssd_last_click = None;
-          self.raise_surface(fd, surf_id);
+          let focus_sid = self
+            .clients
+            .get(&fd)
+            .and_then(|c| Self::toplevel_root_of(c, surf_id))
+            .unwrap_or(surf_id);
+          self.raise_surface(fd, focus_sid);
           self.focused_client_fd = fd;
-          self.focused_surface_id = surf_id;
-          self.toggle_maximize_surface_for(fd, surf_id);
+          self.focused_surface_id = focus_sid;
+          self.toggle_maximize_surface_for(fd, focus_sid);
           self.dirty = true;
           self.shell_state_dirty = true;
           return;
         }
-        self.raise_surface(fd, surf_id);
-        self.focused_client_fd = fd;
-        self.focused_surface_id = surf_id;
-        self.ensure_kbd_entered(fd, surf_id);
-        self.begin_move_grab(fd, surf_id, px, py);
-        return;
       }
     }
     // Frameless CSD titlebar right-click → shell window menu (same path as
@@ -9071,29 +9730,44 @@ impl Server {
       self.last_button_serial = serial;
       self.last_button_code = button;
       self.pointer_grab = Some((fd, surf_id, ptr_id, ox, oy));
-      self.csd_press = None;
-      // Click-to-focus.  Object ids are per-client — always check the surface
-      // on the fd returned by find_input_target, never a global id lookup.
-      let is_toplevel = self
+      let (px, py) = self.screen_ptr();
+      if self.csd_title_drag_hit(fd, surf_id, px, py) {
+        let (orig_x, orig_y) = self
+          .clients
+          .get(&fd)
+          .and_then(|c| {
+            let tid = Self::toplevel_root_of(c, surf_id).unwrap_or(surf_id);
+            match c.objects.get(&tid) {
+              Some(Object { role: Role::Surface(s), .. }) => Some((s.x, s.y)),
+              _ => None,
+            }
+          })
+          .unwrap_or((ox, oy));
+        self.csd_press = Some((fd, surf_id, px, py, orig_x, orig_y));
+      } else {
+        self.csd_press = None;
+      }
+      // Keyboard/WM focus is always the toplevel, even when the pointer hit a
+      // WebRender/libdecor child.  Focusing the child left GTK/Firefox
+      // un-activated so keys kept going to the window underneath.
+      let focus_sid = self
         .clients
         .get(&fd)
-        .map(|c| Self::surface_is_xdg_toplevel_in(c, surf_id))
+        .and_then(|c| Self::toplevel_root_of(c, surf_id))
+        .unwrap_or(surf_id);
+      let is_stackable = self
+        .clients
+        .get(&fd)
+        .map(|c| Self::surface_is_stackable_in(c, focus_sid))
         .unwrap_or(false);
-      if is_toplevel {
-        let prev_fd = self.focused_client_fd;
-        let prev_sid = self.focused_surface_id;
-        let focus_changed = prev_fd != fd || prev_sid != surf_id;
-        if focus_changed {
-          self.raise_surface(fd, surf_id);
-          self.focused_client_fd = fd;
-          self.focused_surface_id = surf_id;
-          self.shell_state_dirty = true;
-          self.dirty = true;
-          // No ACTIVATED configure here — see activate_surface().
-          self.ensure_kbd_entered(fd, surf_id);
+      if is_stackable {
+        if self.focused_client_fd != fd || self.focused_surface_id != focus_sid {
+          self.activate_surface_for(fd, focus_sid);
+        } else {
+          self.ensure_kbd_entered(fd, focus_sid);
         }
       } else if self.layer_keyboard_mode(fd, surf_id) != 0 {
-        // Launchpad / settings / confirm: layer-shell ON_DEMAND keyboard.
+        // Launchpad / confirm: layer-shell ON_DEMAND keyboard.
         // Dock and menubar keep keyboard=NONE so they never steal typing.
         self.focused_client_fd = fd;
         self.focused_surface_id = surf_id;
@@ -9217,6 +9891,31 @@ impl Server {
       }
       return;
     }
+    // Global shell shortcuts — handled here so they win over focused GTK apps.
+    // Delivered via a datagram socket so luna-shell executes immediately.
+    // F4 / Super — Launchpad (Alt+F4 is close, handled above).
+    if pressed && (self.kbd_mods & 8) == 0 {
+      if keycode == 62 || keycode == 125 || keycode == 126 {
+        if let Some(ref ipc) = self.shell_ipc {
+          ipc.send_shell_action("launchpad_toggle");
+        }
+        return;
+      }
+    }
+    // Super+, — Settings.
+    if pressed && keycode == 51 && (self.kbd_mods & 64) != 0 && (self.kbd_mods & 8) == 0 {
+      if let Some(ref ipc) = self.shell_ipc {
+        ipc.send_shell_action("settings_open");
+      }
+      return;
+    }
+    // Print Screen / F12 — screenshot (shell reads pixels on next frame).
+    if pressed && (keycode == 99 || keycode == 88) {
+      if let Some(ref ipc) = self.shell_ipc {
+        ipc.send_shell_action("screenshot");
+      }
+      return;
+    }
     // Super+D — show desktop / restore (minimize all floating toplevels).
     if self.wm_super_shortcuts && pressed && keycode == 32 && (self.kbd_mods & 64) != 0 && (self.kbd_mods & 8) == 0 {
       self.toggle_show_desktop();
@@ -9302,6 +10001,14 @@ impl Server {
     }
 
     if let Some((fd, grab_id)) = self.find_input_method_keyboard_grab() {
+      // Keep the focused client's wl_keyboard entered before the grab sees
+      // the key.  Firefox/GTK drop virtual-keyboard forwards that arrive
+      // without a prior keyboard.enter on the toplevel.
+      if self.focused_client_fd >= 0 && self.focused_surface_id != 0 {
+        let focus_fd = self.focused_client_fd;
+        let focus_sid = self.focused_surface_id;
+        self.ensure_kbd_entered(focus_fd, focus_sid);
+      }
       let serial = self.next_serial();
       let modifiers_serial = self.next_serial();
       let ts = now_ms();
@@ -9357,52 +10064,78 @@ impl Server {
   }
 
   fn ensure_kbd_entered(&mut self, fd: RawFd, surf_id: u32) {
-    self.update_text_input_focus(fd, surf_id);
-    let focus_changed = !(self.kbd_entered && self.kbd_client_fd == fd && self.kbd_surface_id == surf_id);
-    if !focus_changed {
-      return;
-    }
-    // Leave the previous keyboard focus so GTK/shell don't both think they own it.
-    if self.kbd_entered && self.kbd_client_fd >= 0 &&
-       (self.kbd_client_fd != fd || self.kbd_surface_id != surf_id)
-    {
+    // wl_keyboard.enter must name the xdg_toplevel.  Entering a hit-tested
+    // subsurface (libdecor, WebRender, SDL) leaves the toolkit with no
+    // focused native window, so keys look dead.  text-input.enter must come
+    // *after* keyboard.enter (wlroots order); the reverse makes clients
+    // enable IME before they have keyboard focus and drop later keys.
+    let surf_id = self
+      .clients
+      .get(&fd)
+      .and_then(|c| Self::toplevel_root_of(c, surf_id))
+      .unwrap_or(surf_id);
+    let already = self.kbd_entered && self.kbd_client_fd == fd && self.kbd_surface_id == surf_id;
+    if !already {
       let prev_fd = self.kbd_client_fd;
       let prev_surf = self.kbd_surface_id;
-      let kbd_id = self.clients.get(&prev_fd).and_then(|c| {
-        c.objects.iter().find_map(|(&id, o)| matches!(o.role, Role::Keyboard).then_some(id))
-      }).unwrap_or(0);
-      if kbd_id != 0 {
-        let serial = self.next_serial();
-        if let Some(client) = self.clients.get_mut(&prev_fd) {
-          // wl_keyboard.leave = opcode 2
-          client.send(kbd_id, 2, &[Arg::Uint(serial), Arg::Object(prev_surf)]);
-          client.conn.flush();
+      let same_tree = self.kbd_entered
+        && prev_fd == fd
+        && self
+          .clients
+          .get(&fd)
+          .map(|c| Self::text_input_surface_matches(c, prev_surf, surf_id))
+          .unwrap_or(false);
+
+      // wlroots order: text-input.leave → keyboard.leave → keyboard.enter →
+      // text-input.enter.  Skipping leave on the incoming client leaves
+      // text-input focused on a child while keyboard.enter hits the
+      // toplevel, and the toolkit drops later keys.
+      if self.kbd_entered {
+        if same_tree {
+          self.leave_text_input_surfaces(prev_fd);
+        } else {
+          self.clear_text_input_focus();
         }
       }
-      self.kbd_entered = false;
+
+      if self.kbd_entered && (prev_fd != fd || prev_surf != surf_id) {
+        let kbd_id = self.clients.get(&prev_fd).and_then(|c| {
+          c.objects.iter().find_map(|(&id, o)| matches!(o.role, Role::Keyboard).then_some(id))
+        }).unwrap_or(0);
+        if kbd_id != 0 {
+          let serial = self.next_serial();
+          if let Some(client) = self.clients.get_mut(&prev_fd) {
+            client.send(kbd_id, 2, &[Arg::Uint(serial), Arg::Object(prev_surf)]);
+            client.conn.flush();
+          }
+        }
+        self.kbd_entered = false;
+      }
+
+      let kbd_id = match self.clients.get(&fd) {
+        Some(c) => c.objects.iter().find(|(_, o)| matches!(o.role, Role::Keyboard)).map(|(&id, _)| id).unwrap_or(0),
+        None => return,
+      };
+      if kbd_id == 0 {
+        return;
+      }
+      let serial = self.next_serial();
+      let mut keys = Vec::with_capacity(self.pressed_keys.len() * 4);
+      for &key in &self.pressed_keys {
+        keys.extend_from_slice(&key.to_ne_bytes());
+      }
+      let mods_serial = self.next_serial();
+      let client = self.clients.get_mut(&fd).unwrap();
+      client.send(kbd_id, 1, &[Arg::Uint(serial), Arg::Object(surf_id), Arg::Array(keys)]);
+      client.send(kbd_id, 4, &[Arg::Uint(mods_serial), Arg::Uint(self.kbd_mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
+      client.conn.flush();
+      self.kbd_entered = true;
+      self.kbd_client_fd = fd;
+      self.kbd_surface_id = surf_id;
+      self.emit_selection_to_client_fd(fd);
+      self.emit_primary_to_client_fd(fd);
     }
-    let kbd_id = match self.clients.get(&fd) {
-      Some(c) => c.objects.iter().find(|(_, o)| matches!(o.role, Role::Keyboard)).map(|(&id, _)| id).unwrap_or(0),
-      None => return,
-    };
-    if kbd_id == 0 {
-      return;
-    }
-    let serial = self.next_serial();
-    let keys: Vec<u8> = Vec::new();
-    let mods_serial = self.next_serial();
-    let client = self.clients.get_mut(&fd).unwrap();
-    client.send(kbd_id, 1, &[Arg::Uint(serial), Arg::Object(surf_id), Arg::Array(keys)]);
-    client.send(kbd_id, 4, &[Arg::Uint(mods_serial), Arg::Uint(self.kbd_mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
-    client.conn.flush();
-    self.kbd_entered = true;
-    self.kbd_client_fd = fd;
-    self.kbd_surface_id = surf_id;
-    // Re-offer clipboard + PRIMARY on keyboard enter.  GTK caches selection
-    // offers per-focus; without this, paste after Alt-Tab / click-to-focus
-    // often fails until the user copies again.
-    self.emit_selection_to_client_fd(fd);
-    self.emit_primary_to_client_fd(fd);
+    self.update_text_input_focus(fd, surf_id);
   }
 
   fn send_focused_keyboard_modifiers(&mut self) {
@@ -9432,9 +10165,38 @@ impl Server {
     self.backend.set_keyboard_leds(leds);
   }
 
+  fn leave_text_input_surfaces(&mut self, fd: RawFd) {
+    let Some(client) = self.clients.get_mut(&fd) else {
+      return;
+    };
+    let mut leaves = Vec::new();
+    for (&id, obj) in &mut client.objects {
+      if let Role::TextInput { surface_id, .. } = &mut obj.role {
+        if let Some(old) = surface_id.take() {
+          leaves.push((id, old));
+        }
+      }
+    }
+    for (id, surface) in leaves {
+      client.send(id, 1, &[Arg::Object(surface)]);
+    }
+    client.conn.flush();
+  }
+
   fn update_text_input_focus(&mut self, fd: RawFd, surf_id: u32) {
-    let unchanged = self.active_text_input.map(|(active_fd, _, active_surface)| active_fd == fd && active_surface == surf_id).unwrap_or(false);
-    if !unchanged && self.active_text_input.is_some() {
+    let same_tree_active = self.active_text_input.and_then(|(active_fd, _, active_surface)| {
+      if active_fd != fd {
+        return Some(false);
+      }
+      Some(
+        self
+          .clients
+          .get(&fd)
+          .map(|c| Self::text_input_surface_matches(c, active_surface, surf_id))
+          .unwrap_or(false),
+      )
+    }).unwrap_or(false);
+    if !same_tree_active && self.active_text_input.is_some() {
       self.active_text_input = None;
       self.deactivate_input_methods(None);
     }
@@ -9445,25 +10207,44 @@ impl Server {
       let mut enters = Vec::new();
       let mut activate = Vec::new();
       if let Some(client) = self.clients.get_mut(&client_fd) {
-        for (&id, obj) in &mut client.objects {
-          if let Role::TextInput {
-            surface_id,
-            enabled,
+        let ids: Vec<u32> = client
+          .objects
+          .iter()
+          .filter_map(|(&id, obj)| matches!(obj.role, Role::TextInput { .. }).then_some(id))
+          .collect();
+        for id in ids {
+          let (old_surface, enabled) = match client.objects.get(&id) {
+            Some(Object {
+              role: Role::TextInput {
+                surface_id,
+                enabled,
+                ..
+              },
+              ..
+            }) => (*surface_id, *enabled),
+            _ => continue,
+          };
+          let new_surface = (client_fd == fd).then_some(surf_id);
+          if old_surface == new_surface {
+            continue;
+          }
+          let same_tree = matches!((old_surface, new_surface), (Some(old), Some(new_id)) if Self::text_input_surface_matches(client, old, new_id));
+          if let Some(Object {
+            role: Role::TextInput { surface_id, .. },
             ..
-          } = &mut obj.role
+          }) = client.objects.get_mut(&id)
           {
-            let new_surface = (client_fd == fd).then_some(surf_id);
-            if *surface_id != new_surface {
-              if let Some(old) = *surface_id {
-                leaves.push((id, old));
-              }
-              *surface_id = new_surface;
-              if let Some(new_id) = new_surface {
-                enters.push((id, new_id));
-                if *enabled {
-                  activate.push(id);
-                }
-              }
+            *surface_id = new_surface;
+          }
+          if let Some(old) = old_surface {
+            leaves.push((id, old));
+          }
+          if let Some(new_id) = new_surface {
+            enters.push((id, new_id));
+            // Same-tree child→toplevel still needs text-input.enter on the
+            // toplevel, but must not reset an already-active IM.
+            if enabled && !(same_tree && same_tree_active) {
+              activate.push(id);
             }
           }
         }
@@ -9476,6 +10257,9 @@ impl Server {
       }
       if client_fd == fd {
         for id in activate {
+          if same_tree_active && self.active_text_input.map(|v| v.1) == Some(id) {
+            continue;
+          }
           if let Some(target) = self.clients.remove(&client_fd) {
             self.active_text_input = Some((client_fd, id, surf_id));
             self.activate_input_methods(&target, id);

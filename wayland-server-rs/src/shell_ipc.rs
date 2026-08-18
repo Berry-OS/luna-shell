@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 pub const STATE_FILE: &str = "luna-shell/state.json";
 pub const CMD_SOCKET: &str = "luna-shell.sock";
+pub const ACTION_SOCKET: &str = "luna-shell/action.sock";
 
 /// Connection-scoped shell handle. Wayland object ids are scoped to one
 /// client, so exporting a bare wl_surface id lets two applications alias each
@@ -122,6 +123,48 @@ impl ShellIpc {
 
   pub fn cmd_fd(&self) -> RawFd { self.cmd_fd }
 
+  /// Push a one-shot UI action to luna-shell without rewriting state.json.
+  /// The shell binds a datagram socket and executes these immediately, so
+  /// global shortcuts stay responsive even while a GTK client owns keyboard
+  /// focus and the state poller is debouncing geometry writes.
+  pub fn send_shell_action(&self, action: &str) {
+    let action = action.trim();
+    if action.is_empty() || action.len() >= 48 {
+      return;
+    }
+    let path = self.runtime_dir.join(ACTION_SOCKET);
+    let cpath = match CString::new(path.to_string_lossy().as_bytes()) {
+      Ok(p) => p,
+      Err(_) => return,
+    };
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+      return;
+    }
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as u16;
+    let path = cpath.as_bytes_with_nul();
+    if path.len() > addr.sun_path.len() {
+      unsafe { libc::close(fd) };
+      return;
+    }
+    unsafe {
+      std::ptr::copy_nonoverlapping(path.as_ptr() as *const i8, addr.sun_path.as_mut_ptr(), path.len());
+    }
+    let msg = format!("{action}\n");
+    unsafe {
+      libc::sendto(
+        fd,
+        msg.as_ptr() as *const libc::c_void,
+        msg.len(),
+        libc::MSG_NOSIGNAL,
+        &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+        std::mem::size_of::<libc::sockaddr_un>() as u32,
+      );
+      libc::close(fd);
+    }
+  }
+
   pub fn accept_commands(&mut self) -> Vec<String> {
     let mut out = Vec::new();
     loop {
@@ -174,7 +217,7 @@ impl ShellIpc {
     }
   }
 
-  pub fn collect_windows_into(
+  pub   fn collect_windows_into(
     clients: &HashMap<RawFd, Client>,
     focused_fd: RawFd,
     focused_surface: u32,
@@ -184,7 +227,43 @@ impl ShellIpc {
     for (&fd, client) in clients {
       for (&surface_id, obj) in &client.objects {
         let Role::Surface(s) = &obj.role else { continue };
-        if s.popup || s.xdg_surface_id.is_none() || s.subsurface_parent.is_some() {
+        if s.popup || s.subsurface_parent.is_some() {
+          continue;
+        }
+
+        // Modeless shell dialogs (settings/about/…) are layer-shell surfaces
+        // with a `luna.dialog.*` namespace.  List them next to xdg_toplevels so
+        // Alt+Tab / the menubar window chips can reach them.
+        if let Some(lsid) = s.layer_surface_id {
+          let Some(Object {
+            role: Role::LayerSurface { namespace, .. },
+            ..
+          }) = client.objects.get(&lsid)
+          else {
+            continue;
+          };
+          if !is_windowed_layer_namespace(namespace) {
+            continue;
+          }
+          if !s.mapped && !surface_has_subsurface_content(client, surface_id) {
+            continue;
+          }
+          let (title, app_id) = windowed_layer_meta(namespace);
+          windows.push(WindowInfo {
+            id: window_id(fd, surface_id),
+            title,
+            app_id,
+            x: s.x,
+            y: s.y,
+            focused: fd == focused_fd && surface_id == focused_surface,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+          });
+          continue;
+        }
+
+        if s.xdg_surface_id.is_none() {
           continue;
         }
         // Firefox may keep the xdg_toplevel parent buffer-less while content
@@ -433,6 +512,24 @@ pub fn is_shell_surface(title: &str, app_id: &str) -> bool {
   t.contains("luna desktop") || t.contains("luna-shell") || a.contains("luna-shell") || a.contains("glfw")
 }
 
+/// Layer-shell namespace used by luna-shell for modeless dialogs that should
+/// behave like ordinary windows (stacking + Alt+Tab).
+pub fn is_windowed_layer_namespace(namespace: &str) -> bool {
+  namespace.starts_with("luna.dialog.")
+}
+
+pub fn windowed_layer_meta(namespace: &str) -> (String, String) {
+  let key = namespace.strip_prefix("luna.dialog.").unwrap_or(namespace);
+  let title = match key {
+    "settings" => "Settings",
+    "about" => "About Luna",
+    "net_detail" => "Network",
+    "confirm" => "Confirm",
+    other => other,
+  };
+  (title.to_string(), format!("luna.{}", key))
+}
+
 fn surface_has_subsurface_content(client: &Client, surface_id: u32) -> bool {
   for obj in client.objects.values() {
     if let Role::Subsurface {
@@ -463,15 +560,23 @@ fn surface_has_subsurface_content(client: &Client, surface_id: u32) -> bool {
 
 fn tray_icon_for(app_id: &str) -> String {
   let a = app_id.to_ascii_lowercase();
-  if a.contains("terminal") || a.contains("foot") || a.contains("sakura") {
+  if a.contains("terminal") || a.contains("foot") || a.contains("sakura")
+    || a.contains("kitty") || a.contains("alacritty")
+  {
     "terminal".into()
-  } else if a.contains("firefox") || a.contains("browser") || a.contains("chrome") {
+  } else if a.contains("firefox") || a.contains("browser") || a.contains("chrome")
+    || a.contains("chromium") || a.contains("epiphany")
+  {
     "browser".into()
-  } else if a.contains("nautilus") || a.contains("files") {
+  } else if a.contains("nautilus") || a.contains("files") || a.contains("thunar")
+    || a.contains("pcmanfm") || a.contains("luna-fm")
+  {
     "files".into()
-  } else if a.contains("gedit") || a.contains("editor") {
+  } else if a.contains("gedit") || a.contains("editor") || a.contains("code")
+    || a.contains("luna-editor")
+  {
     "editor".into()
-  } else if a.contains("music") {
+  } else if a.contains("music") || a.contains("rhythmbox") || a.contains("vlc") {
     "music".into()
   } else if a.contains("settings") || a.contains("control") {
     "settings".into()

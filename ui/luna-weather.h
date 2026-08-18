@@ -1,8 +1,8 @@
 /*
  * luna-weather.h — asynchronous Open-Meteo worker for Luna Shell
  *
- * Network, process, JSON and refresh scheduling work stays on one worker
- * thread.  The UI/render thread consumes completed snapshots only.
+ * Network (native HTTPS via OpenSSL), JSON and refresh scheduling stay on
+ * one worker thread.  The UI/render thread consumes completed snapshots only.
  *
  * Define LUNA_WEATHER_IMPLEMENTATION in exactly one translation unit before
  * including this file.
@@ -49,6 +49,7 @@ typedef struct LunaWeatherConfig {
     const char* initial_city;
     const char* user_agent;
     double refresh_interval_sec; /* <= 0 uses 30 minutes */
+    const char* cache_path;      /* optional last-good snapshot; NULL disables */
     LunaWeatherNotifyFn notify;
     void* notify_user;
     /* Optional guard shared with a SIGCHLD waitpid(-1) reaper. */
@@ -83,6 +84,32 @@ int  luna_weather_busy(void);
 #ifndef LUNA_WEATHER_DEFAULT_REFRESH_SEC
 #define LUNA_WEATHER_DEFAULT_REFRESH_SEC 1800.0
 #endif
+#ifndef LUNA_WEATHER_RETRY_MIN_SEC
+#define LUNA_WEATHER_RETRY_MIN_SEC 8.0
+#endif
+#ifndef LUNA_WEATHER_RETRY_MAX_SEC
+#define LUNA_WEATHER_RETRY_MAX_SEC 300.0
+#endif
+#define LUNA_WEATHER_CACHE_MAGIC 0x31584C57u /* 'WLX1' */
+
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <strings.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+
+#ifndef LUNA_WEATHER_HTTP_TIMEOUT_SEC
+#define LUNA_WEATHER_HTTP_TIMEOUT_SEC 12
+#endif
+#ifndef LUNA_WEATHER_HTTP_MAX_BODY
+#define LUNA_WEATHER_HTTP_MAX_BODY (256u * 1024u)
+#endif
 
 typedef struct LunaWeatherState {
     pthread_t thread;
@@ -107,6 +134,8 @@ typedef struct LunaWeatherState {
     LunaWeatherChildLockFn child_lock;
     LunaWeatherChildLockFn child_unlock;
     void* child_user;
+    char cache_path[512];
+    int fail_streak;
 } LunaWeatherState;
 
 static LunaWeatherState g_luna_weather;
@@ -175,58 +204,335 @@ static void luna_weather_url_encode(const char* s, char* out, size_t n) {
     out[o] = 0;
 }
 
-static char* luna_weather_curl_slurp(const char* url) {
-    char cmd[1600];
-    int written = snprintf(cmd, sizeof(cmd),
-        "curl -sS --max-time 12 -A '%s' '%s' 2>/dev/null",
-        g_luna_weather.user_agent[0] ? g_luna_weather.user_agent : "luna-shell/1.0",
-        url ? url : "");
-    if (written < 0 || (size_t)written >= sizeof(cmd)) return NULL;
+static int luna_weather_looks_json(const char* s) {
+    if (!s) return 0;
+    while (*s && isspace((unsigned char)*s)) s++;
+    return *s == '{';
+}
 
-    if (g_luna_weather.child_lock)
-        g_luna_weather.child_lock(g_luna_weather.child_user);
-    FILE* f = popen(cmd, "r");
-    if (!f) {
-        if (g_luna_weather.child_unlock)
-            g_luna_weather.child_unlock(g_luna_weather.child_user);
+static int luna_weather_parse_url(const char* url, char* host, size_t host_n,
+                                  char* path, size_t path_n, int* port) {
+    if (!url || !host || host_n < 8 || !path || path_n < 2 || !port) return 0;
+    if (strncmp(url, "https://", 8) != 0) return 0;
+    const char* p = url + 8;
+    const char* slash = strchr(p, '/');
+    char* colon = NULL;
+    size_t host_len;
+    if (slash) host_len = (size_t)(slash - p);
+    else host_len = strlen(p);
+    if (host_len == 0 || host_len >= host_n) return 0;
+    memcpy(host, p, host_len);
+    host[host_len] = 0;
+    colon = strchr(host, ':');
+    *port = 443;
+    if (colon) {
+        *colon = 0;
+        int parsed = atoi(colon + 1);
+        if (parsed <= 0 || parsed > 65535) return 0;
+        *port = parsed;
+    }
+    if (slash) {
+        if (strlen(slash) >= path_n) return 0;
+        snprintf(path, path_n, "%s", slash);
+    } else {
+        snprintf(path, path_n, "/");
+    }
+    return host[0] != 0;
+}
+
+static int luna_weather_wait_fd(int fd, int for_write, int timeout_ms) {
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = for_write ? POLLOUT : POLLIN;
+    pfd.revents = 0;
+    int rc = poll(&pfd, 1, timeout_ms);
+    if (rc <= 0) return 0;
+    return (pfd.revents & (for_write ? POLLOUT : POLLIN)) != 0;
+}
+
+static int luna_weather_ssl_io(SSL* ssl, int fd, int writing,
+                               const void* out, size_t out_n,
+                               void* in, size_t in_n, size_t* in_got,
+                               int timeout_ms) {
+    double start = luna_weather_now();
+    size_t done = 0;
+    for (;;) {
+        int n;
+        if (writing)
+            n = SSL_write(ssl, (const char*)out + done, (int)(out_n - done));
+        else
+            n = SSL_read(ssl, (char*)in + done, (int)(in_n - done));
+        if (n > 0) {
+            done += (size_t)n;
+            if (writing) {
+                if (done >= out_n) return 1;
+                continue;
+            }
+            if (in_got) *in_got = done;
+            return 1;
+        }
+        int err = SSL_get_error(ssl, n);
+        double remain = (double)timeout_ms / 1000.0 - (luna_weather_now() - start);
+        if (remain <= 0.0) return 0;
+        int wait_ms = (int)(remain * 1000.0);
+        if (wait_ms < 1) wait_ms = 1;
+        if (err == SSL_ERROR_WANT_READ) {
+            if (!luna_weather_wait_fd(fd, 0, wait_ms)) return 0;
+        } else if (err == SSL_ERROR_WANT_WRITE) {
+            if (!luna_weather_wait_fd(fd, 1, wait_ms)) return 0;
+        } else if (!writing && (err == SSL_ERROR_ZERO_RETURN ||
+                                err == SSL_ERROR_SYSCALL)) {
+            if (in_got) *in_got = done;
+            return done > 0 || err == SSL_ERROR_ZERO_RETURN;
+        } else {
+            return 0;
+        }
+    }
+}
+
+static int luna_weather_decode_chunked(char* body, size_t* len) {
+    if (!body || !len) return 0;
+    char* src = body;
+    char* dst = body;
+    char* end = body + *len;
+    while (src < end) {
+        char* nl = memchr(src, '\n', (size_t)(end - src));
+        if (!nl) return 0;
+        unsigned long chunk = strtoul(src, NULL, 16);
+        src = nl + 1;
+        if (chunk == 0) {
+            *len = (size_t)(dst - body);
+            dst[*len] = 0;
+            return 1;
+        }
+        if (src + chunk > end) return 0;
+        memmove(dst, src, chunk);
+        dst += chunk;
+        src += chunk;
+        if (src < end && *src == '\r') src++;
+        if (src < end && *src == '\n') src++;
+    }
+    return 0;
+}
+
+static char* luna_weather_https_get(const char* url) {
+    char host[256], path[768];
+    int port = 443;
+    if (!luna_weather_parse_url(url, host, sizeof(host), path, sizeof(path), &port))
         return NULL;
+
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_family = AF_UNSPEC;
+    if (getaddrinfo(host, port_str, &hints, &res) != 0) return NULL;
+
+    int fd = -1;
+    for (ai = res; ai; ai = ai->ai_next) {
+        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (rc == 0) break;
+        if (errno == EINPROGRESS &&
+            luna_weather_wait_fd(fd, 1, LUNA_WEATHER_HTTP_TIMEOUT_SEC * 1000)) {
+            int err = 0;
+            socklen_t errlen = sizeof(err);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen) == 0 && err == 0)
+                break;
+        }
+        close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) return NULL;
+
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) { close(fd); return NULL; }
+    int have_ca = SSL_CTX_set_default_verify_paths(ctx) == 1;
+    SSL_CTX_set_verify(ctx, have_ca ? SSL_VERIFY_PEER : SSL_VERIFY_NONE, NULL);
+    SSL* ssl = SSL_new(ctx);
+    if (!ssl) { SSL_CTX_free(ctx); close(fd); return NULL; }
+    SSL_set_fd(ssl, fd);
+    SSL_set_tlsext_host_name(ssl, host);
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+    if (have_ca) SSL_set1_host(ssl, host);
+#endif
+    SSL_set_connect_state(ssl);
+
+    double handshake_start = luna_weather_now();
+    int handshake_ok = 0;
+    for (;;) {
+        int rc = SSL_connect(ssl);
+        if (rc == 1) { handshake_ok = 1; break; }
+        int err = SSL_get_error(ssl, rc);
+        double remain = (double)LUNA_WEATHER_HTTP_TIMEOUT_SEC -
+                        (luna_weather_now() - handshake_start);
+        if (remain <= 0.0) break;
+        int wait_ms = (int)(remain * 1000.0);
+        if (wait_ms < 1) break;
+        if (err == SSL_ERROR_WANT_READ) {
+            if (!luna_weather_wait_fd(fd, 0, wait_ms)) break;
+        } else if (err == SSL_ERROR_WANT_WRITE) {
+            if (!luna_weather_wait_fd(fd, 1, wait_ms)) break;
+        } else {
+            break;
+        }
+    }
+    if (!handshake_ok) {
+        SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return NULL;
+    }
+
+    const char* ua = g_luna_weather.user_agent[0]
+        ? g_luna_weather.user_agent : "luna-shell/1.0";
+    char req[1536];
+    int req_n = snprintf(req, sizeof(req),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: %s\r\n"
+        "Accept: application/json\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path, host, ua);
+    if (req_n <= 0 || (size_t)req_n >= sizeof(req) ||
+        !luna_weather_ssl_io(ssl, fd, 1, req, (size_t)req_n, NULL, 0, NULL,
+                             LUNA_WEATHER_HTTP_TIMEOUT_SEC * 1000)) {
+        SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return NULL;
     }
 
     size_t cap = 8192, used = 0;
     char* buf = (char*)malloc(cap);
-    if (!buf) {
-        (void)pclose(f);
-        if (g_luna_weather.child_unlock)
-            g_luna_weather.child_unlock(g_luna_weather.child_user);
-        return NULL;
-    }
-    while (!feof(f)) {
+    if (!buf) { SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return NULL; }
+    double read_start = luna_weather_now();
+    for (;;) {
         if (used + 2048 + 1 >= cap) {
             size_t next = cap * 2;
+            if (next > LUNA_WEATHER_HTTP_MAX_BODY) next = LUNA_WEATHER_HTTP_MAX_BODY;
+            if (next <= cap) break;
             char* grown = (char*)realloc(buf, next);
-            if (!grown) {
-                free(buf);
-                (void)pclose(f);
-                if (g_luna_weather.child_unlock)
-                    g_luna_weather.child_unlock(g_luna_weather.child_user);
-                return NULL;
-            }
+            if (!grown) { free(buf); SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return NULL; }
             buf = grown;
             cap = next;
         }
-        size_t n = fread(buf + used, 1, 2048, f);
-        if (!n) break;
-        used += n;
+        double remain = (double)LUNA_WEATHER_HTTP_TIMEOUT_SEC -
+                        (luna_weather_now() - read_start);
+        if (remain <= 0.0) break;
+        int wait_ms = (int)(remain * 1000.0);
+        if (wait_ms < 1) break;
+        size_t got = 0;
+        size_t room = cap - used - 1;
+        if (room > 4096) room = 4096;
+        if (!luna_weather_ssl_io(ssl, fd, 0, NULL, 0, buf + used, room, &got, wait_ms))
+            break;
+        if (!got) break;
+        used += got;
+        if (used + 1 >= LUNA_WEATHER_HTTP_MAX_BODY) break;
     }
-    int status = pclose(f);
-    if (g_luna_weather.child_unlock)
-        g_luna_weather.child_unlock(g_luna_weather.child_user);
-    if (status == -1 && used == 0) {
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    close(fd);
+    if (used == 0) { free(buf); return NULL; }
+    buf[used] = 0;
+
+    char* header_end = strstr(buf, "\r\n\r\n");
+    int header_skip = 4;
+    if (!header_end) {
+        header_end = strstr(buf, "\n\n");
+        header_skip = 2;
+    }
+    if (!header_end) { free(buf); return NULL; }
+
+    int status = 0;
+    if (sscanf(buf, "HTTP/%*s %d", &status) != 1 || status < 200 || status >= 300) {
         free(buf);
         return NULL;
     }
-    buf[used] = 0;
+    int chunked = 0;
+    char* scan = buf;
+    while (scan < header_end) {
+        char* line = strstr(scan, "\n");
+        if (!line || line > header_end) break;
+        if (!strncasecmp(scan, "Transfer-Encoding:", 18)) {
+            const char* p = scan + 18;
+            while (p + 7 < line) {
+                if ((p[0] == 'c' || p[0] == 'C') &&
+                    (p[1] == 'h' || p[1] == 'H') &&
+                    (p[2] == 'u' || p[2] == 'U') &&
+                    (p[3] == 'n' || p[3] == 'N') &&
+                    (p[4] == 'k' || p[4] == 'K') &&
+                    (p[5] == 'e' || p[5] == 'E') &&
+                    (p[6] == 'd' || p[6] == 'D')) {
+                    chunked = 1;
+                    break;
+                }
+                p++;
+            }
+        }
+        scan = line + 1;
+    }
+
+    size_t body_len = used - (size_t)(header_end + header_skip - buf);
+    memmove(buf, header_end + header_skip, body_len + 1);
+    if (chunked && !luna_weather_decode_chunked(buf, &body_len)) {
+        free(buf);
+        return NULL;
+    }
+    buf[body_len] = 0;
+    if (!luna_weather_looks_json(buf)) {
+        free(buf);
+        return NULL;
+    }
     return buf;
+}
+
+static char* luna_weather_curl_slurp(const char* url) {
+    return luna_weather_https_get(url);
+}
+
+static void luna_weather_cache_save(const LunaWeatherData* data) {
+    if (!data || !data->ok || !g_luna_weather.cache_path[0]) return;
+    char tmp[576];
+    if (snprintf(tmp, sizeof(tmp), "%s.tmp", g_luna_weather.cache_path) >= (int)sizeof(tmp))
+        return;
+    FILE* f = fopen(tmp, "wb");
+    if (!f) return;
+    unsigned magic = LUNA_WEATHER_CACHE_MAGIC;
+    int ok = fwrite(&magic, sizeof(magic), 1, f) == 1 &&
+             fwrite(data, sizeof(*data), 1, f) == 1;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok || rename(tmp, g_luna_weather.cache_path) != 0)
+        unlink(tmp);
+}
+
+static int luna_weather_cache_load(LunaWeatherData* out) {
+    if (!out || !g_luna_weather.cache_path[0]) return 0;
+    FILE* f = fopen(g_luna_weather.cache_path, "rb");
+    if (!f) return 0;
+    unsigned magic = 0;
+    LunaWeatherData data;
+    int ok = fread(&magic, sizeof(magic), 1, f) == 1 &&
+             magic == LUNA_WEATHER_CACHE_MAGIC &&
+             fread(&data, sizeof(data), 1, f) == 1 &&
+             data.ok;
+    fclose(f);
+    if (!ok) return 0;
+    data.generation = 1;
+    data.err[0] = 0;
+    *out = data;
+    return 1;
+}
+
+static double luna_weather_backoff_sec(int fail_streak) {
+    int exp = fail_streak - 1;
+    if (exp < 0) exp = 0;
+    if (exp > 6) exp = 6;
+    double delay = LUNA_WEATHER_RETRY_MIN_SEC * (double)(1 << exp);
+    if (delay > LUNA_WEATHER_RETRY_MAX_SEC) delay = LUNA_WEATHER_RETRY_MAX_SEC;
+    return delay;
 }
 
 static const char* luna_weather_json_after_key(const char* j, const char* key) {
@@ -350,8 +656,8 @@ static void luna_weather_fetch(const char* city, LunaWeatherData* out) {
         return;
     }
 
-    const char* current = strstr(weather, "\"current\"");
-    const char* daily = strstr(weather, "\"daily\"");
+    const char* current = strstr(weather, "\"current\":");
+    const char* daily = strstr(weather, "\"daily\":");
     double value = 0.0;
     if (current) {
         if (luna_weather_json_num(current, "temperature_2m", &value)) out->temp = (float)value;
@@ -384,7 +690,10 @@ static void luna_weather_fetch(const char* city, LunaWeatherData* out) {
 
     free(weather);
     out->ok = current != NULL;
-    if (!out->ok) snprintf(out->err, sizeof(out->err), "Invalid weather data");
+    if (!out->ok)
+        snprintf(out->err, sizeof(out->err), "Invalid weather data");
+    else if (!out->days[0].date[0])
+        snprintf(out->err, sizeof(out->err), "Forecast unavailable");
 }
 
 static void* luna_weather_thread_main(void* unused) {
@@ -433,14 +742,40 @@ static void* luna_weather_thread_main(void* unused) {
         luna_weather_fetch(city, &result);
 
         pthread_mutex_lock(&g_luna_weather.mutex);
-        result.generation = g_luna_weather.result.generation + 1;
-        g_luna_weather.result = result;
+        double delay;
+        int save_cache = 0;
+        LunaWeatherData cached;
+        memset(&cached, 0, sizeof(cached));
+        if (result.ok) {
+            result.generation = g_luna_weather.result.generation + 1;
+            g_luna_weather.result = result;
+            cached = g_luna_weather.result;
+            save_cache = result.days[0].date[0] != 0;
+            if (result.days[0].date[0]) {
+                g_luna_weather.fail_streak = 0;
+                delay = g_luna_weather.refresh_interval_sec;
+            } else {
+                /* Current weather arrived without a forecast — retry soon. */
+                g_luna_weather.fail_streak++;
+                delay = luna_weather_backoff_sec(g_luna_weather.fail_streak);
+            }
+        } else if (!g_luna_weather.result.ok) {
+            result.generation = g_luna_weather.result.generation + 1;
+            g_luna_weather.result = result;
+            g_luna_weather.fail_streak++;
+            delay = luna_weather_backoff_sec(g_luna_weather.fail_streak);
+        } else {
+            /* Keep the last good snapshot so the UI is not wiped to empty. */
+            g_luna_weather.result.generation++;
+            g_luna_weather.fail_streak++;
+            delay = luna_weather_backoff_sec(g_luna_weather.fail_streak);
+        }
         g_luna_weather.busy = 0;
         snprintf(g_luna_weather.refresh_city,
                  sizeof(g_luna_weather.refresh_city), "%s", city);
-        g_luna_weather.next_refresh = luna_weather_now() +
-                                      g_luna_weather.refresh_interval_sec;
+        g_luna_weather.next_refresh = luna_weather_now() + delay;
         pthread_mutex_unlock(&g_luna_weather.mutex);
+        if (save_cache) luna_weather_cache_save(&cached);
         luna_weather_notify();
     }
     return NULL;
@@ -460,6 +795,15 @@ int luna_weather_init(const LunaWeatherConfig* config) {
         g_luna_weather.child_lock = config->child_lock;
         g_luna_weather.child_unlock = config->child_unlock;
         g_luna_weather.child_user = config->child_user;
+        if (config->cache_path && config->cache_path[0])
+            snprintf(g_luna_weather.cache_path, sizeof(g_luna_weather.cache_path),
+                     "%s", config->cache_path);
+    }
+    if (luna_weather_cache_load(&g_luna_weather.result)) {
+        if (g_luna_weather.result.query_city[0])
+            snprintf(g_luna_weather.refresh_city,
+                     sizeof(g_luna_weather.refresh_city), "%s",
+                     g_luna_weather.result.query_city);
     }
 
     if (pthread_mutex_init(&g_luna_weather.mutex, NULL) != 0) return 0;

@@ -202,7 +202,7 @@ body {
 }
 
 #mb_left { flex: 0 0 auto; }
-#mb_center { min-width: 0; padding: 2px 3px 2px 5px; }
+#mb_center { flex: 1 1 auto; min-width: 0; overflow: hidden; padding: 2px 3px 2px 5px; }
 #mb_right {
   flex: 0 0 auto;
   min-width: 140px;
@@ -298,14 +298,20 @@ body {
 
 #win_list {
   display: flex !important;
+  flex: 1 1 auto !important;
+  width: 100% !important;
+  min-width: 0 !important;
   align-items: center !important;
   height: 26px !important;
   gap: 3px !important;
+  overflow: hidden !important;
 }
 
 .win_item {
-  min-width: 112px;
+  flex: 0 1 auto;
+  min-width: 72px;
   max-width: 170px;
+  overflow: hidden;
   height: 25px !important;
   padding: 0 8px !important;
   display: flex !important;
@@ -333,7 +339,13 @@ body {
 }
 
 .win_item.minimized { opacity: .72; }
+.win_glyph {
+  width: 14px; flex: 0 0 14px; margin-right: 3px;
+  font-size: 11px; line-height: 14px; text-align: center; color: inherit;
+}
 .win_label {
+  min-width: 0;
+  flex: 1 1 auto;
   overflow: hidden;
   color: white !important;
   font-size: 11px !important;
@@ -373,6 +385,8 @@ body {
 
 .tray_glyph,
 #mb_right .luna_icon { color: white !important; font-size: 11px !important; }
+.tray_item.hidden { display: none !important; }
+#tray_area.hidden { display: none !important; }
 #mb_wifi { gap: 3px; }
 #mb_bat { gap: 3px; }
 #mb_weather { gap: 3px; }
@@ -394,9 +408,10 @@ body {
   top: auto !important;
   bottom: 30px !important;
   width: 390px !important;
-  min-height: 360px;
+  min-height: 0;
+  max-height: calc(100vh - 36px) !important;
   padding: 0 !important;
-  overflow: hidden;
+  overflow: auto !important;
   color: #111 !important;
   border: 2px solid var(--xp-blue) !important;
   border-bottom: 0 !important;
@@ -559,7 +574,9 @@ body {
 .menu_panel:not(#luna_menu) {
   top: auto !important;
   bottom: 32px !important;
+  max-height: calc(100vh - 36px) !important;
   padding: 2px !important;
+  overflow: auto !important;
   color: var(--xp-ink) !important;
   border: 1px solid #777 !important;
   border-radius: 0 !important;

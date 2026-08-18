@@ -114,7 +114,12 @@ export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-Luna}"
 export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-luna}"
 export GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland MOZ_ENABLE_WAYLAND=1
 export MOZ_GTK_TITLEBAR_DECORATION="${MOZ_GTK_TITLEBAR_DECORATION:-client}"
-export GDK_SCALE="${LUNA_GDK_SCALE:-0.75}" GDK_DPI_SCALE="${LUNA_GDK_DPI_SCALE:-0.75}"
+# DOSBox / sdl12-compat: native Wayland + compositor SSD (no X11, no libdecor).
+export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-wayland}"
+export SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR="${SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR:-0}"
+export SDL_VIDEO_WAYLAND_PREFER_LIBDECOR="${SDL_VIDEO_WAYLAND_PREFER_LIBDECOR:-0}"
+export SDL12COMPAT_ALLOW_SYSWM="${SDL12COMPAT_ALLOW_SYSWM:-0}"
+export GDK_SCALE="${LUNA_GDK_SCALE:-0.8}" GDK_DPI_SCALE="${LUNA_GDK_DPI_SCALE:-1}"
 export QT_SCALE_FACTOR="${LUNA_QT_SCALE_FACTOR:-1}" QT_AUTO_SCREEN_SCALE_FACTOR=0
 export LUNA_BACKEND="$BACKEND" LUNA_OUTPUT_DPI="${LUNA_OUTPUT_DPI:-96}"
 # New monitor defaults to silent background sampling.  Set to 1 only when
@@ -209,10 +214,33 @@ else
 fi
 SHELL_PID=$!; PIDS+=("$SHELL_PID")
 
+resolve_helper() {
+    local name="$1" cand
+    [[ $name == /* && -x $name ]] && { printf '%s\n' "$name"; return 0; }
+    # Prefer the source/build tree over an older /usr/bin copy.  The system
+    # binary used to exit on popup EGL failure, which looked like "no IME".
+    for cand in \
+        "$BIN/$name" \
+        "$ROOT/$name" \
+        "$ROOT/../whiz/$name" \
+        /usr/local/bin/"$name" \
+        /usr/bin/"$name"
+    do
+        [[ -x $cand ]] && { printf '%s\n' "$cand"; return 0; }
+    done
+    cand="$(command -v "$name" 2>/dev/null || true)"
+    [[ -n $cand && -x $cand ]] && { printf '%s\n' "$cand"; return 0; }
+    return 1
+}
 start_optional() {
-    local exe="$1"; shift
-    [[ $exe != none && $exe != 0 ]] || return 0
-    command -v "$exe" >/dev/null 2>&1 || return 0
+    local name="$1" exe
+    shift
+    [[ $name != none && $name != 0 ]] || return 0
+    if ! exe="$(resolve_helper "$name")"; then
+        printf 'luna-session: helper not found: %s\n' "$name" >&2
+        return 0
+    fi
+    printf '→ helper: %s\n' "$exe"
     "$exe" "$@" & PIDS+=("$!")
 }
 start_optional "${LUNA_INPUT_METHOD:-whiz-im-wayland}"

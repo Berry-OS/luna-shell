@@ -1,5 +1,7 @@
+%global build_date %(TZ=Asia/Tokyo date +%Y%m%d)
+
 Name:           luna-shell
-Version:        20260814
+Version:        %{build_date}
 Release:        b1
 Summary:        Lightweight Wayland compositor and Luna desktop shell
 
@@ -26,6 +28,7 @@ BuildRequires:  pkgconfig(wayland-client)
 BuildRequires:  pkgconfig(wayland-egl)
 BuildRequires:  pkgconfig(x11)
 BuildRequires:  pkgconfig(xkbcommon)
+BuildRequires:  pkgconfig(openssl)
 Requires:       bash
 %{?systemd_requires}
 
@@ -56,7 +59,7 @@ export CXXFLAGS="%{optflags} -Os"
 # the Makefile still appends -O2 -fno-fast-math as a backstop.
 %{__make} V=1 build-desktop-system PROFILE=release \
     SHELL_CFLAGS="-pthread \
-        $(pkg-config --cflags libdrm xkbcommon wayland-client)"
+        $(pkg-config --cflags libdrm xkbcommon wayland-client dbus-1 openssl)"
 
 
 %install
@@ -155,4 +158,4 @@ fi
 
 %changelog
 * Fri Aug 14 2026 Yuichiro Nakada <berry@berry-lab.net> - 20260814-b1
-- Berry DM: X11 nested session, software EGL, input/video groups for the berry user
+- Create for Berry Linux

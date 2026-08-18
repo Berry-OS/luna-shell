@@ -76,6 +76,11 @@ html, body { background: var(--be-desk); color: var(--be-ink); }
   border-color: var(--be-desk-lo);
 }
 .win_item.active .win_label { color: #ffffff; }
+.win_item.hidden, .tray_item.hidden, #tray_area.hidden { display: none !important; }
+.win_glyph {
+  width: 12px; flex: 0 0 12px; margin-right: 3px;
+  font-size: 11px; line-height: 12px; text-align: center;
+}
 
 .menu_panel {
   top: 30px; bottom: auto;

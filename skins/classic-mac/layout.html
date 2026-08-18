@@ -36,26 +36,31 @@
 
     <div id="mb_center">
       <div id="win_list">
-        <div id="win_0" class="win_item active"><span class="win_label">Terminal</span></div>
-        <div id="win_1" class="win_item"><span class="win_label">Files</span></div>
-        <div id="win_2" class="win_item minimized"><span class="win_label">Editor</span></div>
-        <div id="win_3" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_4" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_5" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_6" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_7" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_8" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_9" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_10" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_11" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_0" class="win_item active"><span class="win_glyph luna_icon"></span><span class="win_label">Terminal</span></div>
+        <div id="win_1" class="win_item"><span class="win_glyph luna_icon"></span><span class="win_label">Files</span></div>
+        <div id="win_2" class="win_item minimized"><span class="win_glyph luna_icon"></span><span class="win_label">Editor</span></div>
+        <div id="win_3" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_4" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_5" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_6" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_7" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_8" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_9" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_10" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_11" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
       </div>
     </div>
 
     <div id="mb_right">
       <div id="tray_area">
-        <div id="tray_0" class="tray_item icon_terminal"><span class="tray_glyph luna_icon">&#xf120;</span></div>
-        <div id="tray_1" class="tray_item icon_browser"><span class="tray_glyph luna_icon">&#xf0ac;</span></div>
-        <div id="tray_2" class="tray_item icon_files"><span class="tray_glyph luna_icon">&#xf07b;</span></div>
+        <div id="tray_0" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_1" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_2" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_3" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_4" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_5" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_6" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_7" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
       </div>
       <div id="mb_clip" class="mb_item mb_status"><span class="luna_icon">&#xf0ea;</span></div>
       <div id="mb_wifi" class="mb_item mb_status"><span class="luna_icon">&#xf1eb;</span> Wi-Fi</div>
@@ -238,6 +243,68 @@
     <div class="cc_stat_row">
       <span class="cc_stat_label">RAM</span>
       <div class="cc_bar"><div class="cc_bar_fill" id="cc_mem_fill" style="width: 48%;"></div></div>
+    </div>
+  </div>
+
+  <!-- Calendar popover (opened from menubar clock / desktop date) -->
+  <div id="calendar_menu" class="menu_panel hidden">
+    <div id="cal_head">
+      <div id="cal_prev" class="cal_nav luna_icon" role="button" tabindex="0">&#xf053;</div>
+      <span id="cal_month_label">August 2026</span>
+      <div id="cal_next" class="cal_nav luna_icon" role="button" tabindex="0">&#xf054;</div>
+    </div>
+    <div id="cal_weekdays">
+      <span class="cal_wd">Su</span><span class="cal_wd">Mo</span><span class="cal_wd">Tu</span><span class="cal_wd">We</span>
+      <span class="cal_wd">Th</span><span class="cal_wd">Fr</span><span class="cal_wd">Sa</span>
+    </div>
+    <div id="cal_grid">
+      <div id="cal_d0" class="cal_day"></div><div id="cal_d1" class="cal_day"></div><div id="cal_d2" class="cal_day"></div><div id="cal_d3" class="cal_day"></div><div id="cal_d4" class="cal_day"></div><div id="cal_d5" class="cal_day"></div><div id="cal_d6" class="cal_day"></div>
+      <div id="cal_d7" class="cal_day"></div><div id="cal_d8" class="cal_day"></div><div id="cal_d9" class="cal_day"></div><div id="cal_d10" class="cal_day"></div><div id="cal_d11" class="cal_day"></div><div id="cal_d12" class="cal_day"></div><div id="cal_d13" class="cal_day"></div>
+      <div id="cal_d14" class="cal_day"></div><div id="cal_d15" class="cal_day"></div><div id="cal_d16" class="cal_day"></div><div id="cal_d17" class="cal_day"></div><div id="cal_d18" class="cal_day"></div><div id="cal_d19" class="cal_day"></div><div id="cal_d20" class="cal_day"></div>
+      <div id="cal_d21" class="cal_day"></div><div id="cal_d22" class="cal_day"></div><div id="cal_d23" class="cal_day"></div><div id="cal_d24" class="cal_day"></div><div id="cal_d25" class="cal_day"></div><div id="cal_d26" class="cal_day"></div><div id="cal_d27" class="cal_day"></div>
+      <div id="cal_d28" class="cal_day"></div><div id="cal_d29" class="cal_day"></div><div id="cal_d30" class="cal_day"></div><div id="cal_d31" class="cal_day"></div><div id="cal_d32" class="cal_day"></div><div id="cal_d33" class="cal_day"></div><div id="cal_d34" class="cal_day"></div>
+      <div id="cal_d35" class="cal_day"></div><div id="cal_d36" class="cal_day"></div><div id="cal_d37" class="cal_day"></div><div id="cal_d38" class="cal_day"></div><div id="cal_d39" class="cal_day"></div><div id="cal_d40" class="cal_day"></div><div id="cal_d41" class="cal_day"></div>
+    </div>
+    <div id="cal_today_btn" class="dlg_btn">Today</div>
+    <div id="cal_alarm">
+      <div id="cal_alarm_head">
+        <span id="cal_alarm_bell" class="luna_icon">&#xf0f3;</span>
+        <span id="cal_alarm_date">Pick a day</span>
+        <span id="cal_alarm_count">No alarms</span>
+      </div>
+      <div id="cal_alarm_list">
+        <div id="cal_al0" class="cal_al_row hidden">
+          <span class="cal_al_time">07:30</span>
+          <span class="cal_al_label">Alarm</span>
+          <span class="cal_al_repeat">Once</span>
+          <div id="cal_al0_del" class="cal_al_del luna_icon" role="button" tabindex="0">&#xf00d;</div>
+        </div>
+        <div id="cal_al1" class="cal_al_row hidden">
+          <span class="cal_al_time">07:30</span>
+          <span class="cal_al_label">Alarm</span>
+          <span class="cal_al_repeat">Once</span>
+          <div id="cal_al1_del" class="cal_al_del luna_icon" role="button" tabindex="0">&#xf00d;</div>
+        </div>
+        <div id="cal_al2" class="cal_al_row hidden">
+          <span class="cal_al_time">07:30</span>
+          <span class="cal_al_label">Alarm</span>
+          <span class="cal_al_repeat">Once</span>
+          <div id="cal_al2_del" class="cal_al_del luna_icon" role="button" tabindex="0">&#xf00d;</div>
+        </div>
+        <div id="cal_al3" class="cal_al_row hidden">
+          <span class="cal_al_time">07:30</span>
+          <span class="cal_al_label">Alarm</span>
+          <span class="cal_al_repeat">Once</span>
+          <div id="cal_al3_del" class="cal_al_del luna_icon" role="button" tabindex="0">&#xf00d;</div>
+        </div>
+      </div>
+      <div id="cal_alarm_empty">No alarms this day</div>
+      <div id="cal_alarm_composer">
+        <input type="text" id="cal_alarm_time" placeholder="07:30">
+        <input type="text" id="cal_alarm_note" placeholder="Label">
+        <div id="cal_alarm_repeat" class="cal_chip" role="button" tabindex="0">Once</div>
+        <div id="cal_alarm_add" class="dlg_btn primary">Set</div>
+      </div>
     </div>
   </div>
 
@@ -755,6 +822,20 @@
               <div class="kb_card" id="kb_kr_us" role="radio" tabindex="0"><span class="kb_name">한국어 + US</span><span class="kb_desc">Korean / English</span></div>
             </div>
             <span class="kb_help">複数配列では Alt + Shift で切り替えられます。日本語キーボードを固定する場合は「日本語 (JIS)」を選択してください。</span>
+            <span class="panel_heading" style="margin-top: 18px;">Desktop Shortcuts</span>
+            <span class="pref_hint">Click a row, then press the new key. Esc cancels. Backspace clears. F4 is reserved for the file-manager terminal, so it is not used for Launchpad.</span>
+            <div class="shortcut_row" id="shortcut_launchpad" role="button" tabindex="0">
+              <div class="shortcut_text"><span class="shortcut_name">Launchpad</span><span class="shortcut_desc">Show or hide the application launcher</span></div>
+              <span class="shortcut_key" id="shortcut_launchpad_key">Super</span>
+            </div>
+            <div class="shortcut_row" id="shortcut_settings" role="button" tabindex="0">
+              <div class="shortcut_text"><span class="shortcut_name">Settings</span><span class="shortcut_desc">Open System Settings</span></div>
+              <span class="shortcut_key" id="shortcut_settings_key">Super+,</span>
+            </div>
+            <div class="shortcut_row" id="shortcut_screenshot" role="button" tabindex="0">
+              <div class="shortcut_text"><span class="shortcut_name">Screenshot</span><span class="shortcut_desc">Capture the current screen</span></div>
+              <span class="shortcut_key" id="shortcut_screenshot_key">Print</span>
+            </div>
           </div>
 
 
@@ -814,77 +895,51 @@
             <span id="bright_backend_status" class="settings_notice">Detecting brightness tools…</span>
 
             <span class="panel_heading" style="margin-top: 16px;">Application display scale</span>
-            <span class="pref_hint">Sets GDK/Qt scale for applications launched from Luna. Prefer DPI scale for sharper text; integer GDK_SCALE doubles buffer resolution and can look oversized.</span>
-            <span class="pref_section">GDK_DPI_SCALE</span>
-            <div id="gdk_dpi_cards" class="option_card_grid" role="radiogroup" aria-label="GDK DPI scale">
-              <div class="option_card" id="gdk_dpi_05" role="radio" tabindex="0">
-                <span class="option_card_name">50%</span><span class="option_card_desc">0.5</span>
+            <span class="pref_hint">Sliders apply to applications launched from Luna. Text scale is the usual control for Terminal and gedit; widget scale mainly affects file-manager chrome. Restart already-running apps to see the new size.</span>
+            <div class="scale_pref">
+              <div class="scale_pref_head">
+                <span class="pref_section">Text scale (GDK_DPI_SCALE)</span>
+                <span class="scale_val" id="scale_dpi_val">1.00</span>
               </div>
-              <div class="option_card" id="gdk_dpi_075" role="radio" tabindex="0">
-                <span class="option_card_name">75%</span><span class="option_card_desc">0.75</span>
-              </div>
-              <div class="option_card" id="gdk_dpi_1" role="radio" tabindex="0">
-                <span class="option_card_name">100%</span><span class="option_card_desc">GDK_DPI_SCALE=1</span>
-              </div>
-              <div class="option_card" id="gdk_dpi_125" role="radio" tabindex="0">
-                <span class="option_card_name">125%</span><span class="option_card_desc">1.25</span>
-              </div>
-              <div class="option_card" id="gdk_dpi_15" role="radio" tabindex="0">
-                <span class="option_card_name">150%</span><span class="option_card_desc">1.5</span>
-              </div>
-              <div class="option_card" id="gdk_dpi_175" role="radio" tabindex="0">
-                <span class="option_card_name">175%</span><span class="option_card_desc">1.75</span>
-              </div>
-              <div class="option_card" id="gdk_dpi_2" role="radio" tabindex="0">
-                <span class="option_card_name">200%</span><span class="option_card_desc">2</span>
+              <span class="pref_hint">Makes GTK text larger or smaller without doubling window buffers.</span>
+              <div class="cc_track scale_track" id="scale_dpi_track">
+                <div class="cc_fill" id="scale_dpi_fill"></div>
+                <div class="cc_thumb" id="scale_dpi_thumb"></div>
               </div>
             </div>
-            <span class="pref_section">GDK_SCALE</span>
-            <div id="gdk_scale_cards" class="option_card_grid" role="radiogroup" aria-label="GDK integer scale">
-              <div class="option_card" id="gdk_scale_1" role="radio" tabindex="0">
-                <span class="option_card_name">1×</span><span class="option_card_desc">Default · recommended</span>
+            <div class="scale_pref">
+              <div class="scale_pref_head">
+                <span class="pref_section">Widget scale (GDK_SCALE)</span>
+                <span class="scale_val" id="scale_gdk_val">0.80</span>
               </div>
-              <div class="option_card" id="gdk_scale_2" role="radio" tabindex="0">
-                <span class="option_card_name">2×</span><span class="option_card_desc">Integer buffer scale</span>
-              </div>
-            </div>
-            <span class="pref_section">QT_SCALE_FACTOR</span>
-            <div id="qt_scale_cards" class="option_card_grid" role="radiogroup" aria-label="Qt scale factor">
-              <div class="option_card" id="qt_scale_05" role="radio" tabindex="0">
-                <span class="option_card_name">50%</span><span class="option_card_desc">0.5</span>
-              </div>
-              <div class="option_card" id="qt_scale_075" role="radio" tabindex="0">
-                <span class="option_card_name">75%</span><span class="option_card_desc">0.75</span>
-              </div>
-              <div class="option_card" id="qt_scale_1" role="radio" tabindex="0">
-                <span class="option_card_name">100%</span><span class="option_card_desc">QT_SCALE_FACTOR=1</span>
-              </div>
-              <div class="option_card" id="qt_scale_125" role="radio" tabindex="0">
-                <span class="option_card_name">125%</span><span class="option_card_desc">1.25</span>
-              </div>
-              <div class="option_card" id="qt_scale_15" role="radio" tabindex="0">
-                <span class="option_card_name">150%</span><span class="option_card_desc">1.5</span>
-              </div>
-              <div class="option_card" id="qt_scale_175" role="radio" tabindex="0">
-                <span class="option_card_name">175%</span><span class="option_card_desc">1.75</span>
-              </div>
-              <div class="option_card" id="qt_scale_2" role="radio" tabindex="0">
-                <span class="option_card_name">200%</span><span class="option_card_desc">2</span>
+              <span class="pref_hint">Overall GTK widget and icon size. Keep near 0.8 if pcmanfm already looks right. Integer 2× submits a HiDPI buffer.</span>
+              <div class="cc_track scale_track" id="scale_gdk_track">
+                <div class="cc_fill" id="scale_gdk_fill"></div>
+                <div class="cc_thumb" id="scale_gdk_thumb"></div>
               </div>
             </div>
-            <span class="pref_section">Cursor size (XCURSOR_SIZE)</span>
-            <div id="xcursor_cards" class="option_card_grid" role="radiogroup" aria-label="Cursor size">
-              <div class="option_card" id="xcursor_24" role="radio" tabindex="0">
-                <span class="option_card_name">24</span><span class="option_card_desc">Default</span>
+            <div class="scale_pref">
+              <div class="scale_pref_head">
+                <span class="pref_section">Qt scale (QT_SCALE_FACTOR)</span>
+                <span class="scale_val" id="scale_qt_val">1.00</span>
               </div>
-              <div class="option_card" id="xcursor_32" role="radio" tabindex="0">
-                <span class="option_card_name">32</span><span class="option_card_desc">Large</span>
+              <div class="cc_track scale_track" id="scale_qt_track">
+                <div class="cc_fill" id="scale_qt_fill"></div>
+                <div class="cc_thumb" id="scale_qt_thumb"></div>
               </div>
-              <div class="option_card" id="xcursor_48" role="radio" tabindex="0">
-                <span class="option_card_name">48</span><span class="option_card_desc">Extra large</span>
+            </div>
+            <div class="scale_pref">
+              <div class="scale_pref_head">
+                <span class="pref_section">Cursor size (XCURSOR_SIZE)</span>
+                <span class="scale_val" id="scale_cur_val">24</span>
+              </div>
+              <div class="cc_track scale_track" id="scale_cur_track">
+                <div class="cc_fill" id="scale_cur_fill"></div>
+                <div class="cc_thumb" id="scale_cur_thumb"></div>
               </div>
             </div>
             <span class="settings_notice">Already-running applications keep their old scale until restarted. LUNA_GDK_SCALE / LUNA_GDK_DPI_SCALE / LUNA_QT_SCALE_FACTOR / LUNA_XCURSOR_SIZE still override these when set.</span>
+
           </div>
 
           <!-- Window-management panel: lightweight compositor settings. -->
@@ -893,7 +948,11 @@
             <span class="pref_hint">Changes apply immediately and are saved with the other desktop settings.</span>
 
             <div class="wm_pref" id="wm_snap" role="switch" tabindex="0">
-              <div class="wm_pref_text"><span class="wm_pref_name">Edge snapping</span><span class="wm_pref_desc">Tile windows at the left or right edge.</span></div>
+              <div class="wm_pref_text"><span class="wm_pref_name">Magnetic snapping</span><span class="wm_pref_desc">Stick windows to the screen and to other windows while dragging.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_tile" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Tile at screen edge</span><span class="wm_pref_desc">Drop against the left or right edge to fill that half of the screen.</span></div>
               <div class="wm_switch"><div class="wm_switch_knob"></div></div>
             </div>
             <div class="wm_pref" id="wm_top_maximize" role="switch" tabindex="0">
@@ -921,6 +980,10 @@
             </div>
 
             <span class="pref_section">Desktop behavior</span>
+            <div class="wm_pref" id="wm_dock" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Show dock</span><span class="wm_pref_desc">Display the floating application dock at the bottom of the screen.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
             <div class="wm_pref" id="wm_dock_mag" role="switch" tabindex="0">
               <div class="wm_pref_text"><span class="wm_pref_name">Dock hover animation</span><span class="wm_pref_desc">Lift only the pointed icon using the skin stylesheet.</span></div>
               <div class="wm_switch"><div class="wm_switch_knob"></div></div>
@@ -982,6 +1045,21 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Alarm ring overlay -->
+  <div id="alarm_ring" class="modal_sheet hidden">
+    <div id="alarm_ring_backdrop" class="modal_backdrop"></div>
+    <div id="alarm_ring_card" role="dialog" aria-labelledby="alarm_ring_time">
+      <div id="alarm_ring_orb" class="luna_icon">&#xf0f3;</div>
+      <div id="alarm_ring_time">07:30</div>
+      <div id="alarm_ring_label">Alarm</div>
+      <div id="alarm_ring_when">Monday · August 17</div>
+      <div id="alarm_ring_actions">
+        <div id="alarm_snooze" class="dlg_btn">Snooze 5 min</div>
+        <div id="alarm_dismiss" class="dlg_btn primary">Dismiss</div>
       </div>
     </div>
   </div>

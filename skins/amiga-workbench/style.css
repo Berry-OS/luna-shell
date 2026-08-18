@@ -68,6 +68,11 @@ html, body { background: var(--ami-desk); color: var(--ami-ink); }
 }
 .win_item .win_label { color: var(--ami-white); }
 .win_item.active { background: var(--ami-blue-lo); box-shadow: inset 1px 1px #000000; }
+.win_item.hidden, .tray_item.hidden, #tray_area.hidden { display: none !important; }
+.win_glyph {
+  width: 12px; flex: 0 0 12px; margin-right: 3px;
+  font-size: 11px; line-height: 12px; text-align: center;
+}
 
 .menu_panel {
   top: 26px; bottom: auto;

@@ -34,26 +34,31 @@
 
     <div id="mb_center">
       <div id="win_list">
-        <div id="win_0" class="win_item active"><span class="win_label">Terminal</span></div>
-        <div id="win_1" class="win_item"><span class="win_label">Files</span></div>
-        <div id="win_2" class="win_item minimized"><span class="win_label">Editor</span></div>
-        <div id="win_3" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_4" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_5" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_6" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_7" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_8" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_9" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_10" class="win_item hidden"><span class="win_label">Window</span></div>
-        <div id="win_11" class="win_item hidden"><span class="win_label">Window</span></div>
+        <div id="win_0" class="win_item active"><span class="win_glyph luna_icon"></span><span class="win_label">Terminal</span></div>
+        <div id="win_1" class="win_item"><span class="win_glyph luna_icon"></span><span class="win_label">Files</span></div>
+        <div id="win_2" class="win_item minimized"><span class="win_glyph luna_icon"></span><span class="win_label">Editor</span></div>
+        <div id="win_3" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_4" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_5" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_6" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_7" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_8" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_9" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_10" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
+        <div id="win_11" class="win_item hidden"><span class="win_glyph luna_icon"></span><span class="win_label">Window</span></div>
       </div>
     </div>
 
     <div id="mb_right">
       <div id="tray_area">
-        <div id="tray_0" class="tray_item icon_terminal"><span class="tray_glyph luna_icon">&#xf120;</span></div>
-        <div id="tray_1" class="tray_item icon_browser"><span class="tray_glyph luna_icon">&#xf0ac;</span></div>
-        <div id="tray_2" class="tray_item icon_files"><span class="tray_glyph luna_icon">&#xf07b;</span></div>
+        <div id="tray_0" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_1" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_2" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_3" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_4" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_5" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_6" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
+        <div id="tray_7" class="tray_item hidden"><span class="tray_glyph luna_icon"></span></div>
       </div>
       <div id="mb_clip" class="mb_item mb_status"><span class="luna_icon">&#xf0ea;</span></div>
       <div id="mb_wifi" class="mb_item mb_status"><span class="luna_icon">&#xf1eb;</span> Wi-Fi</div>
@@ -705,6 +710,20 @@
               <div class="kb_card" id="kb_kr_us" role="radio" tabindex="0"><span class="kb_name">한국어 + US</span><span class="kb_desc">Korean / English</span></div>
             </div>
             <span class="kb_help">複数配列では Alt + Shift で切り替えられます。日本語キーボードを固定する場合は「日本語 (JIS)」を選択してください。</span>
+            <span class="panel_heading" style="margin-top: 18px;">Desktop Shortcuts</span>
+            <span class="pref_hint">Click a row, then press the new key. Esc cancels. Backspace clears. F4 is reserved for the file-manager terminal, so it is not used for Launchpad.</span>
+            <div class="shortcut_row" id="shortcut_launchpad" role="button" tabindex="0">
+              <div class="shortcut_text"><span class="shortcut_name">Launchpad</span><span class="shortcut_desc">Show or hide the application launcher</span></div>
+              <span class="shortcut_key" id="shortcut_launchpad_key">Super</span>
+            </div>
+            <div class="shortcut_row" id="shortcut_settings" role="button" tabindex="0">
+              <div class="shortcut_text"><span class="shortcut_name">Settings</span><span class="shortcut_desc">Open System Settings</span></div>
+              <span class="shortcut_key" id="shortcut_settings_key">Super+,</span>
+            </div>
+            <div class="shortcut_row" id="shortcut_screenshot" role="button" tabindex="0">
+              <div class="shortcut_text"><span class="shortcut_name">Screenshot</span><span class="shortcut_desc">Capture the current screen</span></div>
+              <span class="shortcut_key" id="shortcut_screenshot_key">Print</span>
+            </div>
           </div>
 
           <!-- Window-management panel: lightweight compositor settings. -->
@@ -713,7 +732,11 @@
             <span class="pref_hint">Changes apply immediately and are saved with the other desktop settings.</span>
 
             <div class="wm_pref" id="wm_snap" role="switch" tabindex="0">
-              <div class="wm_pref_text"><span class="wm_pref_name">Edge snapping</span><span class="wm_pref_desc">Tile windows at the left or right edge.</span></div>
+              <div class="wm_pref_text"><span class="wm_pref_name">Magnetic snapping</span><span class="wm_pref_desc">Stick windows to the screen and to other windows while dragging.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
+            <div class="wm_pref" id="wm_tile" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Tile at screen edge</span><span class="wm_pref_desc">Drop against the left or right edge to fill that half of the screen.</span></div>
               <div class="wm_switch"><div class="wm_switch_knob"></div></div>
             </div>
             <div class="wm_pref" id="wm_top_maximize" role="switch" tabindex="0">
@@ -741,6 +764,10 @@
             </div>
 
             <span class="pref_section">Desktop behavior</span>
+            <div class="wm_pref" id="wm_dock" role="switch" tabindex="0">
+              <div class="wm_pref_text"><span class="wm_pref_name">Show dock</span><span class="wm_pref_desc">Display the floating application dock at the bottom of the screen.</span></div>
+              <div class="wm_switch"><div class="wm_switch_knob"></div></div>
+            </div>
             <div class="wm_pref" id="wm_dock_mag" role="switch" tabindex="0">
               <div class="wm_pref_text"><span class="wm_pref_name">Dock magnification</span><span class="wm_pref_desc">Scale nearby icons while pointing at the dock.</span></div>
               <div class="wm_switch"><div class="wm_switch_knob"></div></div>
