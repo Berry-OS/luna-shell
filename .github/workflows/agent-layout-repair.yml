@@ -1,16 +1,16 @@
 name: Repair Wayland widget layout move
 
 on:
-  push:
-    branches:
-      - fix/wayland-jank-notification-history-widgets
+  pull_request:
+    branches: [master]
+    types: [synchronize]
 
 permissions:
   contents: write
 
 jobs:
   repair-and-validate:
-    if: startsWith(github.event.head_commit.message, 'bootstrap: repair layout move')
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +47,7 @@ jobs:
               start = text.index(f'<div id="{element_id}"')
               depth = 0
               for m in re.finditer(r'<div\b|</div\s*>', text[start:]):
-                  token = m.group(0)
-                  if token.startswith('<div'):
+                  if m.group(0).startswith('<div'):
                       depth += 1
                   else:
                       depth -= 1
@@ -59,8 +58,6 @@ jobs:
           for path in layouts:
               html = path.read_text()
 
-              # Move only the three desktop widget cards.  Dock, menus, dialogs,
-              # settings, and toast remain top-level sibling surfaces.
               start = html.index('  <!-- Desktop Widgets -->')
               end = html.index('  <!-- Dock -->', start)
               widget_block = html[start:end]
@@ -68,7 +65,6 @@ jobs:
               bg_end = div_close(html, 'bg_layer')
               html = html[:bg_end] + widget_block + html[bg_end:]
 
-              # Settings switch for widget visibility.
               if 'id="wm_widgets"' not in html:
                   marker = '            <div class="wm_pref" id="wm_dock_mag" role="switch" tabindex="0">'
                   pref = (
@@ -81,7 +77,6 @@ jobs:
                       raise RuntimeError(f'{path}: wm_dock_mag marker count={html.count(marker)}')
                   html = html.replace(marker, pref + marker, 1)
 
-              # Notification history lives inside the top-right Control Center.
               if 'id="notify_0"' not in html:
                   cc_end = div_close(html, 'control_center')
                   rows = [
@@ -92,7 +87,6 @@ jobs:
                       rows.append(f'    <div id="notify_{i}" class="cc_stat_row hidden"><span class="cc_stat_label" id="notify_{i}_text">—</span></div>')
                   html = html[:cc_end] + '\n'.join(rows) + '\n' + html[cc_end:]
 
-              # Structural assertions: only widgets are inside bg_layer.
               bg_start = html.index('<div id="bg_layer"')
               bg_end = div_close(html, 'bg_layer')
               for wid in ('widget_clock', 'widget_stats', 'widget_weather'):
@@ -131,12 +125,7 @@ jobs:
         run: |
           git diff --check
           python3 - <<'PY'
-          from pathlib import Path
           import subprocess
-          diff = subprocess.check_output(['git','diff','--stat','origin/master']).decode()
-          print(diff)
-          # A widget relocation should not turn each ~1k-line layout into a
-          # wholesale rewrite.  Catch accidental broad moves before committing.
           for p in [
               'skins/amiga-workbench/layout.html', 'skins/beos/layout.html',
               'skins/classic-mac/layout.html', 'skins/default/layout.html',
@@ -145,6 +134,7 @@ jobs:
               out = subprocess.check_output(['git','diff','--numstat','origin/master','--',p]).decode().strip()
               if out:
                   adds, dels, _ = out.split('\t')
+                  print(p, adds, dels)
                   assert int(adds) < 160 and int(dels) < 130, (p, adds, dels)
           PY
           git config user.name "OpenAI"
