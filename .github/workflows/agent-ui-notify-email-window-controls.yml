@@ -18,32 +18,56 @@ jobs:
           fetch-depth: 0
 
       - name: Apply targeted shell changes
-        run: python3 tools/agent_patch_ui.py
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 tools/agent_patch_ui.py 2>&1 | tee tools/agent_patch_run.log
 
       - name: Regenerate bundled default layout and style headers
-        run: make ui/luna-shell.css.h ui/luna-shell.html.h
+        shell: bash
+        run: |
+          set -o pipefail
+          make ui/luna-shell.css.h ui/luna-shell.html.h 2>&1 | tee tools/agent_headers_run.log
 
       - name: Check compositor
+        shell: bash
         run: |
-          cargo check --manifest-path wayland-server-rs/Cargo.toml
-          cargo test --manifest-path wayland-server-rs/Cargo.toml
+          set -o pipefail
+          {
+            cargo check --manifest-path wayland-server-rs/Cargo.toml
+            cargo test --manifest-path wayland-server-rs/Cargo.toml
+          } 2>&1 | tee tools/agent_cargo_run.log
 
       - name: Validate generated UI and patch hygiene
+        shell: bash
         run: |
-          test -n "$(grep -F 'id=\"dock_email\"' skins/default/layout.html)"
-          test -n "$(grep -F 'id=\"settings_panel_display\"' skins/default/layout.html)"
-          test -n "$(grep -F 'id=\"wm_focus_outline\"' skins/default/layout.html)"
-          test -n "$(grep -F 'id=\"wm_window_tray\"' skins/default/layout.html)"
-          test -n "$(grep -F 'id=\"wm_cascade\"' skins/default/layout.html)"
-          grep -F 'wm_config focus_outline' ui/luna-shell.c
-          grep -F 'wm_config cascade_windows' ui/luna-shell.c
-          grep -F 'wm_focus_outline' wayland-server-rs/src/server.rs
-          grep -F 'wm_cascade_windows' wayland-server-rs/src/server.rs
-          git diff --check
+          set -o pipefail
+          {
+            test -n "$(grep -F 'id=\"dock_email\"' skins/default/layout.html)"
+            test -n "$(grep -F 'id=\"settings_panel_display\"' skins/default/layout.html)"
+            test -n "$(grep -F 'id=\"wm_focus_outline\"' skins/default/layout.html)"
+            test -n "$(grep -F 'id=\"wm_window_tray\"' skins/default/layout.html)"
+            test -n "$(grep -F 'id=\"wm_cascade\"' skins/default/layout.html)"
+            grep -F 'wm_config focus_outline' ui/luna-shell.c
+            grep -F 'wm_config cascade_windows' ui/luna-shell.c
+            grep -F 'wm_focus_outline' wayland-server-rs/src/server.rs
+            grep -F 'wm_cascade_windows' wayland-server-rs/src/server.rs
+            git diff --check
+          } 2>&1 | tee tools/agent_validate_run.log
+
+      - name: Preserve diagnostics on failure
+        if: failure()
+        run: |
+          git add tools/agent_*_run.log || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "debug: capture UI patch failure" || true
+          git push origin HEAD:agent/ui-notify-email-window-controls || true
 
       - name: Commit validated implementation
+        if: success()
         run: |
-          rm -f tools/agent_patch_ui.py tools/agent_trigger.txt .github/workflows/agent-ui-notify-email-window-controls.yml
+          rm -f tools/agent_patch_ui.py tools/agent_trigger.txt tools/agent_*_run.log .github/workflows/agent-ui-notify-email-window-controls.yml
           git add -A
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
