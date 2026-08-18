@@ -606,8 +606,11 @@ impl Server {
       // IMPORTANT: a pending flip itself is work.  The previous ordering used
       // epoll_wait(-1) when no client work remained, which meant a *lost* DRM
       // event also prevented the watchdog from ever waking up.
+      let refresh_millihz = self.backend.refresh_millihz().max(10_000) as u64;
+      let present_watchdog_ms =
+        ((1_000_000u64 + refresh_millihz - 1) / refresh_millihz).clamp(1, 100) as i32;
       let timeout = if self.backend.present_busy() {
-        16
+        present_watchdog_ms
       } else if work {
         0
       } else {
@@ -1000,7 +1003,7 @@ impl Server {
             Arg::Int(0),
           ],
         );
-        client.send(id, 1, &[Arg::Uint(0x3), Arg::Int(w as i32), Arg::Int(h as i32), Arg::Int(60000)]);
+        client.send(id, 1, &[Arg::Uint(0x3), Arg::Int(w as i32), Arg::Int(h as i32), Arg::Int(self.backend.refresh_millihz().min(i32::MAX as u32) as i32)]);
         client.send(id, 3, &[Arg::Int(1)]); // scale = 1
         if version >= 4 {
           client.send(id, 4, &[Arg::Str(Some("LUNA-1".into()))]);
