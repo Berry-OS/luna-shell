@@ -7,7 +7,7 @@
  */
 
 use super::vt::VtSession;
-use super::{probe_render_node, Backend, Framebuffer, InputEvent};
+use super::{monotonic_millis, probe_render_node, Backend, Framebuffer, InputEvent, PresentationFeedback};
 use crate::input::evdev::EvdevInput;
 use crate::shm::{ShmBuffer, FORMAT_ARGB8888, FORMAT_XRGB8888};
 use libc::{c_void, ioctl, mmap, munmap, open, MAP_FAILED, MAP_SHARED, O_CLOEXEC, O_RDWR, PROT_READ, PROT_WRITE};
@@ -189,7 +189,7 @@ const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
 const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
 
 /// Allow two nominal refresh periods for the completion event.  If the event
-/// is still missing after that, `present_busy` verifies the CRTC's current
+/// is still missing after that, `poll_presentation` verifies the CRTC's current
 /// framebuffer instead of blindly declaring the flip complete.  The old
 /// fixed 100 ms timeout produced a very visible 100 ms hitch and could release
 /// scanout resources while the kernel still owned them.
@@ -243,6 +243,9 @@ pub struct DriBackend {
   pending_fb_id: u32,
   flip_started: std::time::Instant,
   use_page_flip: bool,
+  /// LUNA_PRESENT_TRACE=1: log submit->actual-scanout latency and watchdog
+  /// recoveries without putting logging on the normal fast path.
+  present_trace: bool,
   retire: Vec<Retired>,
   /// Last content copied into a scanout buffer, kept in ordinary RAM so a
   /// frame can be diffed without reading back write-combined video memory.
@@ -629,6 +632,9 @@ impl DriBackend {
         pending_fb_id: 0,
         flip_started: std::time::Instant::now(),
         use_page_flip: true,
+        present_trace: std::env::var("LUNA_PRESENT_TRACE")
+          .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off"))
+          .unwrap_or(false),
         retire: Vec::new(),
         shadow: vec![0; (w as usize) * (h as usize)],
         row_span_prev: vec![(0, w); h as usize],
@@ -740,9 +746,12 @@ impl Backend for DriBackend {
   fn event_fd(&self) -> Option<RawFd> { Some(self.fd) }
 
   /// Drain page-flip completions.  Reading them is what lets the next frame
-  /// start; nothing else consumes this descriptor.
-  fn dispatch_events(&mut self) {
+  /// start; nothing else consumes this descriptor.  Crucially, this is also
+  /// the point at which the server is allowed to emit wl_callback.done and
+  /// wl_buffer.release for the submitted frame.
+  fn dispatch_events(&mut self) -> Option<PresentationFeedback> {
     let mut buf = [0u8; 512];
+    let mut completed = None;
     loop {
       let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len()) };
       if n <= 0 {
@@ -769,42 +778,41 @@ impl Backend for DriBackend {
           && self.flip_pending
           && user_data == self.pending_fb_id as u64
         {
-          self.flip_pending = false;
-          self.pending_fb_id = 0;
+          completed = Some(self.complete_flip(false));
         }
         off += len;
-      }
-      if !self.flip_pending {
-        self.release_retired();
       }
       if n < buf.len() {
         break;
       }
     }
+    completed
   }
 
   fn present_busy(&self) -> bool {
+    self.flip_pending
+  }
+
+  fn poll_presentation(&mut self) -> Option<PresentationFeedback> {
     if !self.flip_pending {
-      return false;
+      return None;
     }
 
-    // Use the mode's refresh rate rather than a fixed 100 ms stall.  Two
-    // periods tolerate an event-loop scheduling slip at vblank; 20 ms is the
-    // floor for high-refresh displays.
+    // Two nominal refresh periods tolerate a scheduling slip at vblank.  If
+    // the event is still absent, do a non-modesetting GETCRTC query and only
+    // declare completion when the kernel confirms the exact pending fb.
     let grace_ms = flip_event_grace_ms(self.mode.vrefresh);
     if self.flip_started.elapsed() < std::time::Duration::from_millis(grace_ms) {
-      return true;
+      return None;
     }
 
-    // A completion event can be lost/delayed even though scanout already
-    // switched.  GETCRTC is a non-modesetting query: recover only when the
-    // kernel confirms the exact framebuffer is current.  On query failure or
-    // a genuinely pending flip, keep waiting instead of entering blocking
-    // SetCrtc and creating a periodic hitch.
     let mut crtc = ModeCrtc::default();
     crtc.crtc_id = self.crtc_id;
     let queried = unsafe { ioctl(self.fd, iowr::<ModeCrtc>(0xA1), &mut crtc) == 0 };
-    !(queried && crtc.fb_id == self.pending_fb_id)
+    if queried && crtc.fb_id == self.pending_fb_id {
+      return Some(self.complete_flip(true));
+    }
+    None
   }
 
   fn deactivate(&mut self) {
@@ -877,6 +885,28 @@ impl Backend for DriBackend {
 }
 
 impl DriBackend {
+  /// Retire one page flip after the kernel has confirmed scanout completion.
+  /// `watchdog=true` means the event itself was missing and GETCRTC proved the
+  /// new framebuffer is already current.
+  fn complete_flip(&mut self, watchdog: bool) -> PresentationFeedback {
+    let fb_id = self.pending_fb_id;
+    let elapsed_ms = self.flip_started.elapsed().as_secs_f64() * 1000.0;
+    self.flip_pending = false;
+    self.pending_fb_id = 0;
+    self.release_retired();
+
+    if self.present_trace {
+      eprintln!(
+        "[luna-present] complete source={} fb={} latency={:.2}ms",
+        if watchdog { "watchdog/GETCRTC" } else { "drm-event" },
+        fb_id,
+        elapsed_ms,
+      );
+    }
+
+    PresentationFeedback { timestamp_ms: monotonic_millis() }
+  }
+
   #[cfg(feature = "gpu")]
   #[allow(dead_code)] // Kept for experiments; software presents use copy_damaged.
   fn present_gpu(&mut self, fb: &Framebuffer) -> bool {
@@ -929,14 +959,11 @@ impl DriBackend {
   /// runs the full modeset path and blocks until the change lands, which on
   /// every frame is what made the console session hitch.
   unsafe fn flip_fb(&mut self, fb_id: u32) -> bool {
-    // If the event was lost but GETCRTC confirmed that scanout switched, retire
-    // the old resources and continue asynchronously.  `present_busy` remains
-    // true when the kernel has not confirmed completion, so this path never
-    // guesses and never falls into blocking SetCrtc for an in-flight flip.
-    if self.flip_pending && !self.present_busy() {
-      self.flip_pending = false;
-      self.pending_fb_id = 0;
-      self.release_retired();
+    // The server gates every composite on present_busy().  If this ever fires,
+    // do not fall through to blocking SetCrtc while a real flip still owns the
+    // CRTC; simply reject this present and let the completion path wake us.
+    if self.flip_pending {
+      return false;
     }
     if self.use_page_flip && !self.flip_pending {
       let mut req = ModeCrtcPageFlip {
@@ -950,6 +977,13 @@ impl DriBackend {
         self.flip_pending = true;
         self.pending_fb_id = fb_id;
         self.flip_started = std::time::Instant::now();
+        if self.present_trace {
+          eprintln!(
+            "[luna-present] submit fb={} refresh={}Hz",
+            fb_id,
+            if self.mode.vrefresh >= 10 { self.mode.vrefresh } else { 60 },
+          );
+        }
         return true;
       }
       let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
