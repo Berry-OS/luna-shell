@@ -29,7 +29,7 @@ jobs:
           p = Path('/tmp/wayland_fixes.py')
           s = p.read_text()
           old = "layouts = [Path('ui/luna-shell.html')] + [Path(p) for p in glob.glob('skins/*/layout.html')]"
-          new = old + "\n          layouts = [p for p in layouts if p.exists() and '  <!-- Top Menu Bar -->' in p.read_text()]"
+          new = old + "\nlayouts = [p for p in layouts if p.exists() and '  <!-- Top Menu Bar -->' in p.read_text()]"
           if s.count(old) != 1:
               raise SystemExit('layout list marker changed')
           p.write_text(s.replace(old, new, 1))
