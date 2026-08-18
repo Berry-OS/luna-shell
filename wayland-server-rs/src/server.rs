@@ -606,8 +606,11 @@ impl Server {
       // IMPORTANT: a pending flip itself is work.  The previous ordering used
       // epoll_wait(-1) when no client work remained, which meant a *lost* DRM
       // event also prevented the watchdog from ever waking up.
+      let refresh_millihz = self.backend.refresh_millihz().max(10_000) as u64;
+      let present_watchdog_ms =
+        ((1_000_000u64 + refresh_millihz - 1) / refresh_millihz).clamp(1, 100) as i32;
       let timeout = if self.backend.present_busy() {
-        16
+        present_watchdog_ms
       } else if work {
         0
       } else {
@@ -1000,7 +1003,7 @@ impl Server {
             Arg::Int(0),
           ],
         );
-        client.send(id, 1, &[Arg::Uint(0x3), Arg::Int(w as i32), Arg::Int(h as i32), Arg::Int(60000)]);
+        client.send(id, 1, &[Arg::Uint(0x3), Arg::Int(w as i32), Arg::Int(h as i32), Arg::Int(self.backend.refresh_millihz().min(i32::MAX as u32) as i32)]);
         client.send(id, 3, &[Arg::Int(1)]); // scale = 1
         if version >= 4 {
           client.send(id, 4, &[Arg::Str(Some("LUNA-1".into()))]);
@@ -3657,13 +3660,13 @@ impl Server {
     if was_focused {
       // Explicitly end keyboard focus.  Merely clearing compositor bookkeeping
       // leaves toolkits believing the minimized surface is still active.
-      let keyboard_id = self.clients.get(&fd).and_then(|client| {
-        client.objects.iter().find_map(|(&id, obj)| matches!(obj.role, Role::Keyboard).then_some(id))
-      });
-      if let Some(keyboard_id) = keyboard_id {
+      let keyboard_ids = self.clients.get(&fd).map(Self::keyboard_ids).unwrap_or_default();
+      if !keyboard_ids.is_empty() {
         let serial = self.next_serial();
         if let Some(client) = self.clients.get_mut(&fd) {
-          client.send(keyboard_id, 2, &[Arg::Uint(serial), Arg::Object(surface_id)]);
+          for keyboard_id in keyboard_ids {
+            client.send(keyboard_id, 2, &[Arg::Uint(serial), Arg::Object(surface_id)]);
+          }
           client.conn.flush();
         }
       }
@@ -3877,6 +3880,31 @@ impl Server {
       // GTK4 crashes without a wl_keyboard keymap event.
       if opcode == 1 {
         self.send_keymap(client, nid);
+
+        // wl_keyboard is a resource-local state object. A client is allowed
+        // to call wl_seat.get_keyboard again after focus was established; the
+        // new object still starts with active_surface=NULL, so initialize it
+        // to the seat's current focus before any key event can reach it.
+        if self.kbd_entered
+          && self.kbd_client_fd == client.conn.fd
+          && self.kbd_surface_id != 0
+        {
+          let serial = self.next_serial();
+          let mut keys = Vec::with_capacity(self.pressed_keys.len() * 4);
+          for &key in &self.pressed_keys {
+            keys.extend_from_slice(&key.to_ne_bytes());
+          }
+          client.send(nid, 1, &[
+            Arg::Uint(serial),
+            Arg::Object(self.kbd_surface_id),
+            Arg::Array(keys),
+          ]);
+          let modifiers_serial = self.next_serial();
+          client.send(nid, 4, &[
+            Arg::Uint(modifiers_serial), Arg::Uint(self.kbd_mods), Arg::Uint(0),
+            Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group),
+          ]);
+        }
       }
     }
   }
@@ -6200,7 +6228,14 @@ impl Server {
     )
   }
 
-  fn keyboard_id(client: &Client) -> Option<u32> { client.objects.iter().find_map(|(&id, obj)| matches!(obj.role, Role::Keyboard).then_some(id)) }
+  fn keyboard_ids(client: &Client) -> Vec<u32> {
+    let mut ids: Vec<u32> = client.objects.iter()
+      .filter_map(|(&id, obj)| matches!(obj.role, Role::Keyboard).then_some(id))
+      .collect();
+    ids.sort_unstable();
+    ids
+  }
+
   fn pointer_id(client: &Client) -> Option<u32> {
     client.objects.iter().filter_map(|(&id, obj)| matches!(obj.role, Role::Pointer).then_some(id)).min()
   }
@@ -6213,7 +6248,7 @@ impl Server {
     }
     if target_fd == virtual_client.conn.fd {
       let serial = self.next_serial();
-      if let Some(keyboard_id) = Self::keyboard_id(virtual_client) {
+      for keyboard_id in Self::keyboard_ids(virtual_client) {
         virtual_client.send(keyboard_id, 3, &[Arg::Uint(serial), Arg::Uint(time), Arg::Uint(key), Arg::Uint(state)]);
       }
       return;
@@ -6221,10 +6256,11 @@ impl Server {
     self.ensure_kbd_entered(target_fd, surface_id);
     let serial = self.next_serial();
     if let Some(target) = self.clients.get_mut(&target_fd) {
-      if let Some(keyboard_id) = Self::keyboard_id(target) {
+      let keyboard_ids = Self::keyboard_ids(target);
+      for keyboard_id in keyboard_ids {
         target.send(keyboard_id, 3, &[Arg::Uint(serial), Arg::Uint(time), Arg::Uint(key), Arg::Uint(state)]);
-        target.conn.flush();
       }
+      target.conn.flush();
     }
   }
 
@@ -6240,7 +6276,7 @@ impl Server {
     self.sync_keyboard_leds();
     if target_fd == virtual_client.conn.fd {
       let serial = self.next_serial();
-      if let Some(keyboard_id) = Self::keyboard_id(virtual_client) {
+      for keyboard_id in Self::keyboard_ids(virtual_client) {
         virtual_client.send(keyboard_id, 4, &[Arg::Uint(serial), Arg::Uint(depressed), Arg::Uint(latched), Arg::Uint(locked), Arg::Uint(group)]);
       }
       return;
@@ -6248,10 +6284,11 @@ impl Server {
     self.ensure_kbd_entered(target_fd, surface_id);
     let serial = self.next_serial();
     if let Some(target) = self.clients.get_mut(&target_fd) {
-      if let Some(keyboard_id) = Self::keyboard_id(target) {
+      let keyboard_ids = Self::keyboard_ids(target);
+      for keyboard_id in keyboard_ids {
         target.send(keyboard_id, 4, &[Arg::Uint(serial), Arg::Uint(depressed), Arg::Uint(latched), Arg::Uint(locked), Arg::Uint(group)]);
-        target.conn.flush();
       }
+      target.conn.flush();
     }
   }
 
@@ -10126,26 +10163,15 @@ impl Server {
     }
     // Click-to-focus: keys go to the activated surface, not wherever the
     // pointer happens to hover (dock/menubar must not steal typing).
-    let (fd, surf_id, kbd_id) = if self.focused_client_fd >= 0 && self.focused_surface_id != 0 {
-      let fd = self.focused_client_fd;
-      let surf_id = self.focused_surface_id;
-      let kbd_id = self
-        .clients
-        .get(&fd)
-        .and_then(|c| {
-          c.objects
-            .iter()
-            .find_map(|(&id, o)| matches!(o.role, Role::Keyboard).then_some(id))
-        })
-        .unwrap_or(0);
-      (fd, surf_id, kbd_id)
+    let (fd, surf_id) = if self.focused_client_fd >= 0 && self.focused_surface_id != 0 {
+      (self.focused_client_fd, self.focused_surface_id)
     } else {
-      let Some((fd, surf_id, _, kbd_id, _, _, _, _)) = self.find_input_target() else {
+      let Some((fd, surf_id, _, _, _, _, _, _)) = self.find_input_target() else {
         return;
       };
-      (fd, surf_id, kbd_id)
+      (fd, surf_id)
     };
-    if kbd_id == 0 {
+    if self.clients.get(&fd).map(Self::keyboard_ids).unwrap_or_default().is_empty() {
       return;
     }
     self.ensure_kbd_entered(fd, surf_id);
@@ -10155,8 +10181,10 @@ impl Server {
     let state: u32 = if pressed { 1 } else { 0 };
     let mods = self.kbd_mods;
     let client = self.clients.get_mut(&fd).unwrap();
-    client.send(kbd_id, 3, &[Arg::Uint(serial), Arg::Uint(ts), Arg::Uint(keycode), Arg::Uint(state)]);
-    client.send(kbd_id, 4, &[Arg::Uint(s2), Arg::Uint(mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
+    for kbd_id in Self::keyboard_ids(client) {
+      client.send(kbd_id, 3, &[Arg::Uint(serial), Arg::Uint(ts), Arg::Uint(keycode), Arg::Uint(state)]);
+      client.send(kbd_id, 4, &[Arg::Uint(s2), Arg::Uint(mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
+    }
     client.conn.flush();
   }
 
@@ -10203,24 +10231,24 @@ impl Server {
       }
 
       if self.kbd_entered && (prev_fd != fd || prev_surf != surf_id) {
-        let kbd_id = self.clients.get(&prev_fd).and_then(|c| {
-          c.objects.iter().find_map(|(&id, o)| matches!(o.role, Role::Keyboard).then_some(id))
-        }).unwrap_or(0);
-        if kbd_id != 0 {
+        let keyboard_ids = self.clients.get(&prev_fd).map(Self::keyboard_ids).unwrap_or_default();
+        if !keyboard_ids.is_empty() {
           let serial = self.next_serial();
           if let Some(client) = self.clients.get_mut(&prev_fd) {
-            client.send(kbd_id, 2, &[Arg::Uint(serial), Arg::Object(prev_surf)]);
+            for keyboard_id in keyboard_ids {
+              client.send(keyboard_id, 2, &[Arg::Uint(serial), Arg::Object(prev_surf)]);
+            }
             client.conn.flush();
           }
         }
         self.kbd_entered = false;
       }
 
-      let kbd_id = match self.clients.get(&fd) {
-        Some(c) => c.objects.iter().find(|(_, o)| matches!(o.role, Role::Keyboard)).map(|(&id, _)| id).unwrap_or(0),
+      let keyboard_ids = match self.clients.get(&fd) {
+        Some(c) => Self::keyboard_ids(c),
         None => return,
       };
-      if kbd_id == 0 {
+      if keyboard_ids.is_empty() {
         return;
       }
       let serial = self.next_serial();
@@ -10230,8 +10258,10 @@ impl Server {
       }
       let mods_serial = self.next_serial();
       let client = self.clients.get_mut(&fd).unwrap();
-      client.send(kbd_id, 1, &[Arg::Uint(serial), Arg::Object(surf_id), Arg::Array(keys)]);
-      client.send(kbd_id, 4, &[Arg::Uint(mods_serial), Arg::Uint(self.kbd_mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
+      for keyboard_id in keyboard_ids {
+        client.send(keyboard_id, 1, &[Arg::Uint(serial), Arg::Object(surf_id), Arg::Array(keys.clone())]);
+        client.send(keyboard_id, 4, &[Arg::Uint(mods_serial), Arg::Uint(self.kbd_mods), Arg::Uint(0), Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group)]);
+      }
       client.conn.flush();
       self.kbd_entered = true;
       self.kbd_client_fd = fd;
@@ -10247,16 +10277,18 @@ impl Server {
       return;
     }
     let fd = self.kbd_client_fd;
-    let keyboard_id = self.clients.get(&fd).and_then(Self::keyboard_id).unwrap_or(0);
-    if keyboard_id == 0 {
+    let keyboard_ids = self.clients.get(&fd).map(Self::keyboard_ids).unwrap_or_default();
+    if keyboard_ids.is_empty() {
       return;
     }
     let serial = self.next_serial();
     if let Some(client) = self.clients.get_mut(&fd) {
-      client.send(keyboard_id, 4, &[
-        Arg::Uint(serial), Arg::Uint(self.kbd_mods), Arg::Uint(0),
-        Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group),
-      ]);
+      for keyboard_id in keyboard_ids {
+        client.send(keyboard_id, 4, &[
+          Arg::Uint(serial), Arg::Uint(self.kbd_mods), Arg::Uint(0),
+          Arg::Uint(self.kbd_locked), Arg::Uint(self.kbd_group),
+        ]);
+      }
       client.conn.flush();
     }
   }
@@ -10846,6 +10878,14 @@ mod tests {
 
   fn r(x0: i32, y0: i32, x1: i32, y1: i32) -> Rect {
     Rect::new(x0, y0, x1, y1)
+  }
+
+  #[test]
+  fn keyboard_ids_include_every_bound_resource() {
+    let mut client = Client::new(-1);
+    client.objects.insert(41, Object::new(&protocol::WL_KEYBOARD, 7, Role::Keyboard));
+    client.objects.insert(17, Object::new(&protocol::WL_KEYBOARD, 7, Role::Keyboard));
+    assert_eq!(Server::keyboard_ids(&client), vec![17, 41]);
   }
 
   #[test]

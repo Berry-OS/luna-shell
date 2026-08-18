@@ -194,12 +194,45 @@ const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
 /// fixed 100 ms timeout produced a very visible 100 ms hitch and could release
 /// scanout resources while the kernel still owned them.
 const MIN_FLIP_EVENT_GRACE_MS: u64 = 20;
+const DRM_MODE_FLAG_INTERLACE: u32 = 1 << 4;
+const DRM_MODE_FLAG_DBLSCAN: u32 = 1 << 5;
 
-fn flip_event_grace_ms(vrefresh: u32) -> u64 {
-  // Some legacy drivers leave vrefresh at zero.  Treat implausible values as
-  // 60 Hz; using 1 Hz here would reintroduce a multi-second watchdog stall.
-  let refresh = if vrefresh >= 10 { vrefresh as u64 } else { 60 };
-  MIN_FLIP_EVENT_GRACE_MS.max((2000 + refresh - 1) / refresh)
+/// Return the mode cadence with enough precision for wl_output and watchdog
+/// pacing.  `vrefresh` is only an integer hint; deriving the value from the
+/// pixel clock preserves 59.94/74.97-style modes instead of rounding them to
+/// a different client cadence.
+fn mode_refresh_millihz(mode: &ModeInfo) -> u32 {
+  let mut denominator = (mode.htotal as u64).saturating_mul(mode.vtotal as u64);
+  if mode.clock != 0 && denominator != 0 {
+    let mut numerator = (mode.clock as u64).saturating_mul(1_000_000);
+    if mode.flags & DRM_MODE_FLAG_INTERLACE != 0 {
+      numerator = numerator.saturating_mul(2);
+    }
+    if mode.flags & DRM_MODE_FLAG_DBLSCAN != 0 {
+      denominator = denominator.saturating_mul(2);
+    }
+    if mode.vscan > 1 {
+      denominator = denominator.saturating_mul(mode.vscan as u64);
+    }
+    if denominator != 0 {
+      let mhz = (numerator.saturating_add(denominator / 2)) / denominator;
+      if mhz != 0 {
+        return mhz.min(u32::MAX as u64) as u32;
+      }
+    }
+  }
+  if mode.vrefresh >= 10 {
+    mode.vrefresh.saturating_mul(1000)
+  } else {
+    60_000
+  }
+}
+
+fn flip_event_grace_ms(refresh_millihz: u32) -> u64 {
+  // Some legacy drivers expose no usable timing.  Treat implausible values as
+  // 60 Hz; using a near-zero refresh here would create a multi-second stall.
+  let refresh = if refresh_millihz >= 10_000 { refresh_millihz as u64 } else { 60_000 };
+  MIN_FLIP_EVENT_GRACE_MS.max((2_000_000 + refresh - 1) / refresh)
 }
 
 /// Scanout resources that may still be live in the CRTC until the pending flip
@@ -652,6 +685,8 @@ impl DriBackend {
 impl Backend for DriBackend {
   fn size(&self) -> (u32, u32) { (self.width, self.height) }
 
+  fn refresh_millihz(&self) -> u32 { mode_refresh_millihz(&self.mode) }
+
   fn present(&mut self, fb: &Framebuffer) {
     self.present_damage(fb, fb.full_rect());
   }
@@ -801,7 +836,7 @@ impl Backend for DriBackend {
     // Two nominal refresh periods tolerate a scheduling slip at vblank.  If
     // the event is still absent, do a non-modesetting GETCRTC query and only
     // declare completion when the kernel confirms the exact pending fb.
-    let grace_ms = flip_event_grace_ms(self.mode.vrefresh);
+    let grace_ms = flip_event_grace_ms(mode_refresh_millihz(&self.mode));
     if self.flip_started.elapsed() < std::time::Duration::from_millis(grace_ms) {
       return None;
     }
@@ -978,10 +1013,11 @@ impl DriBackend {
         self.pending_fb_id = fb_id;
         self.flip_started = std::time::Instant::now();
         if self.present_trace {
+          let refresh_millihz = mode_refresh_millihz(&self.mode);
           eprintln!(
-            "[luna-present] submit fb={} refresh={}Hz",
+            "[luna-present] submit fb={} refresh={:.3}Hz",
             fb_id,
-            if self.mode.vrefresh >= 10 { self.mode.vrefresh } else { 60 },
+            refresh_millihz as f64 / 1000.0,
           );
         }
         return true;
@@ -1244,9 +1280,22 @@ mod tests {
 
   #[test]
   fn flip_event_grace_tracks_two_refresh_periods() {
-    assert_eq!(flip_event_grace_ms(60), 34);
-    assert_eq!(flip_event_grace_ms(30), 67);
-    assert_eq!(flip_event_grace_ms(144), MIN_FLIP_EVENT_GRACE_MS);
+    assert_eq!(flip_event_grace_ms(60_000), 34);
+    assert_eq!(flip_event_grace_ms(30_000), 67);
+    assert_eq!(flip_event_grace_ms(144_000), MIN_FLIP_EVENT_GRACE_MS);
     assert_eq!(flip_event_grace_ms(0), 34);
+  }
+
+  #[test]
+  fn mode_refresh_uses_pixel_clock_precision() {
+    let mut mode = ModeInfo::default();
+    mode.clock = 148_500;
+    mode.htotal = 2200;
+    mode.vtotal = 1125;
+    mode.vrefresh = 59; // prove the timing, not the rounded hint, wins
+    assert_eq!(mode_refresh_millihz(&mode), 60_000);
+
+    mode.clock = 148_352;
+    assert!((mode_refresh_millihz(&mode) as i64 - 59_940).abs() <= 1);
   }
 }

@@ -9020,6 +9020,8 @@ static void update_async_status(void) {
         const char* bat_icon = g_cached_bat >= 0 ? "\uf240" : "\uf1e6";
         if (g_cached_bat >= 0) snprintf(buf, sizeof(buf), "%d%%", g_cached_bat);
         else buf[0] = '\0';
+        /* Keep AC-only power status as compact as the other icon-only items. */
+        luna_update_classes(idx, "icon_only", g_cached_bat < 0 ? "icon_only" : NULL);
         if (g_mb_bat_icon_idx >= 0 &&
             text_would_change(g_mb_bat_icon_idx, bat_icon)) {
             luna_set_text_paint_only(g_mb_bat_icon_idx, bat_icon);

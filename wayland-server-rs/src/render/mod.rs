@@ -425,6 +425,13 @@ pub fn monotonic_millis() -> u32 {
 
 pub trait Backend {
     fn size(&self) -> (u32, u32);
+
+    /// Nominal output refresh rate in millihertz, as advertised by wl_output.
+    /// Backends without a physical mode keep the traditional 60 Hz default.
+    fn refresh_millihz(&self) -> u32 {
+        60_000
+    }
+
     fn present(&mut self, fb: &Framebuffer);
 
     /// Present a framebuffer whose changed pixels are bounded by `damage`.

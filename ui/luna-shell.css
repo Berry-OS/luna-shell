@@ -1118,3 +1118,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   font-size: 14px; font-weight: 600; line-height: 1.25;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* Compact icon-only status items: labels were removed from Wi-Fi/AC, so do
+ * not retain their old text-sized minimum hit boxes. */
+#mb_wifi { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
+#mb_bat.icon_only { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
