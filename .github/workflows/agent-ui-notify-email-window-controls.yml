@@ -4,18 +4,26 @@ on:
   push:
     branches:
       - agent/ui-notify-email-window-controls
+  pull_request:
+    branches:
+      - master
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
 
 jobs:
   patch-and-validate:
-    if: startsWith(github.event.head_commit.message, 'bootstrap: apply UI and window controls improvements')
+    if: github.event_name == 'pull_request' || startsWith(github.event.head_commit.message, 'bootstrap: apply UI and window controls improvements')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: agent/ui-notify-email-window-controls
+
+      - name: Normalize patch helper anchors
+        run: python3 tools/agent_patch_fixup.py
 
       - name: Apply targeted shell changes
         shell: bash
@@ -67,7 +75,7 @@ jobs:
       - name: Commit validated implementation
         if: success()
         run: |
-          rm -f tools/agent_patch_ui.py tools/agent_trigger.txt tools/agent_*_run.log .github/workflows/agent-ui-notify-email-window-controls.yml
+          rm -f tools/agent_patch_ui.py tools/agent_patch_fixup.py tools/agent_trigger.txt tools/agent_*_run.log .github/workflows/agent-ui-notify-email-window-controls.yml
           git add -A
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
