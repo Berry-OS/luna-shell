@@ -1,1 +1,0 @@
-cargo:rerun-if-changed=src/render/gpu_shim.c
