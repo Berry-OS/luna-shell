@@ -1,1 +1,1 @@
-trigger diagnostic retry
+trigger PR 10 base workflow
