@@ -1,0 +1,63 @@
+name: Apply requested Wayland fixes
+
+on:
+  push:
+    branches:
+      - agent/fix-wayland-pacing-focus-status
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure PR head checkout
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          HEAD_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          git checkout -B "$HEAD_BRANCH" "origin/$HEAD_BRANCH"
+
+      - name: Replace synchronous DRI pacing with event-loop pacing
+        run: |
+          git revert --no-commit abdfe3f897bc1ba1f3bd9ff3460fb8064b4696e9
+          git apply --recount .github/agent-async-server.patch
+
+      - name: Apply focus, window-list, and status-label fixes
+        run: python3 .github/agent-apply-wayland-fixes.py
+
+      - name: Validate Rust compositor
+        run: |
+          cargo check --manifest-path wayland-server-rs/Cargo.toml
+          cargo check --manifest-path wayland-server-rs/Cargo.toml --features dri
+          cargo test --manifest-path wayland-server-rs/Cargo.toml --features dri
+
+      - name: Validate requested behavior is represented in source
+        run: |
+          ! grep -q 'DriPacedBackend' wayland-server-rs/src/bin/server.rs
+          grep -q 'in_flight_frame_done' wayland-server-rs/src/server.rs
+          grep -q 'pending_activate = Some((fd, parent))' wayland-server-rs/src/server.rs
+          grep -q '"Window".to_string()' wayland-server-rs/src/shell_ipc.rs
+          ! grep -q 'else snprintf(buf, sizeof(buf), "AC")' ui/luna-shell.c
+
+      - name: Remove one-shot files and publish final source diff
+        run: |
+          rm -f .github/agent-async-server.patch \
+                .github/agent-apply-wayland-fixes.py \
+                .github/workflows/apply-agent-wayland-fixes.yml
+          rm -rf target
+          rm -f Cargo.lock
+          git add -A
+          git diff --cached --check
+          git commit -m "wayland: smooth pacing and fix window focus tracking"
+          HEAD_BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          git push origin HEAD:"$HEAD_BRANCH"
