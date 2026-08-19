@@ -1,0 +1,121 @@
+name: Apply shell interaction patch
+
+on:
+  push:
+    branches:
+      - agent/fix-shell-render-tray-dock
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-shell-render-tray-dock
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Patch shell sources
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          c_path = Path('ui/luna-shell.c')
+          c = c_path.read_text()
+
+          # The old 12 Hz background cap is visibly stepped. Keep the existing
+          # interaction/idle gating, but present active wallpaper motion at 30 Hz.
+          c, n = re.subn(r'#define LUNA_WL_BG_FRAME_SEC\s+\(1\.0 / 12\.0\)',
+                         '#define LUNA_WL_BG_FRAME_SEC      (1.0 / 30.0)', c, count=1)
+          assert n == 1, 'Wayland background cadence definition not found'
+          c, n = re.subn(r'#define LUNA_SINGLE_BG_FRAME_SEC\s+\(1\.0 / 12\.0\)',
+                         '#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 30.0)', c, count=1)
+          assert n == 1, 'single-buffer background cadence definition not found'
+          c = c.replace('/* Animation cadence.  Idle aurora/stars only (no open windows).  12 Hz is\n * enough for the empty-desktop wallpaper and avoids the old 30 Hz full-screen\n * commit storm that showed up as a regular hitch on the console session. */',
+                        '/* Animation cadence. Idle aurora/stars only (no open windows). 30 Hz keeps\n * slow wallpaper motion visually smooth while the existing desktop-busy gate\n * prevents full-screen background commits underneath application windows. */', 1)
+
+          # Parent tray slots own the interaction. Also accept the glyph hover so
+          # custom skins that do not set pointer-events:none still get tips.
+          old_hover = '''        LunaElement* slot = luna_element_at(idx);\n        if (slot && slot->is_hovered) { next = s; break; }'''
+          new_hover = '''        LunaElement* slot = luna_element_at(idx);\n        LunaElement* glyph = g_tray_glyph_idx[s] >= 0\n                           ? luna_element_at(g_tray_glyph_idx[s]) : NULL;\n        if ((slot && slot->is_hovered) || (glyph && glyph->is_hovered)) {\n            next = s;\n            break;\n        }'''
+          assert old_hover in c, 'tray hover block not found'
+          c = c.replace(old_hover, new_hover, 1)
+
+          # Status/SNI entries and running-app entries must coexist. Previously
+          # windows were appended only when the status area was completely empty.
+          old_windows = '''    /* No SNI applets: keep compositor running-app glyphs so the tray\n     * is not empty on a fresh session. */\n    if (used == 0) {\n        for (int i = 0; i < g_tray_count && used < MAX_TRAY_SLOTS; i++) {\n            int idx = g_tray_slot_idx[used];\n            if (idx < 0) { used++; continue; }\n            LunaTrayEntry* t = &g_tray[i];\n            set_hidden(idx, 0);\n            g_tray_sni_kind[used] = 0;\n            snprintf(g_tray_slot_key[used], sizeof(g_tray_slot_key[used]), "%.63s", t->id);\n            tray_apply_glyph(idx, g_tray_glyph_idx[used], t->icon);\n            tray_slot_style(idx, t);\n            used++;\n        }\n    }'''
+          new_windows = '''    /* Keep compact running-app entries alongside SNI/compositor status\n     * entries. The previous used == 0 fallback made the window list disappear\n     * as soon as any real status icon was present. */\n    if (g_settings.window_tray_icons) {\n        for (int i = 0; i < g_tray_count && used < MAX_TRAY_SLOTS; i++) {\n            LunaTrayEntry* t = &g_tray[i];\n            if (!tray_key_is_window(t->id)) continue;\n            int idx = g_tray_slot_idx[used];\n            if (idx < 0) { used++; continue; }\n            set_hidden(idx, 0);\n            g_tray_sni_kind[used] = 0;\n            g_tray_sni_service[used][0] = 0;\n            g_tray_sni_path[used][0] = 0;\n            snprintf(g_tray_slot_key[used], sizeof(g_tray_slot_key[used]), "%.63s", t->id);\n            tray_apply_glyph(idx, g_tray_glyph_idx[used], t->icon);\n            tray_slot_style(idx, t);\n            used++;\n        }\n    }'''
+          assert old_windows in c, 'running-app tray fallback block not found'
+          c = c.replace(old_windows, new_windows, 1)
+
+          # Dock width is now intrinsic CSS sizing. Remove the count-to-class
+          # table and its repeated class mutations.
+          c = c.replace('''static void apply_dock_app_settings(void) {\n    int visible = 0;\n    int dock_idx = luna_get_element_by_id("dock");''',
+                        '''static void apply_dock_app_settings(void) {''', 1)
+          c = c.replace('''            set_hidden(idx, !g_apps[i].dock_visible);\n            if (g_apps[i].dock_visible) visible++;''',
+                        '''            set_hidden(idx, !g_apps[i].dock_visible);''', 1)
+          old_dock_table = '''    /* Keep the floating bar centred and remove the empty space left by hidden\n     * launchers.  The two permanent items (Launchpad and Trash) and separator\n     * account for the fixed 158 px; each visible app contributes 64 px. */\n    if (dock_idx >= 0) {\n        char klass[32];\n        for (int i = 0; i <= 6; i++) {\n            snprintf(klass, sizeof(klass), "dock_apps_%d", i);\n            luna_update_classes(dock_idx, klass, NULL);\n        }\n        if (visible > 6) visible = 6;\n        snprintf(klass, sizeof(klass), "dock_apps_%d", visible);\n        luna_update_classes(dock_idx, NULL, klass);\n    }\n'''
+          assert old_dock_table in c, 'dock width class table not found'
+          c = c.replace(old_dock_table,
+                        '    /* #dock uses fit-content, so hidden launchers collapse automatically. */\n', 1)
+          c_path.write_text(c)
+
+          css_path = Path('skins/default/style.css')
+          css = css_path.read_text()
+          old_dock_css = '''#dock {\n  position: absolute; bottom: 14px; left: 50%;\n  margin-left: -271px;\n  width: 542px; height: 82px;'''
+          new_dock_css = '''#dock {\n  position: absolute; bottom: 14px; left: 50%;\n  margin-left: 0;\n  width: fit-content; height: 82px;\n  transform: translateX(-50%);'''
+          assert old_dock_css in css, 'dock base CSS not found'
+          css = css.replace(old_dock_css, new_dock_css, 1)
+          css, n = re.subn(r'\n#dock\.dock_apps_0 \{[^\n]+\}\n#dock\.dock_apps_1 \{[^\n]+\}\n#dock\.dock_apps_2 \{[^\n]+\}\n#dock\.dock_apps_3 \{[^\n]+\}\n#dock\.dock_apps_4 \{[^\n]+\}\n#dock\.dock_apps_5 \{[^\n]+\}\n#dock\.dock_apps_6 \{[^\n]+\}', '', css, count=1)
+          assert n == 1, 'dock width class CSS table not found'
+
+          old_tip = '''.tray_item { position: relative; }\n.tray_tip {'''
+          new_tip = '''.tray_item { position: relative; }\n/* The slot owns hit-testing. This matches the other menubar buttons and keeps\n * hover/right-click behavior independent of which glyph pixel was hit. */\n.tray_glyph { pointer-events: none; }\n.tray_tip {'''
+          assert old_tip in css, 'tray tip CSS anchor not found'
+          css = css.replace(old_tip, new_tip, 1)
+          css = css.replace('.tray_item.tip_open .tray_tip { opacity: 1; }',
+                            '.tray_item:hover .tray_tip,\n.tray_item.tip_open .tray_tip { opacity: 1; }', 1)
+          css_path.write_text(css)
+
+          mk_path = Path('Makefile')
+          mk = mk_path.read_text()
+          # The single-file luna-ui umbrella header owns its implementation
+          # includes. Do not make the shell target depend on private stb headers
+          # that may be removed/refactored upstream.
+          stale = '''            $(UI_DIR)/luna-bluetooth.h $(UI_DIR)/luna-sni.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \\\n            $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \\\n            $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h'''
+          clean = '''            $(UI_DIR)/luna-bluetooth.h $(UI_DIR)/luna-sni.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \\\n            $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h'''
+          assert stale in mk, 'stale private-header prerequisites not found'
+          mk = mk.replace(stale, clean, 1)
+          mk_path.write_text(mk)
+
+          # runtime-fixes.css was only used to bootstrap this branch before the
+          # source stylesheet could be patched atomically.
+          bootstrap = Path('skins/default/runtime-fixes.css')
+          if bootstrap.exists():
+              bootstrap.unlink()
+          PY
+
+      - name: Validate patch
+        shell: bash
+        run: |
+          git diff --check
+          grep -q 'LUNA_WL_BG_FRAME_SEC      (1.0 / 30.0)' ui/luna-shell.c
+          grep -q 'width: fit-content; height: 82px;' skins/default/style.css
+          grep -q '.tray_glyph { pointer-events: none; }' skins/default/style.css
+          ! grep -q 'luna-ui/stb_truetype.h' Makefile
+          make -n luna-shell LUNA_WAYLAND_CLIENT=system >/tmp/luna-shell-make-plan.txt
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          rm -f .github/workflows/agent-shell-patch.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix shell tray interactions and rendering'
+          git push origin HEAD:agent/fix-shell-render-tray-dock
