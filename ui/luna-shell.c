@@ -2028,11 +2028,11 @@ static int      g_wl_poll_timeout_ms = 0;
  * Keep a separate bit for them: g_surf_dirty describes Wayland layers, while
  * this flag says that the KMS/X11 framebuffer needs another complete frame. */
 static int      g_frame_dirty = 1;
-/* Animation cadence.  Idle aurora/stars only (no open windows).  12 Hz is
- * enough for the empty-desktop wallpaper and avoids the old 30 Hz full-screen
- * commit storm that showed up as a regular hitch on the console session. */
-#define LUNA_WL_BG_FRAME_SEC      (1.0 / 12.0)
-#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 12.0)
+/* Animation cadence. Idle aurora/stars only (no open windows). 30 Hz keeps
+ * slow wallpaper motion visually smooth while the existing desktop-busy gate
+ * prevents full-screen background commits underneath application windows. */
+#define LUNA_WL_BG_FRAME_SEC      (1.0 / 30.0)
+#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 30.0)
 /* A delayed event or maintenance read must not turn one missed frame into a
  * large easing jump.  CSS keyframes use absolute time; this only bounds the
  * interactive interpolation path. */
@@ -2646,7 +2646,12 @@ static int tray_sync_hover_tip(void) {
         int idx = g_tray_slot_idx[s];
         if (idx < 0 || !tray_key_is_window(g_tray_slot_key[s])) continue;
         LunaElement* slot = luna_element_at(idx);
-        if (slot && slot->is_hovered) { next = s; break; }
+        LunaElement* glyph = g_tray_glyph_idx[s] >= 0
+                           ? luna_element_at(g_tray_glyph_idx[s]) : NULL;
+        if ((slot && slot->is_hovered) || (glyph && glyph->is_hovered)) {
+            next = s;
+            break;
+        }
     }
     if (next == g_tray_hover_slot) return 0;
     if (g_tray_hover_slot >= 0) {
@@ -2716,15 +2721,19 @@ static void update_tray_ui(void) {
         used++;
     }
 
-    /* No SNI applets: keep compositor running-app glyphs so the tray
-     * is not empty on a fresh session. */
-    if (used == 0) {
+    /* Keep compact running-app entries alongside SNI/compositor status
+     * entries. The previous used == 0 fallback made the window list disappear
+     * as soon as any real status icon was present. */
+    if (g_settings.window_tray_icons) {
         for (int i = 0; i < g_tray_count && used < MAX_TRAY_SLOTS; i++) {
+            LunaTrayEntry* t = &g_tray[i];
+            if (!tray_key_is_window(t->id)) continue;
             int idx = g_tray_slot_idx[used];
             if (idx < 0) { used++; continue; }
-            LunaTrayEntry* t = &g_tray[i];
             set_hidden(idx, 0);
             g_tray_sni_kind[used] = 0;
+            g_tray_sni_service[used][0] = 0;
+            g_tray_sni_path[used][0] = 0;
             snprintf(g_tray_slot_key[used], sizeof(g_tray_slot_key[used]), "%.63s", t->id);
             tray_apply_glyph(idx, g_tray_glyph_idx[used], t->icon);
             tray_slot_style(idx, t);
@@ -6834,30 +6843,15 @@ static void settings_update_sound_status(void) {
  * remain available, so removing an app from the Dock never makes it
  * inaccessible. */
 static void apply_dock_app_settings(void) {
-    int visible = 0;
-    int dock_idx = luna_get_element_by_id("dock");
     for (int i = 0; i < APP_COUNT; i++) {
         char id[64];
         snprintf(id, sizeof(id), "dock_%s", g_apps[i].key);
         int idx = luna_get_element_by_id(id);
         if (idx >= 0) {
             set_hidden(idx, !g_apps[i].dock_visible);
-            if (g_apps[i].dock_visible) visible++;
         }
     }
-    /* Keep the floating bar centred and remove the empty space left by hidden
-     * launchers.  The two permanent items (Launchpad and Trash) and separator
-     * account for the fixed 158 px; each visible app contributes 64 px. */
-    if (dock_idx >= 0) {
-        char klass[32];
-        for (int i = 0; i <= 6; i++) {
-            snprintf(klass, sizeof(klass), "dock_apps_%d", i);
-            luna_update_classes(dock_idx, klass, NULL);
-        }
-        if (visible > 6) visible = 6;
-        snprintf(klass, sizeof(klass), "dock_apps_%d", visible);
-        luna_update_classes(dock_idx, NULL, klass);
-    }
+    /* #dock uses fit-content, so hidden launchers collapse automatically. */
     luna_mark_layout_dirty();
     shell_request_repaint(2);
 }

@@ -1405,8 +1405,9 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 /* ── Dock ── */
 #dock {
   position: absolute; bottom: 14px; left: 50%;
-  margin-left: -271px;
-  width: 542px; height: 82px;
+  margin-left: 0;
+  width: fit-content; height: 82px;
+  transform: translateX(-50%);
   background: linear-gradient(165deg, rgba(22, 24, 48, 0.72) 0%, rgba(12, 13, 28, 0.82) 100%);
   backdrop-filter: blur(36px) saturate(1.8);
   -webkit-backdrop-filter: blur(36px) saturate(1.8);
@@ -1416,13 +1417,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   display: flex; flex-direction: row; align-items: center; gap: 10px;
   padding: 8px 14px; z-index: 450;
 }
-#dock.dock_apps_0 { width: 158px; margin-left: -79px; }
-#dock.dock_apps_1 { width: 222px; margin-left: -111px; }
-#dock.dock_apps_2 { width: 286px; margin-left: -143px; }
-#dock.dock_apps_3 { width: 350px; margin-left: -175px; }
-#dock.dock_apps_4 { width: 414px; margin-left: -207px; }
-#dock.dock_apps_5 { width: 478px; margin-left: -239px; }
-#dock.dock_apps_6 { width: 542px; margin-left: -271px; }
 .dock_item { position: relative; width: 54px; height: 66px; flex: 0 0 54px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; outline: 2px solid transparent; outline-offset: 2px; border-radius: 17px; }
 .dock_item:focus-visible { outline-color: var(--luna-gold); }
 /* Dock motion is stylesheet-only (no per-frame C interpolation). */
@@ -1527,6 +1521,9 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .notify_legacy { display: none; }
 
 .tray_item { position: relative; }
+/* The slot owns hit-testing. This matches the other menubar buttons and keeps
+ * hover/right-click behavior independent of which glyph pixel was hit. */
+.tray_glyph { pointer-events: none; }
 .tray_tip {
   position: absolute; top: 3px; right: 28px; min-width: 72px; max-width: 260px;
   padding: 5px 8px; border-radius: 6px; background-color: rgba(17, 18, 28, 0.94);
@@ -1535,4 +1532,5 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   opacity: 0; pointer-events: none; z-index: 1200;
   transition: opacity 120ms ease-out;
 }
+.tray_item:hover .tray_tip,
 .tray_item.tip_open .tray_tip { opacity: 1; }
