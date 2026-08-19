@@ -637,6 +637,7 @@ typedef struct {
     int  classic_titlebar;
     int  super_shortcuts;
     int  active_window_outline; /* draw the focused-window frame */
+    int  window_list_visible;   /* top-center text window list */
     int  window_tray_icons;     /* compact running-app icons in status area */
     int  cascade_new_windows;   /* offset newly mapped windows */
     int  dock_enabled;       /* show the floating dock bar */
@@ -708,6 +709,7 @@ static void settings_defaults(void) {
     g_settings.classic_titlebar = 0;
     g_settings.super_shortcuts = 1;
     g_settings.active_window_outline = 1;
+    g_settings.window_list_visible = 1;
     g_settings.window_tray_icons = 1;
     g_settings.cascade_new_windows = 1;
     g_settings.dock_enabled = 1;
@@ -814,6 +816,8 @@ static void settings_load(void) {
                 g_settings.super_shortcuts = atoi(val) != 0;
             else if (!strcmp(key, "active_window_outline"))
                 g_settings.active_window_outline = atoi(val) != 0;
+            else if (!strcmp(key, "window_list_visible"))
+                g_settings.window_list_visible = atoi(val) != 0;
             else if (!strcmp(key, "window_tray_icons"))
                 g_settings.window_tray_icons = atoi(val) != 0;
             else if (!strcmp(key, "cascade_new_windows"))
@@ -899,6 +903,7 @@ static void settings_save(void) {
     fprintf(f, "classic_titlebar=%d\n", g_settings.classic_titlebar);
     fprintf(f, "super_shortcuts=%d\n", g_settings.super_shortcuts);
     fprintf(f, "active_window_outline=%d\n", g_settings.active_window_outline);
+    fprintf(f, "window_list_visible=%d\n", g_settings.window_list_visible);
     fprintf(f, "window_tray_icons=%d\n", g_settings.window_tray_icons);
     fprintf(f, "cascade_new_windows=%d\n", g_settings.cascade_new_windows);
     fprintf(f, "dock_enabled=%d\n", g_settings.dock_enabled);
@@ -2286,6 +2291,10 @@ static void tray_slot_style(int slot, LunaTrayEntry* t) {
 }
 
 static void update_window_list_ui(void) {
+    int list_idx = luna_get_element_by_id("win_list");
+    if (list_idx >= 0)
+        set_hidden(list_idx, !g_settings.window_list_visible);
+
     /* Registration order: focus and minimize only restyle the chip so the
      * list does not jump when the user switches windows. */
     int n = g_win_count < MAX_WIN_SLOTS ? g_win_count : MAX_WIN_SLOTS;
@@ -2618,6 +2627,38 @@ static void tray_sync_window_tips_and_visibility(void) {
     }
     if (g_tray_area_idx >= 0)
         set_hidden(g_tray_area_idx, visible == 0);
+}
+
+
+static int g_tray_hover_slot = -1;
+
+static int tray_close_hover_tip(void) {
+    if (g_tray_hover_slot < 0) return 0;
+    int idx = g_tray_slot_idx[g_tray_hover_slot];
+    if (idx >= 0) luna_update_classes(idx, "tip_open", NULL);
+    g_tray_hover_slot = -1;
+    return 1;
+}
+
+static int tray_sync_hover_tip(void) {
+    int next = -1;
+    for (int s = 0; s < MAX_TRAY_SLOTS; s++) {
+        int idx = g_tray_slot_idx[s];
+        if (idx < 0 || !tray_key_is_window(g_tray_slot_key[s])) continue;
+        LunaElement* slot = luna_element_at(idx);
+        if (slot && slot->is_hovered) { next = s; break; }
+    }
+    if (next == g_tray_hover_slot) return 0;
+    if (g_tray_hover_slot >= 0) {
+        int old_idx = g_tray_slot_idx[g_tray_hover_slot];
+        if (old_idx >= 0) luna_update_classes(old_idx, "tip_open", NULL);
+    }
+    if (next >= 0) {
+        int new_idx = g_tray_slot_idx[next];
+        if (new_idx >= 0) luna_update_classes(new_idx, NULL, "tip_open");
+    }
+    g_tray_hover_slot = next;
+    return 1;
 }
 
 static void update_tray_ui(void) {
@@ -6902,6 +6943,7 @@ static void settings_populate_ui(void) {
     settings_mark_toggle("wm_classic_titlebar", g_settings.classic_titlebar);
     settings_mark_toggle("wm_shortcuts", g_settings.super_shortcuts);
     settings_mark_toggle("wm_focus_outline", g_settings.active_window_outline);
+    settings_mark_toggle("wm_window_list", g_settings.window_list_visible);
     settings_mark_toggle("wm_window_tray", g_settings.window_tray_icons);
     settings_mark_toggle("wm_cascade", g_settings.cascade_new_windows);
     settings_mark_toggle("wm_dock", g_settings.dock_enabled);
@@ -7230,6 +7272,7 @@ static void on_wm_toggle(LunaElement* e) {
     else if (!strcmp(id, "wm_wallpaper_motion")) value = &g_settings.wallpaper_animation;
     else if (!strcmp(id, "wm_restore")) value = &g_settings.session_restore;
     else if (!strcmp(id, "wm_focus_outline")) value = &g_settings.active_window_outline;
+    else if (!strcmp(id, "wm_window_list")) value = &g_settings.window_list_visible;
     else if (!strcmp(id, "wm_window_tray")) value = &g_settings.window_tray_icons;
     else if (!strcmp(id, "wm_cascade")) value = &g_settings.cascade_new_windows;
     if (!value) return;
@@ -7241,6 +7284,7 @@ static void on_wm_toggle(LunaElement* e) {
         apply_dock_visibility();
     else
         apply_wm_settings();
+    if (!strcmp(id, "wm_window_list")) update_window_list_ui();
     if (!strcmp(id, "wm_window_tray")) update_tray_ui();
     settings_save();
     shell_request_repaint(-1);
@@ -9056,7 +9100,8 @@ static void on_tray_click(LunaElement* e) {
             LunaElement* slot_el = luna_element_at(idx);
             int ax = slot_el ? (int)slot_el->x : 0;
             int ay = slot_el ? (int)slot_el->y : 0;
-            if (g_tray_sni_kind[slot]) {
+            if (g_tray_sni_kind[slot] &&
+                !tray_key_is_window(g_tray_slot_key[slot])) {
                 luna_sni_request_activate(g_tray_sni_service[slot],
                                           g_tray_sni_path[slot], ax, ay);
                 return;
@@ -9671,7 +9716,7 @@ static void bind_indices(void) {
         const char* toggle_ids[] = {
             "wm_snap", "wm_tile", "wm_top_maximize", "wm_double_click", "wm_classic_titlebar", "wm_shortcuts",
             "wm_dock", "wm_widgets", "wm_dock_mag", "wm_wallpaper_motion", "wm_restore",
-            "wm_focus_outline", "wm_window_tray", "wm_cascade"
+            "wm_focus_outline", "wm_window_list", "wm_window_tray", "wm_cascade"
         };
         for (size_t i = 0; i < sizeof(toggle_ids) / sizeof(toggle_ids[0]); i++)
             wire_subtree(luna_get_element_by_id(toggle_ids[i]), on_wm_toggle);
@@ -10919,8 +10964,8 @@ typedef struct {
 #define ZWLR_ANCHOR_ALL    (ZWLR_ANCHOR_TOP|ZWLR_ANCHOR_BOTTOM|ZWLR_ANCHOR_LEFT|ZWLR_ANCHOR_RIGHT)
 
 static LunaSurface g_surfs[] = {
-    /* bg: wallpaper only. exclusive_zone=0 + empty input region so GTK/xdg
-     * windows above it receive pointer/keyboard; never steal the seat. */
+    /* bg: wallpaper + desktop widgets. The client publishes only widget
+     * rectangles as input; blank wallpaper remains click-through. */
     { .name="bg",           .root_id="bg_layer",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, .anchor=ZWLR_ANCHOR_ALL,
       .exclusive_zone=0, .is_kbd=0 },
@@ -11023,6 +11068,11 @@ void luna_app_request_redraw(void) {
  * wallpaper animation supplies that frame.  KMS/X11 use one framebuffer, so
  * any pending frame (or the animation cadence) can absorb the update. */
 static int shell_bg_passive_refresh_ready(void) {
+    /* Live desktop widgets are useful only if their samples can schedule a
+     * repaint. luna-ui tracks element damage and the Wayland backend uses
+     * swap-with-damage when available, so this no longer implies a full-screen
+     * render every second. */
+    if (g_settings.widgets_enabled) return 1;
     if (g_backend == &g_wl_backend) {
         if (g_surf_dirty & (1u << LUNA_SURF_BG)) return 1;
         return g_bg_animated && !shell_desktop_busy();
@@ -11336,8 +11386,9 @@ static void wl_native_dialog_drag_end(void) {
 
 static void wl_forward_pointer_motion(void) {
     if (!g_pointer_surface) return;
-    if (luna_mouse_move_changed(g_wl.mouse_x, g_wl.mouse_y))
-        shell_request_repaint((int)(g_pointer_surface - g_surfs));
+    int changed = luna_mouse_move_changed(g_wl.mouse_x, g_wl.mouse_y);
+    if (tray_sync_hover_tip()) changed = 1;
+    if (changed) shell_request_repaint((int)(g_pointer_surface - g_surfs));
 }
 
 static int wl_scale_override(void) {
@@ -11505,6 +11556,8 @@ static void wlp_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surfa
 }
 static void wlp_leave(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* surf) {
     (void)d; (void)p; (void)s; (void)surf;
+    if (tray_close_hover_tip() && g_pointer_surface)
+        shell_request_repaint((int)(g_pointer_surface - g_surfs));
     g_pointer_surface = NULL;
     g_wl.pointer_entered = 0;
     g_cursor_present = 0;
@@ -12089,7 +12142,54 @@ static void skin_apply_chrome(int skin_idx) {
 }
 
 static void surf_update_input_region(LunaSurface* s) {
-    if (!s->wl_surf || !s->was_shown || s->input_root_idx < 0) return;
+    if (!s || !s->wl_surf || !s->was_shown) return;
+
+    if (s == &g_surfs[LUNA_SURF_BG]) {
+        static uint64_t last_sig = 0;
+        static int have_sig = 0;
+        uint64_t sig = 1469598103934665603ULL;
+        int rects[3][4];
+        int rect_count = 0;
+        const char* ids[] = { "widget_clock", "widget_stats", "widget_weather" };
+        if (g_settings.widgets_enabled) {
+            for (int i = 0; i < 3; i++) {
+                int idx = luna_get_element_by_id(ids[i]);
+                LunaElement* e = idx >= 0 ? luna_element_at(idx) : NULL;
+                if (!e || e->w <= 0.0f || e->h <= 0.0f) continue;
+                int x = (int)floorf(e->x - s->doc_x);
+                int y = (int)floorf(e->y - s->doc_y);
+                int w = (int)ceilf(e->w);
+                int h = (int)ceilf(e->h);
+                if (w <= 0 || h <= 0) continue;
+                rects[rect_count][0] = x;
+                rects[rect_count][1] = y;
+                rects[rect_count][2] = w;
+                rects[rect_count][3] = h;
+                rect_count++;
+                uint64_t vals[] = { (uint32_t)x, (uint32_t)y, (uint32_t)w, (uint32_t)h };
+                for (int v = 0; v < 4; v++) {
+                    sig ^= vals[v];
+                    sig *= 1099511628211ULL;
+                }
+            }
+        }
+        sig ^= (uint64_t)rect_count;
+        sig *= 1099511628211ULL;
+        if (have_sig && sig == last_sig) return;
+
+        struct wl_region* region = wl_compositor_create_region(g_wl.compositor);
+        if (!region) return;
+        for (int i = 0; i < rect_count; i++)
+            wl_region_add(region, rects[i][0], rects[i][1], rects[i][2], rects[i][3]);
+        wl_surface_set_input_region(s->wl_surf, region);
+        wl_region_destroy(region);
+        wl_surface_commit(s->wl_surf);
+        last_sig = sig;
+        have_sig = 1;
+        return;
+    }
+
+    if (s->input_root_idx < 0) return;
     /* While the native layer is sliding under a frozen DOM box, box-doc
      * deltas are meaningless and would walk the input region off the chrome. */
     if (g_wl_dialog_drag.active && g_wl_dialog_drag.surf == s) return;

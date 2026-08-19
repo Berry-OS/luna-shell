@@ -8599,6 +8599,7 @@ impl Server {
         let focused = self.focused_client_fd == fd && self.focused_surface_id == sid;
         sig = Self::sig_mix(sig, ssd as u64);
         sig = Self::sig_mix(sig, focused as u64);
+        sig = Self::sig_mix(sig, self.wm_focus_outline as u64);
         if windowed {
           // Layer-shell origin is already in `dx/dy`; do not hash surface.x/y.
         } else if let Some((gx, gy, gw, gh)) = self.surface_geometry(fd, sid) {
@@ -8611,7 +8612,7 @@ impl Server {
           // `draw_ssd_titlebar` sits `wm_ssd_bar_h` above it; 4 px of slack keeps the
           // tracked rect a superset of every pixel the chrome touches.
           let maxed_or_full = tl.maximized || tl.fullscreen;
-          if ssd || (focused && !maxed_or_full) {
+          if ssd || (focused && self.wm_focus_outline && !maxed_or_full) {
             let top = if ssd { gy - self.wm_ssd_bar_h } else { gy };
             rect = rect.union(&Rect::new(gx - 4, top - 4, gx + gw + 4, gy + gh + 4));
           }
@@ -8735,8 +8736,8 @@ impl Server {
             if !maxed_or_full {
               self.draw_window_frame(fx, fy, fw, fh, true, focused);
             }
-          } else if focused && !maxed_or_full {
-            // CSD window: draw a focus ring so the active window is visually distinct.
+          } else if focused && self.wm_focus_outline && !maxed_or_full {
+            // CSD window: draw the optional focus ring only when enabled.
             if let Some((fx, fy, fw, fh)) = self.surface_geometry(*fd, *sid) {
               self.draw_window_frame(fx, fy, fw, fh, false, true);
             }
@@ -8811,24 +8812,35 @@ impl Server {
     self.compose_layer_index = layer_index;
     self.compose_toplevel_index = toplevel_index;
 
-    // Asynchronous DRM backends still own this frame until the page-flip event
-    // arrives.  Do not tell clients to render/reuse buffers early.
+    // DRM may still own submitted buffers until page-flip completion. Frame
+    // callbacks can run immediately so clients prepare the next frame in parallel;
+    // buffer releases remain deferred by finish_or_defer_presentation_side_effects().
     self.finish_or_defer_presentation_side_effects();
   }
 
-  /// After a present call, either complete immediately (synchronous/no-op
-  /// backend) or move the current frame's callbacks/releases into the one
-  /// in-flight KMS slot.  The run loop never submits a second frame while
-  /// present_busy() is true, so there can be at most one such batch.
+  /// wl_surface.frame is a scheduling hint, not a buffer-lifetime fence.
+  /// Let clients prepare their next frame as soon as this repaint is submitted,
+  /// while keeping wl_buffer.release tied to the actual KMS page-flip completion.
+  /// The run loop still keeps only one KMS present in flight via present_busy().
   fn finish_or_defer_presentation_side_effects(&mut self) {
-    if self.frame_done.is_empty() && self.buffer_release.is_empty() {
+    if !self.frame_done.is_empty() {
+      let mut no_releases = Vec::new();
+      Self::flush_presentation_queues(
+        &mut self.clients,
+        &mut no_releases,
+        &mut self.frame_done,
+        now_ms(),
+      );
+    }
+
+    if self.buffer_release.is_empty() {
       return;
     }
+
     if self.backend.present_busy() {
       debug_assert!(self.in_flight_frame_done.is_empty());
       debug_assert!(self.in_flight_buffer_release.is_empty());
       self.in_flight_buffer_release.append(&mut self.buffer_release);
-      self.in_flight_frame_done.append(&mut self.frame_done);
     } else {
       self.flush_presentation_side_effects();
     }
@@ -9409,6 +9421,82 @@ impl Server {
         let (w, h) = Self::surface_tree_size(client, surf_id).unwrap_or((gw, gh));
         best = Some((10, stack, fd, surf_id, ptr_id, kbd_id, w, h, s.x, s.y));
         break;
+      }
+    }
+
+
+    // 3) BACKGROUND is normally click-through, but Luna Shell deliberately
+    // publishes a sparse wl_surface input region for desktop widgets. Consider
+    // it only when no overlay/window matched, so widgets remain clickable on the
+    // desktop without ever stealing pointer input from an application above.
+    if best.is_none() {
+      'outer_bg: for (&fd, client) in &self.clients {
+        let (ptr_id, _) = seat_ids(client);
+        if ptr_id == 0 {
+          continue;
+        }
+        for (&surf_id, obj) in &client.objects {
+          let Role::Surface(s) = &obj.role else { continue };
+          if !s.mapped || s.current_buffer.is_none() {
+            continue;
+          }
+          let Some(layer_id) = s.layer_surface_id else { continue };
+          let Some(Object {
+            role: Role::LayerSurface {
+              layer,
+              anchor,
+              size_w,
+              size_h,
+              margin_top,
+              margin_right,
+              margin_bottom,
+              margin_left,
+              ..
+            },
+            ..
+          }) = client.objects.get(&layer_id)
+          else {
+            continue;
+          };
+          if *layer != 0 {
+            continue;
+          }
+          if matches!(&s.input_region, Some(r) if r.is_empty()) {
+            continue;
+          }
+          let (ox, oy, w, h) = layer_surface_rect(
+            bw,
+            bh,
+            *anchor,
+            *size_w,
+            *size_h,
+            *margin_top,
+            *margin_right,
+            *margin_bottom,
+            *margin_left,
+          );
+          if px < ox
+            || py < oy
+            || px >= ox + w as i32
+            || py >= oy + h as i32
+            || !Self::surface_input_hit(s, px - ox, py - oy)
+          {
+            continue;
+          }
+          best = Some((
+            0,
+            self.stack_index(fd, surf_id),
+            fd,
+            surf_id,
+            ptr_id,
+            0,
+            w as i32,
+            h as i32,
+            ox,
+            oy,
+          ));
+          break 'outer_bg;
+        }
       }
     }
 

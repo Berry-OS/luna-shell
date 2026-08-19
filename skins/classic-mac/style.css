@@ -155,11 +155,11 @@ html, body { background: var(--mac-desk); color: var(--mac-ink); }
 
 .tray_item { position: relative; }
 .tray_tip {
-  position: absolute; top: 30px; right: 0; min-width: 72px; max-width: 260px;
+  position: absolute; top: 3px; right: 28px; min-width: 72px; max-width: 260px;
   padding: 5px 8px; border-radius: 6px; background-color: rgba(17, 18, 28, 0.94);
   color: rgba(255, 255, 255, 0.96); font-size: 11px; line-height: 14px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   opacity: 0; pointer-events: none; z-index: 1200;
   transition: opacity 120ms ease-out;
 }
-.tray_item:hover .tray_tip, .tray_item:focus-visible .tray_tip { opacity: 1; }
+.tray_item.tip_open .tray_tip { opacity: 1; }
