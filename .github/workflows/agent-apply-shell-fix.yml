@@ -77,3 +77,5 @@ jobs:
           git add -A
           git commit -m "fix shell asset sync and frame pacing"
           git push origin "HEAD:${GITHUB_REF_NAME}"
+
+# This file is intentionally removed by the validated commit above.
