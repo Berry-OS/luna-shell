@@ -1,0 +1,11 @@
+# Generated Luna shell embed headers. They are rebuilt from skins/default by Makefile.
+/ui/luna-shell.css.h
+/ui/luna-shell.html.h
+
+# Local build outputs.
+/luna-shell
+/luna-clipboard
+/luna-tray-notify
+/target/
+/rpmbuild/
+/.rpm-dist/
