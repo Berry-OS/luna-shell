@@ -70,4 +70,8 @@ static inline char *luna_client_env_policy_getenv(const char *name) {
 
 #define getenv(name) luna_client_env_policy_getenv(name)
 
+/* Keep shell runtime fixes in the same freestanding prelude so they can wrap
+ * call sites without duplicating the large luna-shell.c translation unit. */
+#include "luna-shell-interaction-fixes.h"
+
 #endif /* LUNA_CLIENT_ENV_POLICY_H */
