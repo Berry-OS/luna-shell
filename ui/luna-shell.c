@@ -708,8 +708,8 @@ static void settings_defaults(void) {
     g_settings.titlebar_double_click = 1;
     g_settings.classic_titlebar = 0;
     g_settings.super_shortcuts = 1;
-    g_settings.active_window_outline = 1;
-    g_settings.window_list_visible = 1;
+    g_settings.active_window_outline = 0;
+    g_settings.window_list_visible = 0;
     g_settings.window_tray_icons = 1;
     g_settings.cascade_new_windows = 1;
     g_settings.dock_enabled = 1;
@@ -5080,6 +5080,8 @@ static void apply_toolkit_session_env(void) {
     }
 }
 
+static int env_is_true(const char* name);
+
 static void child_session_env(void) {
     const char* preload = getenv("LUNA_WAYLAND_CLIENT_PRELOAD");
     const char* libpath = getenv("LUNA_WAYLAND_CLIENT_LIBPATH");
@@ -5104,7 +5106,10 @@ static void child_session_env(void) {
     /* Compositor holds DRM master — client GBM/EGL sees fd=-1 and Firefox
      * stalls in WaitFlushedEvent.  Select Mesa's software path for ordinary
      * children, but let Mesa choose its matching loader/Gallium driver. */
-    if (!getenv("LIBGL_ALWAYS_SOFTWARE"))
+    if (!getenv("LIBGL_ALWAYS_SOFTWARE") &&
+        !(env_is_true("LUNA_CLIENT_GPU") &&
+          env_is_true("LUNA_ENABLE_DMABUF") &&
+          !env_is_true("LUNA_EGL_SOFTWARE")))
         setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
     /* llvmpipe otherwise creates close to one worker per online CPU for every
      * application.  Four workers keep 2D Luna apps responsive without starving
@@ -9284,7 +9289,8 @@ static void update_async_status(void) {
      * wallpapers already repaint on cadence; static wallpapers pick up the
      * newest values on the next real background repaint (wallpaper change,
      * layout change, explicit damage, etc.). */
-    int bg_status_safe = !shell_desktop_busy() && !g_switcher_visible &&
+    int bg_status_safe = (!shell_desktop_busy() || g_settings.widgets_enabled) &&
+                         !g_switcher_visible &&
                          g_now - g_last_user_activity >= STATUS_BG_IDLE_GRACE_SEC &&
                          shell_bg_passive_refresh_ready();
     if (!bg_status_safe) return;
@@ -9523,6 +9529,34 @@ static void bind_indices(void) {
 
     for (int i = 0; i < UI_CACHE_COUNT; i++)
         g_ui_idx[i] = luna_get_element_by_id(g_ui_cache_ids[i]);
+
+    /* Older skins predate explicit Storage IDs. Resolve those two cached
+     * elements from the stats widget so live updates remain skin-compatible. */
+    if (g_ui_idx[UI_ST_DISK_VAL] < 0 || g_ui_idx[UI_ST_DISK_FILL] < 0) {
+        int stats = g_ui_idx[UI_WIDGET_STATS];
+        if (stats >= 0) {
+            for (int i = 0; i < luna_element_count(); i++) {
+                LunaElement* el = luna_element_at(i);
+                if (!el) continue;
+                int inside = i == stats;
+                for (int p = el->parent_idx; !inside && p != -1; ) {
+                    LunaElement* parent = luna_element_at(p);
+                    if (!parent) break;
+                    if (p == stats) inside = 1;
+                    p = parent->parent_idx;
+                }
+                if (!inside) continue;
+                if (g_ui_idx[UI_ST_DISK_FILL] < 0 &&
+                    strstr(el->class_name, "g_disk"))
+                    g_ui_idx[UI_ST_DISK_FILL] = i;
+                if (g_ui_idx[UI_ST_DISK_VAL] < 0 &&
+                    strstr(el->class_name, "st_val") &&
+                    i != g_ui_idx[UI_ST_CPU_VAL] &&
+                    i != g_ui_idx[UI_ST_MEM_VAL])
+                    g_ui_idx[UI_ST_DISK_VAL] = i;
+            }
+        }
+    }
     for (int i = 0; i < APP_COUNT; i++) g_lp_app_idx[i] = -1;
     for (int i = 0; i < MAX_SWITCHER_SLOTS; i++) g_sw_slot_idx[i] = -1;
 
@@ -12146,6 +12180,7 @@ static void surf_update_input_region(LunaSurface* s) {
 
     if (s == &g_surfs[LUNA_SURF_BG]) {
         static uint64_t last_sig = 0;
+        static struct wl_surface* last_surface = NULL;
         static int have_sig = 0;
         uint64_t sig = 1469598103934665603ULL;
         int rects[3][4];
@@ -12175,7 +12210,7 @@ static void surf_update_input_region(LunaSurface* s) {
         }
         sig ^= (uint64_t)rect_count;
         sig *= 1099511628211ULL;
-        if (have_sig && sig == last_sig) return;
+        if (have_sig && s->wl_surf == last_surface && sig == last_sig) return;
 
         struct wl_region* region = wl_compositor_create_region(g_wl.compositor);
         if (!region) return;
@@ -12185,6 +12220,7 @@ static void surf_update_input_region(LunaSurface* s) {
         wl_region_destroy(region);
         wl_surface_commit(s->wl_surf);
         last_sig = sig;
+        last_surface = s->wl_surf;
         have_sig = 1;
         return;
     }
@@ -13649,6 +13685,7 @@ int main(int argc, char** argv) {
         slider_tick_when_needed(&g_scale_qt_slider);
         slider_tick_when_needed(&g_scale_cur_slider);
         cursor_theme_tick_and_refresh();
+        if (tray_sync_hover_tip()) shell_request_repaint(1);
         if (!interaction_busy && g_toast_deadline > 0.0 && g_now > g_toast_deadline) {
             set_hidden(g_toast_idx, 1);
             g_toast_deadline = 0.0;
