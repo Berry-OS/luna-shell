@@ -405,73 +405,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .cc_stat_label { color: var(--luna-text-dim); font-size: 11px; width: 32px; flex: 0 0 32px; text-align: left; font-weight: 600; }
 .cc_bar { flex: 1 1 auto; height: 6px; border-radius: 3px; background-color: rgba(255, 255, 255, 0.10); position: relative; overflow: hidden; }
 .cc_bar_fill { position: absolute; left: 0; top: 0; height: 100%; width: 40%; border-radius: 3px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); }
-
-/* ── Desktop widgets ── */
-.widget {
-  position: absolute;
-  background: linear-gradient(135deg, rgba(18, 19, 42, 0.52) 0%, rgba(10, 11, 26, 0.65) 100%);
-  backdrop-filter: blur(24px) saturate(1.6);
-  -webkit-backdrop-filter: blur(24px) saturate(1.6);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 22px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  padding: 16px 18px;
-}
-#widget_clock {
-  right: 24px; top: 52px; width: 220px; height: 110px;
-  transition: height var(--dur-short) var(--ease-out), padding var(--dur-short) var(--ease-out);
-}
-#widget_clock.stopwatch_mode { height: 160px; padding: 14px 16px; }
-#wg_clock_view { position: relative; width: 100%; height: 100%; }
-#wg_time {
-  font-family: var(--display-font);
-  color: #ffffff;
-  font-size: 46px; font-weight: 800; letter-spacing: -0.02em;
-  line-height: 1; width: calc(100% - 32px);
-}
-#wg_date { color: var(--luna-text-dim); font-size: 12px; font-weight: 500; margin-top: 6px; }
-.wg_clock_icon {
-  display: flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; border-radius: 8px;
-  color: var(--luna-text-dim); font-size: 12px; cursor: pointer;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
-}
-.wg_clock_icon:hover { background: rgba(255, 255, 255, 0.14); color: #ffffff; }
-.wg_clock_icon:focus-visible { outline: 2px solid var(--luna-accent-2); outline-offset: 2px; }
-#wg_stopwatch_open { position: absolute; right: 0; top: 0; z-index: 2; }
-#wg_stopwatch_view { width: 100%; height: 100%; }
-#wg_stopwatch_head {
-  display: flex; flex-direction: row; align-items: center; gap: 8px;
-  width: 100%; height: 24px;
-}
-#wg_stopwatch_title {
-  flex: 1 1 auto; color: var(--luna-text); font-size: 12px; font-weight: 700;
-}
-#wg_stopwatch_state { color: var(--luna-text-muted); font-size: 10px; }
-#wg_stopwatch_time {
-  width: 100%; margin-top: 8px;
-  font-family: var(--display-font); font-variant-numeric: tabular-nums;
-  color: #ffffff; font-size: 34px; font-weight: 800; letter-spacing: -0.02em;
-  line-height: 1; text-align: center;
-}
-#wg_stopwatch_actions {
-  display: flex; flex-direction: row; gap: 8px;
-  width: 100%; margin-top: 12px;
-}
-#wg_stopwatch_actions .dlg_btn { flex: 1 1 0; min-width: 0; height: 30px; font-size: 12px; }
-#widget_stats.clock_below_stopwatch { top: 226px; }
-#widget_weather.clock_below_stopwatch { top: 398px; }
-#widget_stats { right: 24px; top: 176px; width: 220px; height: 156px; }
-.st_row { display: flex; flex-direction: row; justify-content: space-between; margin-top: 8px; }
-.st_label { color: var(--luna-text-dim); font-size: 11px; font-weight: 500; }
-.st_val   { color: #ffffff; font-size: 11px; font-weight: 700; text-align: right; }
-.st_bar   { height: 4px; border-radius: 2px; background-color: rgba(255, 255, 255, 0.10); margin-top: 5px; position: relative; overflow: hidden; }
-.st_fill  { position: absolute; left: 0; top: 0; height: 100%; width: 20%; border-radius: 2px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); }
-.st_fill.g_mem  { background: linear-gradient(90deg, #bf5af2, #9b3fe0); }
-.st_fill.g_disk { background: linear-gradient(90deg, #30d158, #25a244); }
-
 /* ── Weather widget + popover (Open-Meteo) ── */
 #mb_weather { gap: 4px; min-width: 52px; }
 #mb_weather_temp { font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -508,23 +441,20 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   font-size: 11px; color: var(--luna-text-muted);
   border-top: 1px solid rgba(255, 255, 255, 0.06); padding-top: 10px; margin-bottom: 10px;
 }
-#weather_forecast, #wg_wx_forecast {
+#weather_forecast {
   display: flex; flex-direction: row; gap: 6px; justify-content: space-between;
 }
-.wf_day { flex: 1 1 0; text-align: center; font-size: 11px; color: rgba(255, 255, 255, 0.55); }
-.wf_name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; }
-.wf_icon { font-size: 16px; color: var(--luna-accent-2); margin: 4px 0; }
-.wf_temp { font-weight: 600; font-size: 12px; color: #fff; margin-top: 2px; }
-.wf_temp span { opacity: 0.55; font-size: 11px; font-weight: 500; }
+#weather_forecast .wf_day { flex: 1 1 0; text-align: center; font-size: 11px; color: rgba(255, 255, 255, 0.55); }
+#weather_forecast .wf_name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; }
+#weather_forecast .wf_icon { font-size: 16px; color: var(--luna-accent-2); margin: 4px 0; }
+#weather_forecast .wf_temp { font-weight: 600; font-size: 12px; color: #fff; margin-top: 2px; }
+#weather_forecast .wf_temp span { opacity: 0.55; font-size: 11px; font-weight: 500; }
 
-#widget_weather { right: 24px; top: 348px; width: 220px; height: 168px; }
-#wg_wx_main {
-  display: flex; flex-direction: row; align-items: center; gap: 8px;
-  margin-top: 8px; margin-bottom: 10px;
-}
-#wg_wx_icon { font-size: 22px; color: var(--luna-accent); width: 28px; text-align: center; }
-#wg_wx_desc { color: var(--luna-text-dim); font-size: 12px; font-weight: 500; }
-#widget_weather .wf_temp { font-size: 11px; }
+
+
+
+
+
 
 /* ── Calendar popover ── */
 #calendar_menu {

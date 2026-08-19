@@ -96,12 +96,12 @@ html, body { background: var(--ami-desk); color: var(--ami-ink); }
 .dock_dot { background-color: var(--ami-orange); box-shadow: none; }
 .dock_sep { background: #000000; }
 
-.widget, #toast, #switcher_strip {
+#toast, #switcher_strip {
   background: var(--ami-grey); color: var(--ami-ink);
   border: 2px solid #000000; border-radius: 0;
   box-shadow: 3px 3px 0 var(--ami-shadow);
 }
-#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, #toast_msg, .sw_title, .sw_app { color: var(--ami-ink); }
+#toast_title, #toast_msg, .sw_title, .sw_app { color: var(--ami-ink); }
 
 .sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
   background: var(--ami-grey); color: var(--ami-ink);

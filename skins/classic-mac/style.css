@@ -90,12 +90,12 @@ html, body { background: var(--mac-desk); color: var(--mac-ink); }
 
 #dock, #dock.hidden { display: none !important; }
 
-.widget, #toast, #switcher_strip {
+#toast, #switcher_strip {
   background: var(--mac-strip); color: var(--mac-ink);
   border: 1px solid #000000; border-radius: 0;
   box-shadow: 2px 2px 0 var(--mac-shadow);
 }
-#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, #toast_msg, .sw_title, .sw_app { color: var(--mac-ink); }
+#toast_title, #toast_msg, .sw_title, .sw_app { color: var(--mac-ink); }
 
 .sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
   background: var(--mac-strip); color: var(--mac-ink);

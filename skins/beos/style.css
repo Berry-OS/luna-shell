@@ -95,12 +95,12 @@ html, body { background: var(--be-desk); color: var(--be-ink); }
 
 #dock, #dock.hidden { display: none !important; }
 
-.widget, #toast, #switcher_strip {
+#toast, #switcher_strip {
   background: var(--be-grey); color: var(--be-ink);
   border: 1px solid var(--be-ink); border-radius: 0;
   box-shadow: 3px 3px 0 var(--be-shadow);
 }
-#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, #toast_msg, .sw_title, .sw_app { color: var(--be-ink); }
+#toast_title, #toast_msg, .sw_title, .sw_app { color: var(--be-ink); }
 
 .sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
   background: var(--be-grey); color: var(--be-ink);

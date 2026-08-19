@@ -98,7 +98,7 @@ html, body { background: var(--w95-teal); color: var(--w95-ink); }
 
 #dock, #dock.hidden { display: none !important; }
 
-.widget, #toast, #switcher_strip {
+#toast, #switcher_strip {
   background: var(--w95-grey); color: var(--w95-ink);
   border-top: 2px solid var(--w95-white);
   border-left: 2px solid var(--w95-white);
@@ -106,7 +106,7 @@ html, body { background: var(--w95-teal); color: var(--w95-ink); }
   border-bottom: 2px solid #000000;
   border-radius: 0; box-shadow: 2px 2px 0 var(--w95-shadow);
 }
-#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, #toast_msg, .sw_title, .sw_app { color: var(--w95-ink); }
+#toast_title, #toast_msg, .sw_title, .sw_app { color: var(--w95-ink); }
 
 .sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
   background: var(--w95-grey); color: var(--w95-ink);
@@ -660,10 +660,7 @@ body {
 
 /* Remove modern desktop furniture -------------------------------------- */
 #dock,
-#dock.hidden,
-#widget_clock,
-#widget_stats,
-#widget_weather { display: none !important; }
+#dock.hidden { display: none !important; }
 
 /* Classic dialogs and utility windows ---------------------------------- */
 .modal_backdrop {
@@ -787,7 +784,7 @@ body {
 .wm_pref,
 .wm_choice,
 .cc_cell,
-.wf_day {
+#weather_forecast .wf_day {
   background: var(--w95-button-face) !important;
   color: #000 !important;
   border: 1px solid transparent !important;
@@ -904,8 +901,7 @@ input:focus-visible,
 .wm_pref.on .wm_switch_knob { left: 18px !important; }
 
 .cc_track,
-.cc_bar,
-.st_bar {
+.cc_bar {
   background: #fff !important;
   border-top: 2px solid var(--w95-button-shadow) !important;
   border-left: 2px solid var(--w95-button-shadow) !important;
@@ -914,8 +910,7 @@ input:focus-visible,
   box-shadow: inset 1px 1px #000 !important;
 }
 .cc_fill,
-.cc_bar_fill,
-.st_fill { background: var(--w95-selection) !important; }
+.cc_bar_fill { background: var(--w95-selection) !important; }
 
 /* Alt+Tab --------------------------------------------------------------- */
 #switcher {

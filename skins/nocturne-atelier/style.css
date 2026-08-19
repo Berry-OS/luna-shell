@@ -90,12 +90,8 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
 .dock_dot { background-color: var(--atelier-brass-hi); box-shadow: none; }
 .dock_sep { background: var(--atelier-rule); }
 
-.widget {
-  background: var(--atelier-paper-2); color: var(--atelier-ink);
-  border: 1px solid var(--atelier-rule); border-radius: 12px;
-  box-shadow: 0 18px 44px var(--atelier-shadow);
-}
-#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, .sw_title { color: var(--atelier-ink); }
+
+#toast_title, .sw_title { color: var(--atelier-ink); }
 #toast_msg, .sw_app { color: var(--atelier-muted); }
 
 .sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
