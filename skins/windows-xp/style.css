@@ -876,14 +876,12 @@ body {
 }
 
 .cc_track,
-.st_bar,
 .cc_bar {
   border: 1px solid #7f9db9 !important;
   border-radius: 0 !important;
   background: white !important;
 }
 .cc_fill,
-.st_fill,
 .cc_bar_fill {
   border-radius: 0 !important;
   background: repeating-linear-gradient(90deg, #2b63d7 0 5px, transparent 5px 7px) !important;

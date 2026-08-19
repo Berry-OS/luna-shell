@@ -784,7 +784,7 @@ body {
 .wm_pref,
 .wm_choice,
 .cc_cell,
-.wf_day {
+#weather_forecast .wf_day {
   background: var(--w95-button-face) !important;
   color: #000 !important;
   border: 1px solid transparent !important;
@@ -901,8 +901,7 @@ input:focus-visible,
 .wm_pref.on .wm_switch_knob { left: 18px !important; }
 
 .cc_track,
-.cc_bar,
-.st_bar {
+.cc_bar {
   background: #fff !important;
   border-top: 2px solid var(--w95-button-shadow) !important;
   border-left: 2px solid var(--w95-button-shadow) !important;
@@ -911,8 +910,7 @@ input:focus-visible,
   box-shadow: inset 1px 1px #000 !important;
 }
 .cc_fill,
-.cc_bar_fill,
-.st_fill { background: var(--w95-selection) !important; }
+.cc_bar_fill { background: var(--w95-selection) !important; }
 
 /* Alt+Tab --------------------------------------------------------------- */
 #switcher {

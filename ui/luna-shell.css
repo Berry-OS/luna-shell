@@ -371,21 +371,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .cc_stat_label { color: var(--luna-text-dim); font-size: 11px; width: 32px; flex: 0 0 32px; text-align: left; font-weight: 600; }
 .cc_bar { flex: 1 1 auto; height: 6px; border-radius: 3px; background-color: rgba(255, 255, 255, 0.10); position: relative; overflow: hidden; }
 .cc_bar_fill { position: absolute; left: 0; top: 0; height: 100%; width: 40%; border-radius: 3px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); }
-
-/* ── Desktop widgets ── */
-
-
-
-
-
-.st_row { display: flex; flex-direction: row; justify-content: space-between; margin-top: 8px; }
-.st_label { color: var(--luna-text-dim); font-size: 11px; font-weight: 500; }
-.st_val   { color: #ffffff; font-size: 11px; font-weight: 700; text-align: right; }
-.st_bar   { height: 4px; border-radius: 2px; background-color: rgba(255, 255, 255, 0.10); margin-top: 5px; position: relative; overflow: hidden; }
-.st_fill  { position: absolute; left: 0; top: 0; height: 100%; width: 20%; border-radius: 2px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); }
-.st_fill.g_mem  { background: linear-gradient(90deg, #bf5af2, #9b3fe0); }
-.st_fill.g_disk { background: linear-gradient(90deg, #30d158, #25a244); }
-
 /* ── Weather widget + popover (Open-Meteo) ── */
 #mb_weather { gap: 4px; min-width: 52px; }
 #mb_weather_temp { font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -425,11 +410,11 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #weather_forecast {
   display: flex; flex-direction: row; gap: 6px; justify-content: space-between;
 }
-.wf_day { flex: 1 1 0; text-align: center; font-size: 11px; color: rgba(255, 255, 255, 0.55); }
-.wf_name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; }
-.wf_icon { font-size: 16px; color: var(--luna-accent-2); margin: 4px 0; }
-.wf_temp { font-weight: 600; font-size: 12px; color: #fff; margin-top: 2px; }
-.wf_temp span { opacity: 0.55; font-size: 11px; font-weight: 500; }
+#weather_forecast .wf_day { flex: 1 1 0; text-align: center; font-size: 11px; color: rgba(255, 255, 255, 0.55); }
+#weather_forecast .wf_name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; }
+#weather_forecast .wf_icon { font-size: 16px; color: var(--luna-accent-2); margin: 4px 0; }
+#weather_forecast .wf_temp { font-weight: 600; font-size: 12px; color: #fff; margin-top: 2px; }
+#weather_forecast .wf_temp span { opacity: 0.55; font-size: 11px; font-weight: 500; }
 
 
 
