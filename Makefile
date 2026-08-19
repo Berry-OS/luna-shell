@@ -131,7 +131,6 @@ $(LAYER_SHELL_SRC): $(LAYER_SHELL_XML)
 
 luna-shell: $(SHELL_WL_DEPS) $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
-            $(UI_DIR)/luna-client-env-policy.h \
             $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-ethernet.h \
             $(UI_DIR)/luna-bluetooth.h $(UI_DIR)/luna-sni.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
             $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \
@@ -143,7 +142,7 @@ luna-shell: $(SHELL_WL_DEPS) $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol
 	# `-Os -ffast-math`, gcc keeps the last -O* / -f* of each kind, and
 	# -ffast-math left luna_render as a no-op (black desktop, live cursor).
 	# Wi-Fi backend (luna-wifi.h) and the status poller both use pthreads.
-	gcc -Wall -Wextra -DLUNA_BACKEND_X11 -include $(UI_DIR)/luna-client-env-policy.h $(SHELL_CFLAGS) \
+	gcc -Wall -Wextra -DLUNA_BACKEND_X11 $(SHELL_CFLAGS) \
 	    -O2 -fno-fast-math -fno-finite-math-only -I$(UI_DIR) \
 	    $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c $(LAYER_SHELL_SRC) \
 	    -o luna-shell $(SHELL_LIBS) -lX11
