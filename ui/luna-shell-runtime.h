@@ -52,8 +52,11 @@ static inline void luna_shell_rt_note_mouse(int button, int action, int mods,
                 _lsr_tip = _lsr_t->tooltip[0] ? _lsr_t->tooltip : _lsr_t->label; \
         } \
         if (_lsr_tip && _lsr_tip[0] && g_tray_tip_idx[_lsr_s] >= 0) { \
-            luna_set_text(g_tray_tip_idx[_lsr_s], _lsr_tip); \
-            set_hidden(g_tray_tip_idx[_lsr_s], 0); \
+            LunaElement* _lsr_te = luna_element_at(g_tray_tip_idx[_lsr_s]); \
+            if (_lsr_te && strcmp(_lsr_te->text, _lsr_tip)) \
+                luna_set_text(g_tray_tip_idx[_lsr_s], _lsr_tip); \
+            if (!is_shown(g_tray_tip_idx[_lsr_s])) \
+                set_hidden(g_tray_tip_idx[_lsr_s], 0); \
         } \
     } \
     if (tray_sync_hover_tip()) shell_request_repaint(1); \
