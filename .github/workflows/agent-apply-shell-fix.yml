@@ -1,0 +1,79 @@
+name: Apply shell pacing fix
+
+on:
+  push:
+    branches:
+      - agent/fix-shell-embedded-ui-sync
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Patch shell frame pacing
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('ui/luna-shell.c')
+          text = path.read_text()
+
+          replacements = {
+              '#define LUNA_WL_BG_FRAME_SEC      (1.0 / 30.0)':
+                  '#define LUNA_WL_BG_FRAME_SEC      (1.0 / 60.0)',
+              '#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 30.0)':
+                  '#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 60.0)',
+              '/* Animation cadence. Idle aurora/stars only (no open windows). 30 Hz keeps\n * slow wallpaper motion visually smooth while the existing desktop-busy gate\n * prevents full-screen background commits underneath application windows. */':
+                  '/* Animation cadence. Idle aurora/stars only (no open windows). 60 Hz keeps\n * transform-only wallpaper motion smooth; the desktop-busy gates below prevent\n * full-screen background commits underneath application windows. */',
+              '             * and starve client frame callbacks.  Twelve hertz keeps the idle\n             * animation smooth enough without repainting beneath\n             * application windows. */':
+                  '             * and starve client frame callbacks.  The idle desktop may run\n             * at display cadence because this gate prevents repainting beneath\n             * application windows. */',
+              '            /* Pointer/hover easing runs at vblank cadence, while an idle CSS\n             * wallpaper runs at 12 Hz.  The KMS hardware cursor remains\n             * full-rate without repainting the\n             * primary plane, saving GPU work and memory bandwidth.  A still\n             * wallpaper is entirely event-driven: the old two-second "safety"\n             * repaint was a periodic full-document render + KMS page flip and\n             * was visible as a regular hitch even though no pixel changed. */\n            double idle_frame_deadline = g_bg_animated && !interaction_busy\n                ? g_last_bg_paint + LUNA_SINGLE_BG_FRAME_SEC\n                : 0.0;':
+                  '            /* Pointer/hover easing runs at vblank cadence.  Only an empty,\n             * idle desktop animates the wallpaper; otherwise a KMS/X11 full-frame\n             * repaint competes with client presentation and causes visible hitches.\n             * The hardware cursor remains full-rate without repainting the primary\n             * plane, and a still wallpaper remains entirely event-driven. */\n            int desktop_busy = shell_desktop_busy();\n            double idle_frame_deadline =\n                g_bg_animated && !desktop_busy && !interaction_busy\n                    ? g_last_bg_paint + LUNA_SINGLE_BG_FRAME_SEC\n                    : 0.0;',
+              '                g_single_poll_timeout_ms = settling ? 0\n                    : shell_wait_timeout_ms(1000, g_bg_animated\n                          ? g_last_bg_paint + LUNA_SINGLE_BG_FRAME_SEC\n                          : 0.0);':
+                  '                g_single_poll_timeout_ms = settling ? 0\n                    : shell_wait_timeout_ms(1000,\n                          g_bg_animated && !desktop_busy\n                              ? g_last_bg_paint + LUNA_SINGLE_BG_FRAME_SEC\n                              : 0.0);',
+          }
+
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one match, got {count}: {old[:90]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Install luna-shell build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libx11-dev libgl1-mesa-dev libegl1-mesa-dev libgbm-dev libdrm-dev \
+            libinput-dev libudev-dev libxkbcommon-dev libwayland-dev libwayland-bin \
+            libdbus-1-dev libssl-dev
+
+      - name: Build and validate
+        run: |
+          make luna-shell
+          test -x luna-shell
+          grep -q 'width: fit-content' ui/luna-shell.css.h
+          grep -q 'tray_glyph { pointer-events: none; }' ui/luna-shell.css.h
+          grep -q 'tray_item:hover .tray_tip' ui/luna-shell.css.h
+          git diff --check
+
+      - name: Commit validated source patch and remove temporary workflow
+        run: |
+          rm -f .github/workflows/agent-apply-shell-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix shell asset sync and frame pacing"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
