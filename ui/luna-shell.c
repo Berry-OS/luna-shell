@@ -708,8 +708,8 @@ static void settings_defaults(void) {
     g_settings.titlebar_double_click = 1;
     g_settings.classic_titlebar = 0;
     g_settings.super_shortcuts = 1;
-    g_settings.active_window_outline = 1;
-    g_settings.window_list_visible = 1;
+    g_settings.active_window_outline = 0;
+    g_settings.window_list_visible = 0;
     g_settings.window_tray_icons = 1;
     g_settings.cascade_new_windows = 1;
     g_settings.dock_enabled = 1;
@@ -2028,11 +2028,11 @@ static int      g_wl_poll_timeout_ms = 0;
  * Keep a separate bit for them: g_surf_dirty describes Wayland layers, while
  * this flag says that the KMS/X11 framebuffer needs another complete frame. */
 static int      g_frame_dirty = 1;
-/* Animation cadence.  Idle aurora/stars only (no open windows).  12 Hz is
- * enough for the empty-desktop wallpaper and avoids the old 30 Hz full-screen
- * commit storm that showed up as a regular hitch on the console session. */
-#define LUNA_WL_BG_FRAME_SEC      (1.0 / 12.0)
-#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 12.0)
+/* Animation cadence. Idle aurora/stars only (no open windows). 30 Hz keeps
+ * slow wallpaper motion visually smooth while the existing desktop-busy gate
+ * prevents full-screen background commits underneath application windows. */
+#define LUNA_WL_BG_FRAME_SEC      (1.0 / 30.0)
+#define LUNA_SINGLE_BG_FRAME_SEC  (1.0 / 30.0)
 /* A delayed event or maintenance read must not turn one missed frame into a
  * large easing jump.  CSS keyframes use absolute time; this only bounds the
  * interactive interpolation path. */
@@ -2646,7 +2646,12 @@ static int tray_sync_hover_tip(void) {
         int idx = g_tray_slot_idx[s];
         if (idx < 0 || !tray_key_is_window(g_tray_slot_key[s])) continue;
         LunaElement* slot = luna_element_at(idx);
-        if (slot && slot->is_hovered) { next = s; break; }
+        LunaElement* glyph = g_tray_glyph_idx[s] >= 0
+                           ? luna_element_at(g_tray_glyph_idx[s]) : NULL;
+        if ((slot && slot->is_hovered) || (glyph && glyph->is_hovered)) {
+            next = s;
+            break;
+        }
     }
     if (next == g_tray_hover_slot) return 0;
     if (g_tray_hover_slot >= 0) {
@@ -2716,15 +2721,19 @@ static void update_tray_ui(void) {
         used++;
     }
 
-    /* No SNI applets: keep compositor running-app glyphs so the tray
-     * is not empty on a fresh session. */
-    if (used == 0) {
+    /* Keep compact running-app entries alongside SNI/compositor status
+     * entries. The previous used == 0 fallback made the window list disappear
+     * as soon as any real status icon was present. */
+    if (g_settings.window_tray_icons) {
         for (int i = 0; i < g_tray_count && used < MAX_TRAY_SLOTS; i++) {
+            LunaTrayEntry* t = &g_tray[i];
+            if (!tray_key_is_window(t->id)) continue;
             int idx = g_tray_slot_idx[used];
             if (idx < 0) { used++; continue; }
-            LunaTrayEntry* t = &g_tray[i];
             set_hidden(idx, 0);
             g_tray_sni_kind[used] = 0;
+            g_tray_sni_service[used][0] = 0;
+            g_tray_sni_path[used][0] = 0;
             snprintf(g_tray_slot_key[used], sizeof(g_tray_slot_key[used]), "%.63s", t->id);
             tray_apply_glyph(idx, g_tray_glyph_idx[used], t->icon);
             tray_slot_style(idx, t);
@@ -5080,6 +5089,8 @@ static void apply_toolkit_session_env(void) {
     }
 }
 
+static int env_is_true(const char* name);
+
 static void child_session_env(void) {
     const char* preload = getenv("LUNA_WAYLAND_CLIENT_PRELOAD");
     const char* libpath = getenv("LUNA_WAYLAND_CLIENT_LIBPATH");
@@ -5104,7 +5115,10 @@ static void child_session_env(void) {
     /* Compositor holds DRM master — client GBM/EGL sees fd=-1 and Firefox
      * stalls in WaitFlushedEvent.  Select Mesa's software path for ordinary
      * children, but let Mesa choose its matching loader/Gallium driver. */
-    if (!getenv("LIBGL_ALWAYS_SOFTWARE"))
+    if (!getenv("LIBGL_ALWAYS_SOFTWARE") &&
+        !(env_is_true("LUNA_CLIENT_GPU") &&
+          env_is_true("LUNA_ENABLE_DMABUF") &&
+          !env_is_true("LUNA_EGL_SOFTWARE")))
         setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
     /* llvmpipe otherwise creates close to one worker per online CPU for every
      * application.  Four workers keep 2D Luna apps responsive without starving
@@ -6829,30 +6843,15 @@ static void settings_update_sound_status(void) {
  * remain available, so removing an app from the Dock never makes it
  * inaccessible. */
 static void apply_dock_app_settings(void) {
-    int visible = 0;
-    int dock_idx = luna_get_element_by_id("dock");
     for (int i = 0; i < APP_COUNT; i++) {
         char id[64];
         snprintf(id, sizeof(id), "dock_%s", g_apps[i].key);
         int idx = luna_get_element_by_id(id);
         if (idx >= 0) {
             set_hidden(idx, !g_apps[i].dock_visible);
-            if (g_apps[i].dock_visible) visible++;
         }
     }
-    /* Keep the floating bar centred and remove the empty space left by hidden
-     * launchers.  The two permanent items (Launchpad and Trash) and separator
-     * account for the fixed 158 px; each visible app contributes 64 px. */
-    if (dock_idx >= 0) {
-        char klass[32];
-        for (int i = 0; i <= 6; i++) {
-            snprintf(klass, sizeof(klass), "dock_apps_%d", i);
-            luna_update_classes(dock_idx, klass, NULL);
-        }
-        if (visible > 6) visible = 6;
-        snprintf(klass, sizeof(klass), "dock_apps_%d", visible);
-        luna_update_classes(dock_idx, NULL, klass);
-    }
+    /* #dock uses fit-content, so hidden launchers collapse automatically. */
     luna_mark_layout_dirty();
     shell_request_repaint(2);
 }
@@ -9284,7 +9283,8 @@ static void update_async_status(void) {
      * wallpapers already repaint on cadence; static wallpapers pick up the
      * newest values on the next real background repaint (wallpaper change,
      * layout change, explicit damage, etc.). */
-    int bg_status_safe = !shell_desktop_busy() && !g_switcher_visible &&
+    int bg_status_safe = (!shell_desktop_busy() || g_settings.widgets_enabled) &&
+                         !g_switcher_visible &&
                          g_now - g_last_user_activity >= STATUS_BG_IDLE_GRACE_SEC &&
                          shell_bg_passive_refresh_ready();
     if (!bg_status_safe) return;
@@ -9523,6 +9523,34 @@ static void bind_indices(void) {
 
     for (int i = 0; i < UI_CACHE_COUNT; i++)
         g_ui_idx[i] = luna_get_element_by_id(g_ui_cache_ids[i]);
+
+    /* Older skins predate explicit Storage IDs. Resolve those two cached
+     * elements from the stats widget so live updates remain skin-compatible. */
+    if (g_ui_idx[UI_ST_DISK_VAL] < 0 || g_ui_idx[UI_ST_DISK_FILL] < 0) {
+        int stats = g_ui_idx[UI_WIDGET_STATS];
+        if (stats >= 0) {
+            for (int i = 0; i < luna_element_count(); i++) {
+                LunaElement* el = luna_element_at(i);
+                if (!el) continue;
+                int inside = i == stats;
+                for (int p = el->parent_idx; !inside && p != -1; ) {
+                    LunaElement* parent = luna_element_at(p);
+                    if (!parent) break;
+                    if (p == stats) inside = 1;
+                    p = parent->parent_idx;
+                }
+                if (!inside) continue;
+                if (g_ui_idx[UI_ST_DISK_FILL] < 0 &&
+                    strstr(el->class_name, "g_disk"))
+                    g_ui_idx[UI_ST_DISK_FILL] = i;
+                if (g_ui_idx[UI_ST_DISK_VAL] < 0 &&
+                    strstr(el->class_name, "st_val") &&
+                    i != g_ui_idx[UI_ST_CPU_VAL] &&
+                    i != g_ui_idx[UI_ST_MEM_VAL])
+                    g_ui_idx[UI_ST_DISK_VAL] = i;
+            }
+        }
+    }
     for (int i = 0; i < APP_COUNT; i++) g_lp_app_idx[i] = -1;
     for (int i = 0; i < MAX_SWITCHER_SLOTS; i++) g_sw_slot_idx[i] = -1;
 
@@ -12146,6 +12174,7 @@ static void surf_update_input_region(LunaSurface* s) {
 
     if (s == &g_surfs[LUNA_SURF_BG]) {
         static uint64_t last_sig = 0;
+        static struct wl_surface* last_surface = NULL;
         static int have_sig = 0;
         uint64_t sig = 1469598103934665603ULL;
         int rects[3][4];
@@ -12175,7 +12204,7 @@ static void surf_update_input_region(LunaSurface* s) {
         }
         sig ^= (uint64_t)rect_count;
         sig *= 1099511628211ULL;
-        if (have_sig && sig == last_sig) return;
+        if (have_sig && s->wl_surf == last_surface && sig == last_sig) return;
 
         struct wl_region* region = wl_compositor_create_region(g_wl.compositor);
         if (!region) return;
@@ -12185,6 +12214,7 @@ static void surf_update_input_region(LunaSurface* s) {
         wl_region_destroy(region);
         wl_surface_commit(s->wl_surf);
         last_sig = sig;
+        last_surface = s->wl_surf;
         have_sig = 1;
         return;
     }
@@ -13649,6 +13679,7 @@ int main(int argc, char** argv) {
         slider_tick_when_needed(&g_scale_qt_slider);
         slider_tick_when_needed(&g_scale_cur_slider);
         cursor_theme_tick_and_refresh();
+        if (tray_sync_hover_tip()) shell_request_repaint(1);
         if (!interaction_busy && g_toast_deadline > 0.0 && g_now > g_toast_deadline) {
             set_hidden(g_toast_idx, 1);
             g_toast_deadline = 0.0;
