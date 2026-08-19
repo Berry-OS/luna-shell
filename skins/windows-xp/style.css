@@ -1,6 +1,9 @@
-/* Windows XP Luna skin for Luna Shell
- * High-fidelity CSS-only recreation: Bliss-style wallpaper, Luna taskbar,
- * two-column Start menu, classic controls, notification area and dialogs.
+//* Windows XP Luna skin for Luna Shell
+ * High-fidelity CSS-only recreation: Bliss-style wallpaper,
+Luna taskbar,
+* two-column Start menu,
+classic controls,
+notification area and dialogs.
  */
 
 :root {
@@ -57,12 +60,10 @@
   --radius-md: 3px;
   --radius-sm: 2px;
 }
-
 * {
   box-sizing: border-box;
   font-family: Tahoma, "MS Sans Serif", Arial, sans-serif !important;
 }
-
 html,
 body {
   background: #69b7ef;
@@ -70,7 +71,6 @@ body {
   font-size: 11px;
   overflow: hidden;
 }
-
 /* Decorative XP desktop icons. */
 #xp_desktop_icons {
   position: fixed;
@@ -83,7 +83,6 @@ body {
   gap: 10px;
   user-select: none;
 }
-
 .xp_desktop_icon {
   width: 78px;
   min-height: 66px;
@@ -93,13 +92,11 @@ body {
   text-shadow: 1px 1px 2px #143b74;
   border: 1px solid transparent;
 }
-
 .xp_desktop_icon:hover,
 .xp_desktop_icon:focus-visible {
   background: rgba(49,106,197,.42);
   border-color: rgba(255,255,255,.55);
 }
-
 .xp_desktop_glyph {
   position: relative;
   display: block;
@@ -111,7 +108,6 @@ body {
   background: linear-gradient(145deg, #f5fbff 0 18%, #69b5f3 19% 60%, #164a9f 61% 100%);
   box-shadow: inset 1px 1px rgba(255,255,255,.8), 1px 2px 2px rgba(0,0,0,.3);
 }
-
 .xp_desktop_glyph::after {
   content: "";
   position: absolute;
@@ -123,7 +119,6 @@ body {
   border: 1px solid #59646c;
   border-top: 0;
 }
-
 .xp_icon_documents .xp_desktop_glyph {
   background: linear-gradient(145deg, #fff 0 52%, #c9d9ea 53% 100%);
 }
@@ -138,7 +133,6 @@ body {
   box-shadow: 0 6px #5c92cd, 0 12px #5c92cd;
 }
 .xp_icon_documents .xp_desktop_glyph::after { display: none; }
-
 .xp_icon_network .xp_desktop_glyph {
   border-radius: 50%;
   background:
@@ -147,7 +141,6 @@ body {
     radial-gradient(circle, #78d7f4 0 36%, #2275bf 37% 66%, #0c397f 67% 100%);
 }
 .xp_icon_network .xp_desktop_glyph::after { display: none; }
-
 .xp_icon_bin .xp_desktop_glyph {
   width: 28px;
   border-radius: 2px 2px 5px 5px;
@@ -164,13 +157,11 @@ body {
   border: 1px solid #687b84;
 }
 .xp_icon_bin .xp_desktop_glyph::after { display: none; }
-
 .xp_desktop_label {
   display: inline;
   padding: 1px 2px;
   line-height: 14px;
 }
-
 /* -------------------------------------------------------------------------
    Windows XP taskbar
    ------------------------------------------------------------------------- */
@@ -192,7 +183,6 @@ body {
     linear-gradient(180deg, #3c8cf3 0, #2f7ee7 8%, #245edb 46%, #1b4fc7 82%, #1943aa 100%) !important;
   box-shadow: 0 -1px 3px rgba(1,35,100,.45) !important;
 }
-
 #mb_left,
 #mb_center,
 #mb_right {
@@ -200,7 +190,6 @@ body {
   min-height: 30px !important;
   align-items: center !important;
 }
-
 #mb_left { flex: 0 0 auto; }
 #mb_center { flex: 1 1 auto; min-width: 0; overflow: hidden; padding: 2px 3px 2px 5px; }
 #mb_right {
@@ -212,7 +201,6 @@ body {
   border-left: 1px solid #0b65b2;
   box-shadow: inset 1px 0 rgba(111,211,255,.75);
 }
-
 #mb_logo {
   position: relative;
   flex: 0 0 auto;
@@ -239,19 +227,16 @@ body {
     inset 0 -1px rgba(16,78,8,.75),
     1px 0 2px rgba(0,36,82,.35) !important;
 }
-
 #mb_logo:hover {
   filter: brightness(1.08);
   background:
     radial-gradient(ellipse at 50% 0, rgba(255,255,255,.58) 0, transparent 52%),
     linear-gradient(180deg, #8cd96a, #55ba3b 40%, #42a42c 70%, #2b7d18) !important;
 }
-
 #mb_logo:active {
   filter: brightness(.93);
   padding-top: 1px !important;
 }
-
 #mb_logo_glyph {
   display: block !important;
   width: 22px;
@@ -260,7 +245,6 @@ body {
   color: transparent !important;
   font-size: 0 !important;
 }
-
 .xp_flag {
   position: relative;
   display: block;
@@ -269,7 +253,6 @@ body {
   transform: skewY(-5deg);
   filter: drop-shadow(1px 1px 0 rgba(0,0,0,.35));
 }
-
 .xp_flag i {
   position: absolute;
   width: 9px;
@@ -281,7 +264,6 @@ body {
 .xp_flag i:nth-child(2) { right: 0; top: 0; background: #81bc06; }
 .xp_flag i:nth-child(3) { left: 0; bottom: 0; background: #05a6f0; }
 .xp_flag i:nth-child(4) { right: 0; bottom: 0; background: #ffba08; }
-
 .mb_start_label {
   color: #fff !important;
   font-family: Tahoma, Arial, sans-serif !important;
@@ -292,10 +274,8 @@ body {
   line-height: 30px;
   text-shadow: 1px 1px 1px #1c6611;
 }
-
 #mb_app,
 .mb_app_name { display: none !important; }
-
 #win_list {
   display: flex !important;
   flex: 1 1 auto !important;
@@ -306,7 +286,6 @@ body {
   gap: 3px !important;
   overflow: hidden !important;
 }
-
 .win_item {
   flex: 0 1 auto;
   min-width: 72px;
@@ -324,20 +303,16 @@ body {
   background: linear-gradient(180deg, #3b83e4, #2b6bd7 48%, #2155bd) !important;
   box-shadow: inset 1px 1px rgba(255,255,255,.18) !important;
 }
-
 /* .win_item sets display:flex !important; keep unused slots fully hidden. */
 .win_item.hidden { display: none !important; }
-
 .win_item:hover {
   background: linear-gradient(180deg, #5598ee, #3679df 50%, #245cc7) !important;
 }
-
 .win_item.active {
   background: linear-gradient(180deg, #1a48a5, #1f57bd 48%, #2866cf) !important;
   border-color: #0b2b78 !important;
   box-shadow: inset 1px 2px 3px rgba(0,22,80,.6) !important;
 }
-
 .win_item.minimized { opacity: .72; }
 .win_glyph {
   width: 14px; flex: 0 0 14px; margin-right: 3px;
@@ -353,13 +328,11 @@ body {
   text-overflow: ellipsis;
   text-shadow: 1px 1px rgba(0,0,0,.28);
 }
-
 #tray_area {
   height: 29px !important;
   gap: 0 !important;
   align-items: center !important;
 }
-
 .tray_item,
 #mb_right .mb_item,
 #mb_right .mb_status {
@@ -376,13 +349,11 @@ body {
   box-shadow: none !important;
   font-size: 10px !important;
 }
-
 .tray_item:hover,
 #mb_right .mb_item:hover,
 #mb_right .mb_status:hover {
   background: rgba(255,255,255,.13) !important;
 }
-
 .tray_glyph,
 #mb_right .luna_icon { color: white !important; font-size: 11px !important; }
 .tray_item.hidden { display: none !important; }
@@ -396,7 +367,6 @@ body {
   font-size: 11px !important;
   white-space: nowrap;
 }
-
 /* -------------------------------------------------------------------------
    XP Start menu
    ------------------------------------------------------------------------- */
@@ -420,7 +390,6 @@ body {
   box-shadow: 4px -3px 12px rgba(0,25,75,.55) !important;
   animation: none !important;
 }
-
 #xp_start_header {
   height: 64px;
   padding: 8px 12px;
@@ -432,7 +401,6 @@ body {
   border-bottom: 2px solid #ef9e35;
   box-shadow: inset 0 1px rgba(255,255,255,.65);
 }
-
 #xp_user_picture {
   width: 48px;
   height: 48px;
@@ -445,34 +413,28 @@ body {
     linear-gradient(145deg, #8ed4ff, #296bc0);
   box-shadow: 1px 2px 3px rgba(0,0,0,.35);
 }
-
 #xp_user_name {
   font-size: 14px;
   font-weight: 700;
   text-shadow: 1px 1px #163d89;
 }
-
 #xp_start_body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   min-height: 248px;
 }
-
 #xp_start_left,
 #xp_start_right {
   padding: 6px 5px;
 }
-
 #xp_start_left {
   background: #fff;
   border-right: 1px solid #9ab8df;
 }
-
 #xp_start_right {
   background: #d8e8fa;
   border-left: 1px solid #fff;
 }
-
 #luna_menu .menu_section_label {
   display: block;
   height: auto;
@@ -482,7 +444,6 @@ body {
   font-weight: 700;
   border-bottom: 1px solid #d8d8d8;
 }
-
 #luna_menu .menu_item {
   min-height: 39px;
   margin: 1px 0;
@@ -495,16 +456,13 @@ body {
   border-radius: 2px !important;
   background: transparent !important;
 }
-
 #luna_menu .menu_item:hover {
   color: white !important;
   background: var(--xp-highlight) !important;
 }
-
 #luna_menu .menu_item:hover .mi_label,
 #luna_menu .menu_item:hover .mi_sym,
 #luna_menu .menu_item:hover .mi_key { color: white !important; }
-
 #luna_menu .mi_sym {
   width: 30px;
   min-width: 30px;
@@ -518,26 +476,22 @@ body {
   background: linear-gradient(145deg, white, #bcd8f4);
   box-shadow: inset 1px 1px white;
 }
-
 #luna_menu .mi_label {
   flex: 1;
   color: #111 !important;
   font-size: 11px;
   font-weight: 700;
 }
-
 #luna_menu .mi_key {
   color: #555 !important;
   font-size: 10px;
 }
-
 #luna_menu .menu_sep {
   height: 1px;
   margin: 4px 7px;
   background: #a9bfdc !important;
   border-bottom: 1px solid white;
 }
-
 #xp_start_footer {
   height: 47px;
   padding: 7px 10px;
@@ -549,7 +503,6 @@ body {
   background: linear-gradient(180deg, #3a7ce1, #1d5cc7 58%, #164aaf);
   border-top: 1px solid #0c419c;
 }
-
 #xp_start_footer .menu_item {
   min-height: 30px;
   width: auto;
@@ -567,7 +520,6 @@ body {
   border: 1px solid #7b2a13;
 }
 #xp_start_footer .mi_label { color: white !important; font-weight: 400; }
-
 /* -------------------------------------------------------------------------
    Popup menus and classic widgets
    ------------------------------------------------------------------------- */
@@ -584,7 +536,6 @@ body {
   box-shadow: 2px 2px 5px rgba(0,0,0,.4) !important;
   animation: none !important;
 }
-
 .menu_panel:not(#luna_menu) .menu_item {
   min-height: 22px;
   padding: 3px 18px 3px 5px !important;
@@ -592,30 +543,21 @@ body {
   border-radius: 0 !important;
   background: transparent !important;
 }
-
 .menu_panel:not(#luna_menu) .menu_item:hover {
   color: white !important;
   background: var(--xp-highlight) !important;
   box-shadow: none !important;
 }
-
 .menu_panel:not(#luna_menu) .menu_item:hover .mi_label,
 .menu_panel:not(#luna_menu) .menu_item:hover .mi_sym,
 .menu_panel:not(#luna_menu) .menu_item:hover .mi_key { color: white !important; }
-
 .menu_section_label,
 .mi_label,
 .mi_sym,
 .mi_key { color: var(--xp-ink) !important; }
 .menu_sep { background: #aca899 !important; }
-
-/* XP did not have desktop gadgets; hiding these makes the desktop read correctly. */
-#widget_clock,
-#widget_stats,
-#widget_weather,
 #dock,
 #dock.hidden { display: none !important; }
-
 #toast {
   right: 8px !important;
   bottom: 38px !important;
@@ -643,7 +585,6 @@ body {
 #toast_title { color: #003399 !important; font-weight: 700; }
 #toast_msg { color: #111 !important; }
 #toast_close { color: #4a4a4a !important; }
-
 #switcher_strip {
   padding: 8px !important;
   color: black !important;
@@ -655,15 +596,14 @@ body {
 .switcher_item { border-radius: 0 !important; }
 .switcher_item.active,
 .switcher_item:hover { background: var(--xp-highlight) !important; }
-.sw_title, .sw_app { color: black !important; }
+.sw_title,
+.sw_app { color: black !important; }
 .switcher_item.active .sw_title,
 .switcher_item.active .sw_app { color: white !important; }
-
 /* -------------------------------------------------------------------------
    XP-style dialogs and controls
    ------------------------------------------------------------------------- */
 .modal_backdrop { background: transparent !important; backdrop-filter: none !important; }
-
 .sheet_box,
 #settings_sheet.sheet_box,
 #about_box.about_box,
@@ -675,7 +615,6 @@ body {
   background: var(--xp-paper) !important;
   box-shadow: 5px 7px 14px rgba(0,0,0,.48) !important;
 }
-
 #settings_title,
 #settings_drag,
 #about_drag,
@@ -689,7 +628,6 @@ body {
   border: 1px solid #0d3d9d !important;
   box-shadow: inset 1px 1px rgba(255,255,255,.6) !important;
 }
-
 #settings_title {
   padding: 0 86px 0 8px !important;
   display: flex;
@@ -700,11 +638,9 @@ body {
   text-align: left !important;
   text-shadow: 1px 1px #0b337e;
 }
-
 #settings_sidebar,
 #settings_btns,
 #confirm_btns { background: var(--xp-paper) !important; }
-
 /* Replace traffic lights with Windows XP caption buttons. */
 .tl {
   z-index: 20 !important;
@@ -731,7 +667,6 @@ body {
 }
 .tl_yellow { right: 55px !important; left: auto !important; }
 .tl_green { right: 30px !important; left: auto !important; }
-
 .tl_red::before,
 .tl_red::after {
   left: 4px;
@@ -743,7 +678,6 @@ body {
 }
 .tl_red::before { transform: rotate(45deg); }
 .tl_red::after { transform: rotate(-45deg); }
-
 .tl_yellow::before {
   left: 4px;
   top: 13px;
@@ -752,7 +686,6 @@ body {
   background: white;
   box-shadow: 0 1px #17418e;
 }
-
 .tl_green::before {
   left: 4px;
   top: 4px;
@@ -761,13 +694,11 @@ body {
   border: 1px solid white;
   box-shadow: 2px 2px 0 -1px #2c6cd2, 3px 3px 0 -1px white;
 }
-
 .panel_heading {
   color: #003399 !important;
   font-size: 12px !important;
   font-weight: 700 !important;
 }
-
 .stab,
 .pref_label,
 .pref_hint,
@@ -780,7 +711,6 @@ body {
 .cur_desc,
 .kb_name,
 .kb_desc { color: #111 !important; }
-
 .stab,
 .skin_card,
 .cur_card,
@@ -790,13 +720,11 @@ body {
   border-radius: 0 !important;
   box-shadow: none !important;
 }
-
 .stab:hover,
 .skin_card:hover,
 .cur_card:hover,
 .kb_card:hover,
 .wm_pref:hover { background: #f5f8fc !important; color: #111 !important; }
-
 .stab.active,
 .skin_card.selected,
 .cur_card.selected,
@@ -807,11 +735,9 @@ body {
   background: var(--xp-highlight) !important;
   box-shadow: none !important;
 }
-
 .stab.active .stab_icon,
 .skin_card.selected .skin_name,
 .skin_card.selected .skin_desc { color: white !important; }
-
 .pref_input,
 .pref_input_full,
 #wifi_password,
@@ -823,7 +749,6 @@ body {
   background: white !important;
   box-shadow: inset 1px 1px 2px rgba(0,0,0,.15) !important;
 }
-
 .dlg_btn {
   min-width: 75px;
   min-height: 23px;
@@ -834,21 +759,18 @@ body {
   background: linear-gradient(180deg, white 0 10%, #f7f7f2 45%, #e8e4d5 100%) !important;
   box-shadow: inset 1px 1px white, inset -1px -1px #aca899 !important;
 }
-
 .dlg_btn:hover,
 .dlg_btn.primary:hover,
 .dlg_btn.danger:hover {
   color: black !important;
   background: linear-gradient(180deg, #fff 0 8%, #fff4d5 48%, #ead9aa 100%) !important;
 }
-
 .dlg_btn.primary,
 .dlg_btn.danger {
   color: black !important;
   border: 2px solid #003c74 !important;
   background: linear-gradient(180deg, white 0 10%, #f7f7f2 45%, #e8e4d5 100%) !important;
 }
-
 .dlg_btn:focus-visible,
 .skin_card:focus-visible,
 .menu_item:focus-visible,
@@ -856,7 +778,6 @@ body {
   outline: 1px dotted black !important;
   outline-offset: -4px !important;
 }
-
 .cc_toggle,
 .wm_switch {
   width: 15px !important;
@@ -877,7 +798,6 @@ body {
   line-height: 13px;
   text-align: center;
 }
-
 .cc_track,
 .st_bar,
 .cc_bar {
@@ -891,7 +811,6 @@ body {
   border-radius: 0 !important;
   background: repeating-linear-gradient(90deg, #2b63d7 0 5px, transparent 5px 7px) !important;
 }
-
 /* Launchpad becomes an XP-style Programs window rather than a glass overlay. */
 #launchpad {
   background: var(--xp-paper) !important;
@@ -904,7 +823,6 @@ body {
 .lp_app:hover { background: var(--xp-highlight) !important; }
 .lp_label { color: black !important; }
 .lp_app:hover .lp_label { color: white !important; }
-
 /* About and confirmation copy. */
 #about_content,
 #confirm_content { color: black !important; }
@@ -924,30 +842,28 @@ body {
   color: white !important;
   background: linear-gradient(145deg, #5ca2f4, #245edb) !important;
 }
-
 .hidden { display: none !important; }
 
 @media (max-width: 760px) {
-  #luna_menu.menu_panel { width: min(390px, 94vw) !important; }
-  #mb_wifi,
+#luna_menu.menu_panel { width: min(390px, 94vw) !important; }
+#mb_wifi,
   #mb_bat,
   #mb_weather { display: none !important; }
-  .win_item { min-width: 72px; }
+.win_item { min-width: 72px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+* { animation-duration: 1ms !important; transition-duration: 1ms !important; }
 }
-
-/* Compact icon-only status items: labels were removed from Wi-Fi/AC, so do
+/* Compact icon-only status items: labels were removed from Wi-Fi/AC,
+so do
  * not retain their old text-sized minimum hit boxes. */
 #mb_wifi { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
 #mb_bat.icon_only { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
-
-
-/* Luna shell UX refinements: notifications, tray tips, Email app. */
+/* Luna shell UX refinements: notifications,
+tray tips,
+Email app. */
 .g_email { background: linear-gradient(145deg, #71b7ff, #5268df); }
-
 .notify_card {
   display: flex; flex-direction: column; gap: 3px; min-width: 0;
   padding: 8px 10px; margin: 3px 0; border-radius: 8px;
@@ -964,7 +880,6 @@ body {
   white-space: normal; overflow-wrap: anywhere;
 }
 .notify_legacy { display: none; }
-
 .tray_item { position: relative; }
 .tray_tip {
   position: absolute; top: 3px; right: 28px; min-width: 72px; max-width: 260px;

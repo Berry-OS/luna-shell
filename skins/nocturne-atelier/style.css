@@ -1,4 +1,4 @@
-/* Hallmark · macrostructure: Split Studio · tone: quiet-luxury · anchor hue: brass
+//* Hallmark · macrostructure: Split Studio · tone: quiet-luxury · anchor hue: brass
  * theme: Nocturne Atelier · enrichment: Tier A CSS atmosphere · chrome: shell-native
  * audience: general desktop users · use: live desktop skin switching
  */
@@ -49,38 +49,49 @@
   --radius-md: 9px;
   --radius-sm: 5px;
 }
-
-html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
-
+html,
+body { background: var(--atelier-paper); color: var(--atelier-ink); }
 #menubar {
   left: 18px; top: 14px; width: calc(100% - 36px); height: 38px;
   padding: 0 10px; background: var(--atelier-paper-2);
   border: 1px solid var(--atelier-rule); border-radius: 9px;
   box-shadow: 0 14px 38px var(--atelier-shadow);
 }
-#mb_left, #mb_center, #mb_right { height: 38px; }
-.mb_item, .mb_status, .tray_glyph { color: var(--atelier-muted); }
-#mb_app, .mb_app_name, #mb_logo_glyph, .win_label { color: var(--atelier-ink); }
-.mb_item:hover, .tray_item:hover { background-color: var(--atelier-hover); color: var(--atelier-ink); }
+#mb_left,
+#mb_center,
+#mb_right { height: 38px; }
+.mb_item,
+.mb_status,
+.tray_glyph { color: var(--atelier-muted); }
+#mb_app,
+.mb_app_name,
+#mb_logo_glyph,
+.win_label { color: var(--atelier-ink); }
+.mb_item:hover,
+.tray_item:hover { background-color: var(--atelier-hover); color: var(--atelier-ink); }
 .win_item { background-color: var(--atelier-paper-3); border-color: var(--atelier-rule); border-radius: 4px; }
 .win_item.active { background: var(--atelier-forest); border-color: var(--atelier-brass); box-shadow: none; }
-.win_item.hidden, .tray_item.hidden, #tray_area.hidden { display: none !important; }
+.win_item.hidden,
+.tray_item.hidden,
+#tray_area.hidden { display: none !important; }
 .win_glyph {
   width: 14px; flex: 0 0 14px; margin-right: 4px;
   font-size: 12px; line-height: 14px; text-align: center;
 }
-
-.menu_panel, #toast, #switcher_strip {
+.menu_panel,
+#toast,
+#switcher_strip {
   background: var(--atelier-paper-2); color: var(--atelier-ink);
   border: 1px solid var(--atelier-rule); border-radius: 9px;
   box-shadow: 0 22px 56px var(--atelier-shadow); animation: none;
 }
 .menu_panel { top: 58px; }
 .menu_item:hover { background: var(--atelier-forest); box-shadow: none; }
-.menu_section_label, .mi_sym, .mi_key { color: var(--atelier-brass-hi); }
+.menu_section_label,
+.mi_sym,
+.mi_key { color: var(--atelier-brass-hi); }
 .mi_label { color: var(--atelier-ink); }
 .menu_sep { background-color: var(--atelier-rule); }
-
 #dock {
   bottom: 20px; width: 550px; height: 76px; margin-left: -275px;
   background: var(--atelier-paper-2); border: 1px solid var(--atelier-rule);
@@ -89,34 +100,53 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
 .dock_icon { border-radius: 10px; box-shadow: 0 8px 18px var(--atelier-shadow); }
 .dock_dot { background-color: var(--atelier-brass-hi); box-shadow: none; }
 .dock_sep { background: var(--atelier-rule); }
-
-.widget {
-  background: var(--atelier-paper-2); color: var(--atelier-ink);
-  border: 1px solid var(--atelier-rule); border-radius: 12px;
-  box-shadow: 0 18px 44px var(--atelier-shadow);
-}
-#wg_time, #wg_date, #wg_cpu, #wg_mem, #wg_disk, #toast_title, .sw_title { color: var(--atelier-ink); }
-#toast_msg, .sw_app { color: var(--atelier-muted); }
-
-.sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
+#toast_title,
+.sw_title { color: var(--atelier-ink); }
+#toast_msg,
+.sw_app { color: var(--atelier-muted); }
+.sheet_box,
+#settings_sheet.sheet_box,
+#about_box.about_box,
+#confirm_box.dialog_alert {
   background: var(--atelier-paper-2); color: var(--atelier-ink);
   border: 1px solid var(--atelier-rule); border-radius: 10px;
   box-shadow: 0 28px 80px var(--atelier-shadow);
 }
 #settings_title { color: var(--atelier-ink); border-bottom-color: var(--atelier-rule); }
-#settings_sidebar, #settings_btns, #confirm_btns { background: var(--atelier-paper); }
+#settings_sidebar,
+#settings_btns,
+#confirm_btns { background: var(--atelier-paper); }
 .panel_heading { color: var(--atelier-brass-hi); }
-.stab, .pref_label, .pref_hint, .pref_section, .wm_pref_name, .wm_pref_desc,
-.skin_desc, .cur_desc, .kb_desc { color: var(--atelier-muted); }
-.skin_name, .cur_name, .kb_name { color: var(--atelier-ink); }
-.stab:hover, .skin_card:hover, .cur_card:hover, .kb_card:hover, .wm_pref:hover { background-color: var(--atelier-hover); color: var(--atelier-ink); }
-.stab.active, .skin_card.selected, .cur_card.selected, .kb_card.selected, .wm_choice.selected {
+.stab,
+.pref_label,
+.pref_hint,
+.pref_section,
+.wm_pref_name,
+.wm_pref_desc,
+.skin_desc,
+.cur_desc,
+.kb_desc { color: var(--atelier-muted); }
+.skin_name,
+.cur_name,
+.kb_name { color: var(--atelier-ink); }
+.stab:hover,
+.skin_card:hover,
+.cur_card:hover,
+.kb_card:hover,
+.wm_pref:hover { background-color: var(--atelier-hover); color: var(--atelier-ink); }
+.stab.active,
+.skin_card.selected,
+.cur_card.selected,
+.kb_card.selected,
+.wm_choice.selected {
   background: var(--atelier-forest); color: var(--atelier-ink);
   border-color: var(--atelier-brass); box-shadow: none;
 }
 .skin_card.selected .skin_name { color: var(--atelier-ink); }
 .skin_card.selected .skin_desc { color: var(--atelier-brass-hi); }
-.pref_input, .pref_input_full, #wifi_password {
+.pref_input,
+.pref_input_full,
+#wifi_password {
   background: var(--atelier-paper); color: var(--atelier-ink);
   border-color: var(--atelier-rule); border-radius: 4px;
 }
@@ -127,16 +157,16 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
 .dlg_btn.primary { background: var(--atelier-brass); color: var(--atelier-paper); border-color: var(--atelier-brass-hi); }
 .dlg_btn:hover { background: var(--atelier-forest); color: var(--atelier-ink); }
 .dlg_btn.primary:hover { background: var(--atelier-brass-hi); color: var(--atelier-paper); }
-.dlg_btn:focus-visible, .skin_card:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
+.dlg_btn:focus-visible,
+.skin_card:focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
 
 @media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 1ms; transition-duration: 1ms; }
+* { animation-duration: 1ms; transition-duration: 1ms; }
 }
-
-
-/* Luna shell UX refinements: notifications, tray tips, Email app. */
+/* Luna shell UX refinements: notifications,
+tray tips,
+Email app. */
 .g_email { background: linear-gradient(145deg, #71b7ff, #5268df); }
-
 .notify_card {
   display: flex; flex-direction: column; gap: 3px; min-width: 0;
   padding: 8px 10px; margin: 3px 0; border-radius: 8px;
@@ -153,7 +183,6 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
   white-space: normal; overflow-wrap: anywhere;
 }
 .notify_legacy { display: none; }
-
 .tray_item { position: relative; }
 .tray_tip {
   position: absolute; top: 3px; right: 28px; min-width: 72px; max-width: 260px;

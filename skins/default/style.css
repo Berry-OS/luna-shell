@@ -1,4 +1,4 @@
-/* Hallmark · macrostructure: Workbench · tone: technical-utilitarian · anchor hue: violet
+//* Hallmark · macrostructure: Workbench · tone: technical-utilitarian · anchor hue: violet
  * theme: Cobalt adapted to Luna Moonlight · enrichment: none · nav/footer: shell-native
  * audience: general desktop users · use: fast window and desktop control
  * contrast: pass (40–41) · chrome: shell-native · responsive: desktop-session scope
@@ -20,7 +20,6 @@
   src: url("../fonts/web/Inter-Regular.ttf") format("truetype");
   font-display: swap;
 }
-
 /* Keep symbolic UI glyphs deterministic in both Chrome and luna-ui.  Emoji
    depend on the host's colour-font support and were the source of missing or
    mismatched icons in the native shell. */
@@ -36,10 +35,10 @@
 }
 .luna_icon { font-family: "Luna Symbols"; font-style: normal; speak: never; }
 .luna_brand { font-family: "Luna Brands"; font-style: normal; speak: never; }
-.tray_glyph.luna_icon, .win_glyph.luna_icon {
+.tray_glyph.luna_icon,
+.win_glyph.luna_icon {
   font-family: "Luna Symbols"; font-style: normal; speak: never;
 }
-
 :root {
   /* Signature accent: moonlight gradient (violet → gold) */
   --luna-accent:      #8d7bff;
@@ -91,9 +90,11 @@
   --dur-fast:         150ms;
   --dur-short:        220ms;
 }
-
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html, body {
+*,
+*::before,
+*::after { box-sizing: border-box; margin: 0; padding: 0; }
+html,
+body {
   width: 100%;
   height: 100%;
   min-height: 100%;
@@ -106,12 +107,10 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .hidden { display: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+* { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
-
 /* ── Background layer container ── */
 #bg_layer { position: absolute; inset: 0; }
-
 /* ── Wallpaper: Luna night sky ── */
 #wallpaper {
   position: absolute; left: 0; top: 0; width: 100%; height: 100%;
@@ -120,10 +119,9 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
     #2a2270 46%, #4d2a86 60%, #7c3a96 74%,
     #a94a8e 86%, #c65f78 96%, #d67862 100%);
 }
-#wallpaper.ocean  { background: linear-gradient(162deg, #00050f 0%, #001030 18%, #002d5e 38%, #00588e 56%, #0092c2 72%, #35c2e8 86%, #8fe6f4 100%); }
+##wallpaper.ocean { background: linear-gradient(162deg, #00050f 0%, #001030 18%, #002d5e 38%, #00588e 56%, #0092c2 72%, #35c2e8 86%, #8fe6f4 100%); }
 #wallpaper.forest { background: linear-gradient(162deg, #030a05 0%, #081c0e 20%, #12331a 38%, #1e5228 56%, #327a3a 72%, #5aa04a 86%, #a2cf6e 100%); }
 #wallpaper.sunset { background: linear-gradient(162deg, #0c0410 0%, #260a12 18%, #521424 36%, #8a2038 54%, #c8402e 70%, #ec7a2e 86%, #f8c25a 100%); }
-
 /* Aurora glow */
 #wp_aurora1 {
   position: absolute; left: 0; top: 0; width: 100%; height: 100%;
@@ -145,7 +143,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   0%   { transform: translate(0, 0) scale(1); opacity: 0.85; }
   100% { transform: translate(2%, -3%) scale(1.08); opacity: 1; }
 }
-
 /* Moon + halo */
 #wp_moon_halo {
   position: absolute;
@@ -162,7 +159,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   box-shadow: 0 0 50px 16px rgba(200, 190, 255, 0.25), 0 0 110px 40px rgba(244, 207, 140, 0.12);
   pointer-events: none;
 }
-
 /* Stars */
 .star { position: absolute; border-radius: 50%; background: #ffffff; animation: twinkle 4.5s ease-in-out infinite; }
 #wp_star1 { left: 10%; top: 13%; width: 3px;  height: 3px;  opacity: 0.90; animation-delay: 0.0s; }
@@ -200,14 +196,13 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border-top: 1px solid var(--luna-glass-edge);
   box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.05) inset, 0 -4px 12px rgba(0, 0, 0, 0.14);
 }
-#mb_left  { display: flex; flex-direction: row; align-items: center; gap: 4px; height: 32px; flex: 0 0 auto; min-width: 80px; }
+##mb_left { display: flex; flex-direction: row; align-items: center; gap: 4px; height: 32px; flex: 0 0 auto; min-width: 80px; }
 #mb_center {
   flex: 1 1 auto; min-width: 0; overflow: hidden;
   display: flex; flex-direction: row; align-items: center; justify-content: center;
   height: 32px; padding: 0 12px;
 }
 #mb_right { display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 4px; height: 32px; flex: 0 0 auto; }
-
 .mb_item {
   color: rgba(245, 245, 255, 0.92); font-size: 13px; text-align: center;
   height: 24px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
@@ -216,21 +211,21 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
 .mb_item:hover { background-color: rgba(255, 255, 255, 0.14); color: #ffffff; }
-#mb_logo    { width: 36px; }
+#mb#mb_logo { width: 36px; }
 #mb_logo_glyph { width: 16px; height: 16px; color: #f0ecff; font-size: 16px; line-height: 16px; text-align: center; }
-#mb_app, .mb_app_name {
+#mb_app,
+.mb_app_name {
   font-weight: 600; font-size: 13px; letter-spacing: 0.01em;
   max-width: 160px; overflow: hidden; text-overflow: ellipsis;
   color: rgba(255, 255, 255, 0.98); cursor: default;
 }
 #mb_app:hover { background-color: transparent; }
-.mb_status  { font-size: 12px; color: rgba(215, 222, 255, 0.80); }
-#mb_bat     { min-width: 44px; }
-#mb_wifi    { min-width: 58px; }
-#mb_clip    { min-width: 28px; font-size: 13px; }
-#mb_cc      { width: 30px; font-size: 14px; }
-#mb_clock   { min-width: 136px; font-size: 12px; font-weight: 500; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
-
+..mb_status { font-size: 12px; color: rgba(215, 222, 255, 0.80); }
+#mb_#mb_bat { min-width: 44px; }
+#mb#mb_wifi { min-width: 58px; }
+#mb#mb_clip { min-width: 28px; font-size: 13px; }
+#mb_c#mb_cc { width: 30px; font-size: 14px; }
+#m#mb_clock { min-width: 136px; font-size: 12px; font-weight: 500; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
 /* Window list (center of menubar).  min-width:0 + overflow:hidden lets the
  * list take leftover space after #mb_left / #mb_right so the clock stays on
  * screen; chips then shrink instead of pushing the bar. */
@@ -265,7 +260,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 0; max-width: 118px; flex: 1 1 auto;
 }
-
 /* System tray */
 #tray_area {
   display: flex; flex-direction: row; align-items: center; gap: 3px;
@@ -282,7 +276,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .tray_item.hidden { display: none !important; }
 #tray_area.hidden { display: none !important; }
 .tray_glyph { color: rgba(225, 230, 255, 0.90); font-size: 12px; text-align: center; }
-
 /* ── Menu panels (Dropdowns) ── */
 .menu_panel {
   position: absolute; top: 36px;
@@ -300,9 +293,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   from { opacity: 0; transform: scale(0.98); }
   to   { opacity: 1; transform: scale(1); }
 }
-
 #luna_menu { left: 8px; width: 256px; }
-#win_menu  { left: 200px; width: 210px; }
+##win_menu { left: 200px; width: 210px; }
 #clip_menu { right: 160px; left: auto; width: 288px; max-height: 420px; }
 .clip_empty {
   display: block; height: 38px; padding: 10px 14px;
@@ -310,14 +302,12 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .clip_preview { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #clip_menu { width: 280px; }
-
 .menu_section_label {
   display: block; height: 24px;
   text-align: left; color: var(--luna-text-dim);
   font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
   padding: 6px 12px 2px 12px;
 }
-
 .menu_item {
   display: flex; flex-direction: row; align-items: center; gap: 4px;
   width: 100%; height: 32px;
@@ -332,35 +322,45 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .menu_item:hover .mi_sym,
 .menu_item:hover .mi_label,
 .menu_item:hover .mi_key { color: #ffffff !important; }
-
 .mi_sym {
   width: 28px; flex: 0 0 28px;
   color: rgba(205, 212, 255, 0.78); font-size: 13px; text-align: center;
 }
 .mi_label { flex: 1 1 auto; color: var(--luna-text); font-size: 13px; font-weight: 500; }
 .mi_key { color: var(--luna-text-muted); font-size: 11px; margin-left: 8px; }
-
 .mi_destructive .mi_label { color: #ff6b63; }
 .mi_destructive:hover { background: linear-gradient(120deg, #ff453a, #e03228) !important; }
-
 .menu_sep {
   display: block; width: 92%; height: 1px;
   background-color: rgba(255, 255, 255, 0.08);
   margin: 4px auto;
 }
-
 /* ── Control Center ── */
 #control_center { right: 8px; width: 324px; height: auto; padding: 16px; }
-#wifi_menu, #bt_menu { right: 150px; width: 310px; height: auto; padding: 10px; }
-#wifi_head, #bt_head { display: flex; flex-direction: row; align-items: center; min-height: 34px; padding: 0 8px; }
-#wifi_title, #bt_title { flex: 1 1 auto; color: var(--luna-text); font-size: 14px; font-weight: 700; }
-#wifi_power, #bt_power { flex: 0 0 46px; }
-#wifi_status, #eth_status, #bt_status { display: block; color: var(--luna-text-muted); font-size: 11px; padding: 2px 8px 7px; }
+#wifi_menu,
+#bt_menu { right: 150px; width: 310px; height: auto; padding: 10px; }
+#wifi_head,
+#bt_head { display: flex; flex-direction: row; align-items: center; min-height: 34px; padding: 0 8px; }
+#wifi_title,
+#bt_title { flex: 1 1 auto; color: var(--luna-text); font-size: 14px; font-weight: 700; }
+#wifi_power,
+#bt_power { flex: 0 0 46px; }
+#wifi_status,
+#eth_status,
+#bt_status { display: block; color: var(--luna-text-muted); font-size: 11px; padding: 2px 8px 7px; }
 #eth_section { display: block; padding: 6px 8px 2px; }
-.wifi_network .mi_label, .eth_link .mi_label, .bt_device .mi_label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.wifi_network.connected, .eth_link.connected, .bt_device.connected { background: rgba(var(--luna-accent-rgb), 0.20); }
-.wifi_network.connected .mi_sym, .eth_link.connected .mi_sym, .bt_device.connected .mi_sym { color: var(--luna-accent-2); }
-.wifi_signal, .eth_state, .bt_state { color: var(--luna-text-muted); font-size: 10px; min-width: 32px; text-align: right; }
+.wifi_network .mi_label,
+.eth_link .mi_label,
+.bt_device .mi_label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wifi_network.connected,
+.eth_link.connected,
+.bt_device.connected { background: rgba(var(--luna-accent-rgb), 0.20); }
+.wifi_network.connected .mi_sym,
+.eth_link.connected .mi_sym,
+.bt_device.connected .mi_sym { color: var(--luna-accent-2); }
+.wifi_signal,
+.eth_state,
+.bt_state { color: var(--luna-text-muted); font-size: 10px; min-width: 32px; text-align: right; }
 #wifi_credentials { padding: 8px 6px 4px; }
 #wifi_selected { display: block; color: var(--luna-text-dim); font-size: 11px; margin: 0 2px 6px; }
 #wifi_password { width: 100%; height: 32px; padding: 0 9px; margin-bottom: 7px; border-radius: 7px; background: rgba(0,0,0,.28); border: 1px solid rgba(255,255,255,.14); color: var(--luna-text); font-size: 12px; }
@@ -399,37 +399,12 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .cc_label { color: var(--luna-text-dim); font-size: 11px; font-weight: 500; text-align: center; }
 .cc_section { display: block; text-align: left; color: var(--luna-text-muted); font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; margin: 12px 4px 6px 4px; }
 .cc_track { position: relative; height: 22px; border-radius: 11px; background-color: rgba(255, 255, 255, 0.10); border: 1px solid rgba(255, 255, 255, 0.06); margin: 0 2px 8px 2px; cursor: pointer; }
-.cc_fill  { position: absolute; left: 0; top: 0; height: 100%; width: 0%; border-radius: 11px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); pointer-events: none; }
+..cc_fill { position: absolute; left: 0; top: 0; height: 100%; width: 0%; border-radius: 11px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); pointer-events: none; }
 .cc_thumb { position: absolute; left: 0; top: 1px; width: 18px; height: 18px; border-radius: 50%; background-color: #ffffff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45); cursor: pointer; z-index: 2; }
 .cc_stat_row { display: flex; flex-direction: row; align-items: center; gap: 8px; margin: 6px 2px; }
 .cc_stat_label { color: var(--luna-text-dim); font-size: 11px; width: 32px; flex: 0 0 32px; text-align: left; font-weight: 600; }
 .cc_bar { flex: 1 1 auto; height: 6px; border-radius: 3px; background-color: rgba(255, 255, 255, 0.10); position: relative; overflow: hidden; }
 .cc_bar_fill { position: absolute; left: 0; top: 0; height: 100%; width: 40%; border-radius: 3px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); }
-
-/* ── Desktop widgets ── */
-.widget {
-  position: absolute;
-  background: linear-gradient(135deg, rgba(18, 19, 42, 0.52) 0%, rgba(10, 11, 26, 0.65) 100%);
-  backdrop-filter: blur(24px) saturate(1.6);
-  -webkit-backdrop-filter: blur(24px) saturate(1.6);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 22px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  padding: 16px 18px;
-}
-#widget_clock {
-  right: 24px; top: 52px; width: 220px; height: 110px;
-  transition: height var(--dur-short) var(--ease-out), padding var(--dur-short) var(--ease-out);
-}
-#widget_clock.stopwatch_mode { height: 160px; padding: 14px 16px; }
-#wg_clock_view { position: relative; width: 100%; height: 100%; }
-#wg_time {
-  font-family: var(--display-font);
-  color: #ffffff;
-  font-size: 46px; font-weight: 800; letter-spacing: -0.02em;
-  line-height: 1; width: calc(100% - 32px);
-}
-#wg_date { color: var(--luna-text-dim); font-size: 12px; font-weight: 500; margin-top: 6px; }
 .wg_clock_icon {
   display: flex; align-items: center; justify-content: center;
   width: 24px; height: 24px; border-radius: 8px;
@@ -440,38 +415,13 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .wg_clock_icon:hover { background: rgba(255, 255, 255, 0.14); color: #ffffff; }
 .wg_clock_icon:focus-visible { outline: 2px solid var(--luna-accent-2); outline-offset: 2px; }
-#wg_stopwatch_open { position: absolute; right: 0; top: 0; z-index: 2; }
-#wg_stopwatch_view { width: 100%; height: 100%; }
-#wg_stopwatch_head {
-  display: flex; flex-direction: row; align-items: center; gap: 8px;
-  width: 100%; height: 24px;
-}
-#wg_stopwatch_title {
-  flex: 1 1 auto; color: var(--luna-text); font-size: 12px; font-weight: 700;
-}
-#wg_stopwatch_state { color: var(--luna-text-muted); font-size: 10px; }
-#wg_stopwatch_time {
-  width: 100%; margin-top: 8px;
-  font-family: var(--display-font); font-variant-numeric: tabular-nums;
-  color: #ffffff; font-size: 34px; font-weight: 800; letter-spacing: -0.02em;
-  line-height: 1; text-align: center;
-}
-#wg_stopwatch_actions {
-  display: flex; flex-direction: row; gap: 8px;
-  width: 100%; margin-top: 12px;
-}
-#wg_stopwatch_actions .dlg_btn { flex: 1 1 0; min-width: 0; height: 30px; font-size: 12px; }
-#widget_stats.clock_below_stopwatch { top: 226px; }
-#widget_weather.clock_below_stopwatch { top: 398px; }
-#widget_stats { right: 24px; top: 176px; width: 220px; height: 156px; }
 .st_row { display: flex; flex-direction: row; justify-content: space-between; margin-top: 8px; }
 .st_label { color: var(--luna-text-dim); font-size: 11px; font-weight: 500; }
-.st_val   { color: #ffffff; font-size: 11px; font-weight: 700; text-align: right; }
-.st_bar   { height: 4px; border-radius: 2px; background-color: rgba(255, 255, 255, 0.10); margin-top: 5px; position: relative; overflow: hidden; }
-.st_fill  { position: absolute; left: 0; top: 0; height: 100%; width: 20%; border-radius: 2px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); }
-.st_fill.g_mem  { background: linear-gradient(90deg, #bf5af2, #9b3fe0); }
+.s.st_val { color: #ffffff; font-size: 11px; font-weight: 700; text-align: right; }
+.s.st_bar { height: 4px; border-radius: 2px; background-color: rgba(255, 255, 255, 0.10); margin-top: 5px; position: relative; overflow: hidden; }
+..st_fill { position: absolute; left: 0; top: 0; height: 100%; width: 20%; border-radius: 2px; background: linear-gradient(90deg, var(--luna-accent-2), var(--luna-accent)); }
+..st_fill.g_mem { background: linear-gradient(90deg, #bf5af2, #9b3fe0); }
 .st_fill.g_disk { background: linear-gradient(90deg, #30d158, #25a244); }
-
 /* ── Weather widget + popover (Open-Meteo) ── */
 #mb_weather { gap: 4px; min-width: 52px; }
 #mb_weather_temp { font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -487,7 +437,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 #weather_go { flex: 0 0 auto; height: 30px; padding: 0 12px; font-size: 12px; }
 #weather_body { padding: 14px 16px 12px; }
-#weather_hint, #weather_error {
+#weather_hint,
+#weather_error {
   display: block; text-align: center; font-size: 12px; color: var(--luna-text-muted);
   padding: 18px 8px;
 }
@@ -508,7 +459,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   font-size: 11px; color: var(--luna-text-muted);
   border-top: 1px solid rgba(255, 255, 255, 0.06); padding-top: 10px; margin-bottom: 10px;
 }
-#weather_forecast, #wg_wx_forecast {
+#weather_forecast {
   display: flex; flex-direction: row; gap: 6px; justify-content: space-between;
 }
 .wf_day { flex: 1 1 0; text-align: center; font-size: 11px; color: rgba(255, 255, 255, 0.55); }
@@ -516,16 +467,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .wf_icon { font-size: 16px; color: var(--luna-accent-2); margin: 4px 0; }
 .wf_temp { font-weight: 600; font-size: 12px; color: #fff; margin-top: 2px; }
 .wf_temp span { opacity: 0.55; font-size: 11px; font-weight: 500; }
-
-#widget_weather { right: 24px; top: 348px; width: 220px; height: 168px; }
-#wg_wx_main {
-  display: flex; flex-direction: row; align-items: center; gap: 8px;
-  margin-top: 8px; margin-bottom: 10px;
-}
-#wg_wx_icon { font-size: 22px; color: var(--luna-accent); width: 28px; text-align: center; }
-#wg_wx_desc { color: var(--luna-text-dim); font-size: 12px; font-weight: 500; }
-#widget_weather .wf_temp { font-size: 11px; }
-
 /* ── Calendar popover ── */
 #calendar_menu {
   right: 8px; width: 300px; height: auto; padding: 12px 14px 14px;
@@ -588,7 +529,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .cal_day.today.has_alarm::after { background: #ffffff; }
 #cal_today_btn { width: 100%; height: 30px; }
-
 #cal_alarm {
   margin-top: 10px;
   padding-top: 10px;
@@ -637,7 +577,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   display: flex; flex-direction: row; align-items: center; gap: 6px;
   margin-top: 6px;
 }
-#cal_alarm_time, #cal_alarm_note {
+#cal_alarm_time,
+#cal_alarm_note {
   height: 30px; padding: 0 8px; border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.35);
   color: #fff; font-size: 12px;
@@ -654,9 +595,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .cal_chip:hover { background: rgba(var(--luna-gold-rgb), 0.22); }
 #cal_alarm_add { flex: 0 0 auto; height: 30px; padding: 0 10px; font-size: 12px; }
-
 #mb_clock.ringing { color: var(--luna-gold); }
-
 #alarm_ring { z-index: 900; }
 #alarm_ring_card {
   position: relative; z-index: 910;
@@ -701,11 +640,12 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   display: flex; flex-direction: row; gap: 8px; width: 100%;
   margin-top: 20px;
 }
-#alarm_snooze, #alarm_dismiss { flex: 1 1 50%; height: 34px; }
+#alarm_snooze,
+#alarm_dismiss { flex: 1 1 50%; height: 34px; }
 @media (prefers-reduced-motion: reduce) {
-  #alarm_ring_card, #alarm_ring_orb { animation: none; }
+#alarm_ring_card,
+  #alarm_ring_orb { animation: none; }
 }
-
 /* Network detail dialog reuses About chrome sizing */
 #net_detail_box.about_box {
   left: calc(50% - 210px); top: calc(42% - 250px);
@@ -753,18 +693,16 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border-top: 1px solid var(--dialog-divider);
 }
 #net_detail_btns .dlg_btn { min-width: 88px; }
-
 /* ── Traffic light window controls ── */
 .tl {
   position: absolute; top: 16px; width: 12px; height: 12px; border-radius: 50%;
   cursor: pointer; z-index: 20;
   transition: transform 120ms var(--ease-out), opacity 120ms var(--ease-out);
 }
-.tl_red    { left: 16px; background-color: #ff5f57; box-shadow: 0 0 0 1px rgba(255, 60, 50, 0.3); }
+.tl.tl_red { left: 16px; background-color: #ff5f57; box-shadow: 0 0 0 1px rgba(255, 60, 50, 0.3); }
 .tl_yellow { left: 34px; background-color: #febc2e; box-shadow: 0 0 0 1px rgba(255, 180, 0, 0.3); }
-.tl_green  { left: 52px; background-color: #28c840; box-shadow: 0 0 0 1px rgba(0, 180, 40, 0.3); }
-.tl:hover  { transform: scale(1.15); }
-
+..tl_green { left: 52px; background-color: #28c840; box-shadow: 0 0 0 1px rgba(0, 180, 40, 0.3); }
+..tl:hover { transform: scale(1.15); }
 /* ── Modal / sheet overlays ── */
 .modal_sheet {
   position: absolute; left: 0; top: 0; width: 100%; height: 100%;
@@ -776,26 +714,28 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   from { opacity: 0; }
   to   { opacity: 1; }
 }
-
 .modal_backdrop {
   position: absolute; inset: 0;
   background: rgba(4, 5, 12, 0.56);
   backdrop-filter: blur(18px) saturate(0.9) brightness(0.72);
   -webkit-backdrop-filter: blur(18px) saturate(0.9) brightness(0.72);
 }
-
 /* Utility windows launched from the Luna menu are modeless.  On the Wayland
- * backend their surface input region is also clipped to .dialog_window, so
+ * backend their surface input region is also clipped to .dialog_window,
+so
  * transparent pixels genuinely pass through to applications underneath. */
 .modeless_dialog { pointer-events: none; animation: none; }
 .modeless_dialog .modal_backdrop { display: none; }
 .modeless_dialog .dialog_window { pointer-events: auto; }
-
 /* ── Dialog window chrome ────────────────────────────────────────────────
  * Shared surface for every utility window and alert (Settings / About /
- * Confirm).  One definition drives background, border, radius, shadow,
- * entrance animation and the traffic-light offset; each dialog only adds
- * its own size, internal layout and (where relevant) content overrides. */
+ * Confirm).  One definition drives background,
+border,
+radius,
+shadow,
+* entrance animation and the traffic-light offset; each dialog only adds
+ * its own size,
+internal layout and (where relevant) content overrides. */
 .dialog_window {
   position: absolute;
   z-index: 810;
@@ -811,13 +751,14 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   to   { opacity: 1; transform: scale(1) translateY(0); }
 }
 .dialog_window .tl { top: 20px; }
-
 /* Alerts expose only the close control; minimize/maximize do not apply. */
-.dialog_alert .tl_yellow, .dialog_alert .tl_green { display: none; }
+.dialog_alert .tl_yellow,
+.dialog_alert .tl_green { display: none; }
 .dialog_alert .tl_red { display: block; cursor: pointer; z-index: 12; }
-
 /* Shared title-bar drag handle for all three dialog types. */
-#about_drag, #settings_drag, #confirm_drag {
+#about_drag,
+#settings_drag,
+#confirm_drag {
   position: absolute; left: 0; top: 0; width: 100%;
   height: var(--dialog-titlebar);
   z-index: 10;
@@ -826,9 +767,9 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border-top-left-radius: inherit;
   border-top-right-radius: inherit;
 }
-
 /* Shared footer bar (Settings & About action rows). */
-#settings_btns, #about_btns {
+#settings_btns,
+#about_btns {
   display: flex; flex-direction: row; align-items: center; justify-content: flex-end;
   background: var(--dialog-footer);
   border-top: 1px solid var(--dialog-divider);
@@ -844,7 +785,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   padding: 12px 18px;
 }
 #about_btns .dlg_btn { min-width: 88px; }
-
 /* ── Confirm / Alert dialog ── */
 #confirm_box.dialog_alert {
   left: calc(50% - 210px); top: calc(44% - 120px);
@@ -853,14 +793,12 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   display: flex; flex-direction: column;
   text-align: left;
 }
-
 #confirm_content {
   display: flex; flex-direction: row; align-items: flex-start;
   gap: 16px;
   width: 100%;
   padding: 68px 28px 20px;
 }
-
 #confirm_icon {
   width: 44px; height: 44px; flex: 0 0 44px;
   border-radius: 12px;
@@ -880,24 +818,20 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border-color: rgba(var(--luna-accent-rgb), 0.26);
   color: var(--luna-accent-2);
 }
-
 #confirm_copy {
   display: flex; flex-direction: column; align-items: flex-start;
   gap: 7px; width: 304px; flex: 0 1 304px; min-width: 0;
 }
-
 #confirm_title {
   color: #ffffff; font-family: var(--display-font);
   font-size: 17px; line-height: 1.2; font-weight: 700;
   letter-spacing: -0.02em; flex: 0 0 auto;
 }
-
 #confirm_msg {
   color: var(--luna-text-dim); text-align: left;
   font-size: 13px; line-height: 1.5;
   width: 100%; min-height: 40px; padding: 0;
 }
-
 #confirm_btns {
   position: absolute; left: 0; bottom: 0;
   display: flex; flex-direction: row; justify-content: flex-end; align-items: center;
@@ -906,8 +840,10 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   background: var(--dialog-footer);
   border-top: 1px solid var(--dialog-divider);
 }
-/* ── About This PC — a compact utility panel, not a second splash screen.
- * The icon, cards and type deliberately sit below the title-bar controls. */
+/* ── About This PC — a compact utility panel,
+not a second splash screen.
+ * The icon,
+cards and type deliberately sit below the title-bar controls. */
 #about_box.about_box {
   left: calc(50% - 210px); top: calc(42% - 230px);
   width: 392px; height: auto; min-height: 500px;
@@ -922,8 +858,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
    * inside padding.  70px leaves the dialog title bar completely clear. */
   padding: 70px 22px 18px;
 }
-
-/* Moon badge — squircle + crescent-moon language, shared visually with
+/* Moon badge — squircle + crescent-moon language,
+shared visually with
  * #confirm_icon above. */
 #about_icon {
   position: relative;
@@ -935,7 +871,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   display: flex; align-items: center; justify-content: center;
 }
 #about_icon .luna_icon { color: #e4e0f5; font-size: 30px; line-height: 1; }
-
 #about_title {
   font-family: var(--display-font);
   color: var(--luna-text);
@@ -958,8 +893,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   box-shadow: none;
 }
 #about_sep { width: 100%; height: 1px; background: var(--dialog-divider); margin: 16px 0 12px; }
-
-/* Spec grid: single-column stat cards, macOS "About This Mac" style */
+/* Spec grid: single-column stat cards,
+macOS "About This Mac" style */
 #about_grid { width: 100%; display: grid; grid-template-columns: 1fr; gap: 6px; }
 .about_spec {
   display: flex; flex-direction: row; align-items: center; gap: 8px;
@@ -982,7 +917,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .spec_text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .spec_label { font-size: 9px; font-weight: 700; letter-spacing: 0.045em; text-transform: uppercase; color: var(--luna-text-muted); }
 .spec_value { font-size: 11px; font-weight: 600; letter-spacing: 0.005em; color: var(--luna-text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
 /* ── Settings sheet ── */
 #settings_sheet.sheet_box {
   left: calc(50% - 310px); top: calc(42% - 280px);
@@ -1013,14 +947,12 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   min-width: 0; min-height: 0; padding: 20px 24px;
   background-color: transparent; overflow-y: auto;
 }
-
 .panel_heading {
   color: var(--luna-accent-2); font-size: 11px; font-weight: 700;
   letter-spacing: 0.08em; text-transform: uppercase;
   margin-bottom: 14px;
 }
 .stab_icon { margin-right: 8px; opacity: 0.85; font-size: 12px; }
-
 /* Sidebar Tabs */
 .stab {
   width: 100%; height: 34px; text-align: left;
@@ -1044,7 +976,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border: 1px solid rgba(var(--luna-accent-rgb), 0.45);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
-
 /* Pref rows & inputs */
 #settings_panel_apps { flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; }
 .pref_row { display: flex; flex-direction: row; align-items: center; gap: 14px; height: 36px; flex: 0 0 36px; }
@@ -1060,7 +991,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .pref_input:focus { outline: none; border-color: var(--luna-accent); box-shadow: 0 0 0 3px rgba(var(--luna-accent-rgb), 0.25); }
 .dock_pref { flex: 0 0 38px; cursor: pointer; }
 .dock_pref:focus-visible { outline: 3px solid var(--luna-accent); outline-offset: 2px; border-radius: 12px; }
-
 /* Display panel elements */
 #settings_panel_disp { flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
 #settings_panel_language { flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; }
@@ -1068,9 +998,9 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #settings_panel_sound { flex: 1 1 auto; display: flex; flex-direction: column; gap: 8px; }
 #settings_panel_wm { flex: 1 1 auto; display: flex; flex-direction: column; gap: 6px; }
 #btn_open_alsamixer { width: auto; min-width: 140px; margin-left: auto; }
-#audio_backend_status, #bright_backend_status { margin-top: 4px; }
+#audio_backend_status,
+#bright_backend_status { margin-top: 4px; }
 .pref_section { color: var(--luna-text-dim); font-size: 11.5px; font-weight: 600; margin: 16px 0 8px 0; }
-
 .shortcut_row {
   display: flex; flex-direction: row; align-items: center; gap: 12px;
   width: 100%; min-height: 52px; padding: 8px 12px;
@@ -1097,13 +1027,11 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   letter-spacing: 0.02em;
 }
 .shortcut_row.capturing .shortcut_key { background-color: rgba(var(--luna-accent-rgb), 0.35); }
-
 .scale_pref { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px 0; }
 .scale_pref .pref_section { margin: 10px 0 0 0; }
 .scale_pref_head { display: flex; flex-direction: row; align-items: baseline; justify-content: space-between; gap: 12px; }
 .scale_val { color: #ffffff; font-size: 12.5px; font-weight: 700; min-width: 48px; text-align: right; }
 .scale_track { margin: 4px 0 2px 0; }
-
 /* Hallmark · macrostructure: Catalogue · tone: quiet-utilitarian · anchor hue: violet
  * component: skin picker · states: default · hover · focus · active · disabled · loading · error · success
  */
@@ -1125,7 +1053,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .skin_card.disabled { opacity: 0.5; cursor: not-allowed; }
 .skin_card.loading { opacity: 0.72; }
 .skin_card.error { border-color: var(--skin-error); }
-.skin_card.success, .skin_card.selected {
+.skin_card.success,
+.skin_card.selected {
   border-color: var(--luna-accent);
   background-color: rgba(var(--luna-accent-rgb), 0.14);
 }
@@ -1133,13 +1062,17 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   width: 40px; height: 38px; flex: 0 0 40px;
   border-radius: 6px; border: 1px solid var(--luna-glass-edge);
 }
-.skin_preview_0, .skin_preview_3, .skin_preview_6 { background: linear-gradient(145deg, var(--skin-preview-a), var(--skin-preview-b)); }
-.skin_preview_1, .skin_preview_4, .skin_preview_7 { background: linear-gradient(145deg, var(--skin-preview-c), var(--skin-preview-d)); }
-.skin_preview_2, .skin_preview_5 { background: linear-gradient(145deg, var(--skin-preview-e), var(--skin-preview-f)); }
+.skin_preview_0,
+.skin_preview_3,
+.skin_preview_6 { background: linear-gradient(145deg, var(--skin-preview-a), var(--skin-preview-b)); }
+.skin_preview_1,
+.skin_preview_4,
+.skin_preview_7 { background: linear-gradient(145deg, var(--skin-preview-c), var(--skin-preview-d)); }
+.skin_preview_2,
+.skin_preview_5 { background: linear-gradient(145deg, var(--skin-preview-e), var(--skin-preview-f)); }
 .skin_copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .skin_name { color: var(--luna-text); font-size: 11.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .skin_desc { color: var(--luna-text-muted); font-size: 9.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
 #wp_thumbs_row { display: flex; flex-direction: row; gap: 12px; height: 60px; margin-bottom: 4px; }
 .wp_thumb { width: 92px; height: 56px; border-radius: 10px; cursor: pointer; border: 2px solid rgba(255, 255, 255, 0.10); transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
 .wp_thumb.selected { border-color: var(--luna-accent); box-shadow: 0 0 16px rgba(var(--luna-accent-rgb), 0.40); transform: translateY(-2px); }
@@ -1150,8 +1083,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .wp_thumb.loading { opacity: 0.72; }
 .wp_thumb.error { border-color: var(--skin-error); }
 .wp_thumb.success { border-color: var(--luna-gold); }
-.wp_t_night  { background: linear-gradient(135deg, #06071a 0%, #2e2472 55%, #833a94 100%); }
-.wp_t_ocean  { background: linear-gradient(135deg, #000b18 0%, #00326a 55%, #40c8f0 100%); }
+..wp_t_night { background: linear-gradient(135deg, #06071a 0%, #2e2472 55%, #833a94 100%); }
+..wp_t_ocean { background: linear-gradient(135deg, #000b18 0%, #00326a 55%, #40c8f0 100%); }
 .wp_t_forest { background: linear-gradient(135deg, #040b04 0%, #163418 55%, #58a84a 100%); }
 .wp_t_sunset { background: linear-gradient(135deg, #0e0510 0%, #5a1c10 55%, #e87040 100%); }
 .wp_label_row { display: flex; flex-direction: row; gap: 12px; height: 18px; margin-bottom: 8px; }
@@ -1165,7 +1098,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   background-color: rgba(var(--luna-accent-rgb), 0.16);
   color: var(--luna-text);
 }
-
 #cur_thumbs_row { display: flex; flex-direction: row; gap: 12px; height: 100px; margin-bottom: 6px; }
 .cur_card {
   width: 120px; height: 92px;
@@ -1183,7 +1115,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .cur_p_miku { background: linear-gradient(145deg, #39c5cf 0%, #1a8a96 45%, #e12885 100%); border: 1px solid rgba(255, 255, 255, 0.3); }
 .cur_name { color: #ffffff; font-size: 12px; font-weight: 600; text-align: center; }
 .cur_desc { color: var(--luna-text-muted); font-size: 10px; text-align: center; }
-
 #kb_thumbs_row { display: flex; flex-direction: row; flex-wrap: wrap; gap: 10px; margin-bottom: 6px; }
 .kb_current {
   display: block; width: 100%; padding: 10px 12px; margin-bottom: 4px;
@@ -1207,7 +1138,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .kb_name { color: #ffffff; font-size: 12px; font-weight: 600; }
 .kb_desc { color: var(--luna-text-muted); font-size: 10px; }
 .kb_help { color: var(--luna-text-muted); font-size: 10.5px; line-height: 1.5; margin-top: 2px; }
-
 /* Hallmark · component: settings dialog · genre: modern-minimal · theme: Luna Moonlight
  * states: default · hover · focus · active · disabled · loading · error · success
  * contrast: pass (40–41) · responsive: desktop-session scope
@@ -1230,7 +1160,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .option_card.disabled { opacity: 0.45; cursor: not-allowed; }
 .option_card.loading { opacity: 0.72; }
 .option_card.error { border-color: var(--skin-error); }
-.option_card.success, .option_card.selected {
+.option_card.success,
+.option_card.selected {
   border-color: var(--luna-accent);
   background-color: var(--color-settings-selected);
 }
@@ -1241,12 +1172,11 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border-left: 2px solid var(--luna-gold);
   color: var(--luna-text-dim); font-size: 10.5px; line-height: 1.45;
 }
-
 .pref_hint { color: var(--luna-text-muted); font-size: 11px; margin-bottom: 12px; }
 .pref_row_full { display: flex; flex-direction: row; margin-top: 4px; height: 36px; }
 .pref_input_full { flex: 1 1 auto; height: 32px; background-color: rgba(0, 0, 0, 0.25); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: var(--radius-sm); color: #ffffff; font-size: 12.5px; padding: 0 12px; }
-
-/* Window settings use compact rows, constant geometry and transform-only state. */
+/* Window settings use compact rows,
+constant geometry and transform-only state. */
 .wm_pref {
   min-height: 54px; display: flex; flex-direction: row; align-items: center;
   gap: 12px; padding: 8px 10px; cursor: pointer;
@@ -1273,11 +1203,16 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .dock_pref.on .wm_switch { background-color: var(--luna-accent-dark); border-color: var(--luna-accent-2); }
 .dock_pref.on .wm_switch_knob { transform: translateX(16px); background-color: var(--luna-text); }
 .wm_pref:active { background-color: rgba(var(--luna-accent-rgb), 0.10); }
-.wm_pref.disabled, .wm_choice.disabled { opacity: 0.45; cursor: not-allowed; }
-.wm_pref.loading, .wm_choice.loading { opacity: 0.72; }
-.wm_pref.error, .wm_choice.error { border-color: var(--skin-error); }
-.wm_pref.success, .wm_choice.success { border-color: var(--luna-accent); }
-.wm_pref:focus-visible, .wm_choice:focus-visible { outline: 3px solid rgba(var(--luna-accent-rgb), 0.58); outline-offset: 2px; }
+.wm_pref.disabled,
+.wm_choice.disabled { opacity: 0.45; cursor: not-allowed; }
+.wm_pref.loading,
+.wm_choice.loading { opacity: 0.72; }
+.wm_pref.error,
+.wm_choice.error { border-color: var(--skin-error); }
+.wm_pref.success,
+.wm_choice.success { border-color: var(--luna-accent); }
+.wm_pref:focus-visible,
+.wm_choice:focus-visible { outline: 3px solid rgba(var(--luna-accent-rgb), 0.58); outline-offset: 2px; }
 .wm_choice_row { display: flex; flex-direction: row; gap: 8px; margin-bottom: 4px; }
 .wm_choice {
   height: 44px; min-width: 92px; display: flex; align-items: center; justify-content: center;
@@ -1289,7 +1224,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .wm_choice:hover { background-color: rgba(255, 255, 255, 0.08); color: var(--luna-text); }
 .wm_choice:active { transform: translateY(1px); }
 .wm_choice.selected { border-color: var(--luna-accent); background-color: rgba(var(--luna-accent-rgb), 0.16); color: var(--luna-text); }
-
 /* ── Dialog & Action Buttons ── */
 .dlg_btn {
   display: inline-flex; align-items: center; justify-content: center;
@@ -1319,7 +1253,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   box-shadow: none;
   transform: none;
 }
-
 .dlg_btn.primary {
   background: linear-gradient(180deg, #a898ff, var(--luna-accent));
   border-color: rgba(222, 217, 255, 0.36);
@@ -1342,13 +1275,12 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   box-shadow: 0 6px 22px rgba(230, 40, 30, 0.55);
   transform: none;
 }
-
-#confirm_cancel, #confirm_ok {
+#confirm_cancel,
+#confirm_ok {
   display: flex;
   width: 112px; height: 44px; min-width: 112px;
   flex: 0 0 112px;
 }
-
 /* ── Launchpad ── */
 #launchpad {
   position: absolute; inset: 0;
@@ -1380,8 +1312,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .lp_app:hover .lp_icon { transform: translateY(-4px) scale(1.05); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32), 0 0 0 2px rgba(var(--luna-accent-rgb), 0.50); }
 .lp_icon { width: 72px; height: 72px; border-radius: 20px; color: #ffffff; font-size: 28px; text-align: center; padding-top: 20px; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28); transition: transform var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
 .lp_label { width: 110px; color: var(--luna-text); font-size: 12.5px; font-weight: 500; text-align: center; }
-#lp_hint  { color: var(--luna-text-muted); font-size: 12px; margin-top: 12px; flex: 0 0 auto; }
-
+##lp_hint { color: var(--luna-text-muted); font-size: 12px; margin-top: 12px; flex: 0 0 auto; }
 /* ── Notification toast ── */
 #toast {
   position: absolute; right: 16px; top: 44px;
@@ -1396,12 +1327,11 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   padding: 14px 16px; z-index: 600;
 }
 #toast_icon { width: 44px; height: 44px; border-radius: 14px; flex: 0 0 44px; background: linear-gradient(145deg, var(--luna-accent), var(--luna-accent-dark)); color: #ffffff; font-size: 22px; display: flex; align-items: center; justify-content: center; }
-#toast_body  { flex: 1 1 auto; }
+##toast_body { flex: 1 1 auto; }
 #toast_title { color: #ffffff; font-size: 13.5px; font-weight: 600; }
-#toast_msg   { color: var(--luna-text-dim); font-size: 12px; margin-top: 2px; }
+#t#toast_msg { color: var(--luna-text-dim); font-size: 12px; margin-top: 2px; }
 #toast_close { width: 22px; height: 22px; flex: 0 0 22px; border-radius: 50%; background-color: rgba(255, 255, 255, 0.08); color: var(--luna-text-dim); font-size: 13px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background-color var(--dur-fast) var(--ease-out); }
 #toast_close:hover { background-color: rgba(255, 255, 255, 0.20); color: #ffffff; }
-
 /* ── Dock ── */
 #dock {
   position: absolute; bottom: 14px; left: 50%;
@@ -1442,18 +1372,17 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .dock_item:focus-visible .dock_label { opacity: 1; }
 .dock_sep { width: 1px; flex: 0 0 1px; height: 54px; background: linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.22), transparent); }
 
-/* App Gradients */
-.g_files     { background: linear-gradient(145deg, #6cd4ff, #0a6fe8); }
+/* /* App Gradients */
+.g_files { background: linear-gradient(145deg, #6cd4ff, #0a6fe8); }
 .g_launchpad { background: linear-gradient(145deg, #e2e6f2, #a6b0c8); color: #283456; }
-.g_terminal  { background: linear-gradient(145deg, #1b1f30, #08090f); color: #38e05a; font-size: 18px; padding-top: 15px; }
-.g_browser   { background: linear-gradient(145deg, #3ee0d8, #5a6ef2); }
-.g_editor    { background: linear-gradient(145deg, #ffab2e, #ffd83e); color: #4a2c00; }
-.g_music     { background: linear-gradient(145deg, #ff6d8e, #c81a68); }
-.g_settings  { background: linear-gradient(145deg, #b8c0d4, #747e96); }
-.g_trash     { background: linear-gradient(145deg, #d4dcec, #8a94ac); color: #343e58; }
-.g_demo      { background: linear-gradient(145deg, #bda6ff, #8248f4); font-size: 22px; padding-top: 22px; }
-.g_hello     { background: linear-gradient(145deg, #3ee6a8, #0dcf94); color: #063824; font-size: 24px; padding-top: 20px; }
-
+..g_terminal { background: linear-gradient(145deg, #1b1f30, #08090f); color: #38e05a; font-size: 18px; padding-top: 15px; }
+.g.g_browser { background: linear-gradient(145deg, #3ee0d8, #5a6ef2); }
+.g_.g_editor { background: linear-gradient(145deg, #ffab2e, #ffd83e); color: #4a2c00; }
+.g_m.g_music { background: linear-gradient(145deg, #ff6d8e, #c81a68); }
+..g_settings { background: linear-gradient(145deg, #b8c0d4, #747e96); }
+.g_t.g_trash { background: linear-gradient(145deg, #d4dcec, #8a94ac); color: #343e58; }
+.g_de.g_demo { background: linear-gradient(145deg, #bda6ff, #8248f4); font-size: 22px; padding-top: 22px; }
+.g_h.g_hello { background: linear-gradient(145deg, #3ee6a8, #0dcf94); color: #063824; font-size: 24px; padding-top: 20px; }
 /* ── Alt+Tab Switcher ── */
 .switcher_overlay {
   position: absolute; inset: 0;
@@ -1493,16 +1422,15 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   font-size: 14px; font-weight: 600; line-height: 1.25;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-
-/* Compact icon-only status items: labels were removed from Wi-Fi/AC, so do
+/* Compact icon-only status items: labels were removed from Wi-Fi/AC,
+so do
  * not retain their old text-sized minimum hit boxes. */
 #mb_wifi { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
 #mb_bat.icon_only { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
-
-
-/* Luna shell UX refinements: notifications, tray tips, Email app. */
+/* Luna shell UX refinements: notifications,
+tray tips,
+Email app. */
 .g_email { background: linear-gradient(145deg, #71b7ff, #5268df); }
-
 .notify_card {
   display: flex; flex-direction: column; gap: 3px; min-width: 0;
   padding: 8px 10px; margin: 3px 0; border-radius: 8px;
@@ -1519,7 +1447,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   white-space: normal; overflow-wrap: anywhere;
 }
 .notify_legacy { display: none; }
-
 .tray_item { position: relative; }
 /* The slot owns hit-testing. This matches the other menubar buttons and keeps
  * hover/right-click behavior independent of which glyph pixel was hit. */
