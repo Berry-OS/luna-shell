@@ -1,4 +1,4 @@
-//* Hallmark · theme: Windows 95 · chrome: taskbar · enrichment: Tier A CSS
+/* Hallmark · theme: Windows 95 · chrome: taskbar · enrichment: Tier A CSS
  * audience: retro desktop users · use: live desktop skin switching
  */
 :root {
@@ -41,8 +41,9 @@
   --radius-md: 0;
   --radius-sm: 0;
 }
-html,
-body { background: var(--w95-teal); color: var(--w95-ink); }
+
+html, body { background: var(--w95-teal); color: var(--w95-ink); }
+
 #menubar,
 #menubar.edge_bottom {
   top: auto; bottom: 0; height: 28px; padding: 0 2px;
@@ -50,9 +51,7 @@ body { background: var(--w95-teal); color: var(--w95-ink); }
   border: 0; border-top: 2px solid var(--w95-white);
   border-radius: 0; box-shadow: inset 0 1px var(--w95-grey-hi);
 }
-#mb_left,
-#mb_center,
-#mb_right { height: 28px; }
+#mb_left, #mb_center, #mb_right { height: 28px; }
 #mb_logo {
   width: auto; min-width: 54px; height: 22px; padding: 0 8px;
   border-radius: 0;
@@ -63,16 +62,9 @@ body { background: var(--w95-teal); color: var(--w95-ink); }
   border-bottom: 2px solid #000000;
   box-shadow: inset -1px -1px var(--w95-grey-lo), inset 1px 1px var(--w95-grey-hi);
 }
-#mb_logo_glyph,
-#mb_app,
-.mb_app_name,
-.mb_item,
-.mb_status,
-.tray_glyph,
-.win_label { color: var(--w95-ink); }
+#mb_logo_glyph, #mb_app, .mb_app_name, .mb_item, .mb_status, .tray_glyph, .win_label { color: var(--w95-ink); }
 .mb_item { border-radius: 0; height: 22px; }
-.mb_item:hover,
-.tray_item:hover { background-color: transparent; color: var(--w95-ink); }
+.mb_item:hover, .tray_item:hover { background-color: transparent; color: var(--w95-ink); }
 .win_item {
   height: 22px; border-radius: 0; padding: 0 8px;
   background: var(--w95-grey);
@@ -88,6 +80,7 @@ body { background: var(--w95-teal); color: var(--w95-ink); }
   border-right: 2px solid var(--w95-white);
   border-bottom: 2px solid var(--w95-white);
 }
+
 .menu_panel {
   top: auto; bottom: 30px;
   background: var(--w95-grey); color: var(--w95-ink);
@@ -99,18 +92,13 @@ body { background: var(--w95-teal); color: var(--w95-ink); }
 }
 .menu_item { border-radius: 0; }
 .menu_item:hover { background: var(--w95-navy); box-shadow: none; }
-.menu_item:hover .mi_label,
-.menu_item:hover .mi_sym,
-.menu_item:hover .mi_key { color: var(--w95-white); }
-.menu_section_label,
-.mi_label,
-.mi_sym,
-.mi_key { color: var(--w95-ink); }
+.menu_item:hover .mi_label, .menu_item:hover .mi_sym, .menu_item:hover .mi_key { color: var(--w95-white); }
+.menu_section_label, .mi_label, .mi_sym, .mi_key { color: var(--w95-ink); }
 .menu_sep { background-color: var(--w95-grey-lo); }
-#dock,
-#dock.hidden { display: none !important; }
-#toast,
-#switcher_strip {
+
+#dock, #dock.hidden { display: none !important; }
+
+#toast, #switcher_strip {
   background: var(--w95-grey); color: var(--w95-ink);
   border-top: 2px solid var(--w95-white);
   border-left: 2px solid var(--w95-white);
@@ -118,14 +106,9 @@ body { background: var(--w95-teal); color: var(--w95-ink); }
   border-bottom: 2px solid #000000;
   border-radius: 0; box-shadow: 2px 2px 0 var(--w95-shadow);
 }
-#toast_title,
-#toast_msg,
-.sw_title,
-.sw_app { color: var(--w95-ink); }
-.sheet_box,
-#settings_sheet.sheet_box,
-#about_box.about_box,
-#confirm_box.dialog_alert {
+#toast_title, #toast_msg, .sw_title, .sw_app { color: var(--w95-ink); }
+
+.sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
   background: var(--w95-grey); color: var(--w95-ink);
   border-top: 2px solid var(--w95-white);
   border-left: 2px solid var(--w95-white);
@@ -137,40 +120,16 @@ body { background: var(--w95-teal); color: var(--w95-ink); }
   background: var(--w95-navy); color: var(--w95-white);
   text-align: left; padding-left: 88px; border-bottom: 1px solid #000000;
 }
-#settings_sidebar,
-#settings_btns,
-#confirm_btns { background: var(--w95-grey); }
+#settings_sidebar, #settings_btns, #confirm_btns { background: var(--w95-grey); }
 .panel_heading { color: var(--w95-navy); }
-.stab,
-.pref_label,
-.pref_hint,
-.pref_section,
-.wm_pref_name,
-.wm_pref_desc,
-.skin_name,
-.skin_desc,
-.cur_name,
-.cur_desc,
-.kb_name,
-.kb_desc { color: var(--w95-ink); }
-.stab:hover,
-.skin_card:hover,
-.cur_card:hover,
-.kb_card:hover,
-.wm_pref:hover { background-color: var(--w95-grey-hi); color: var(--w95-ink); }
-.stab.active,
-.skin_card.selected,
-.cur_card.selected,
-.kb_card.selected,
-.wm_choice.selected {
+.stab, .pref_label, .pref_hint, .pref_section, .wm_pref_name, .wm_pref_desc,
+.skin_name, .skin_desc, .cur_name, .cur_desc, .kb_name, .kb_desc { color: var(--w95-ink); }
+.stab:hover, .skin_card:hover, .cur_card:hover, .kb_card:hover, .wm_pref:hover { background-color: var(--w95-grey-hi); color: var(--w95-ink); }
+.stab.active, .skin_card.selected, .cur_card.selected, .kb_card.selected, .wm_choice.selected {
   background: var(--w95-navy); color: var(--w95-white); border-color: #000000; box-shadow: none;
 }
-.stab.active .stab_icon,
-.skin_card.selected .skin_name,
-.skin_card.selected .skin_desc { color: var(--w95-white); }
-.pref_input,
-.pref_input_full,
-#wifi_password {
+.stab.active .stab_icon, .skin_card.selected .skin_name, .skin_card.selected .skin_desc { color: var(--w95-white); }
+.pref_input, .pref_input_full, #wifi_password {
   background: var(--w95-white); color: var(--w95-ink); border-color: var(--w95-grey-lo); border-radius: 0;
 }
 .dlg_btn {
@@ -182,16 +141,15 @@ body { background: var(--w95-teal); color: var(--w95-ink); }
 .dlg_btn.primary { background: var(--w95-grey-hi); }
 .dlg_btn:hover { background: var(--w95-grey-hi); color: var(--w95-ink); }
 .dlg_btn.primary:hover { background: var(--w95-white); color: var(--w95-ink); }
-.dlg_btn:focus-visible,
-.skin_card:focus-visible { outline: 1px dotted #000000; outline-offset: 2px; }
+.dlg_btn:focus-visible, .skin_card:focus-visible { outline: 1px dotted #000000; outline-offset: 2px; }
 
 @media (prefers-reduced-motion: reduce) {
-* { animation-duration: 1ms; transition-duration: 1ms; }
+  * { animation-duration: 1ms; transition-duration: 1ms; }
 }
+
 /* -------------------------------------------------------------------------
  * Windows 95 fidelity pass
- * Keeps Luna Shell IDs intact while replacing modern spacing,
-glass and
+ * Keeps Luna Shell IDs intact while replacing modern spacing, glass and
  * rounded controls with the compact 1995 shell language.
  * ------------------------------------------------------------------------- */
 
@@ -207,6 +165,7 @@ glass and
   --w95-disabled: #808080;
   --w95-taskbar-height: 30px;
 }
+
 html,
 body,
 button,
@@ -219,6 +178,7 @@ textarea {
   -webkit-font-smoothing: none;
   text-rendering: geometricPrecision;
 }
+
 html,
 body {
   overflow: hidden;
@@ -226,6 +186,7 @@ body {
   color: #000 !important;
   cursor: default;
 }
+
 * {
   border-radius: 0 !important;
   transition: none !important;
@@ -233,11 +194,14 @@ body {
   -webkit-backdrop-filter: none !important;
   box-sizing: border-box;
 }
+
 /* Wallpaper remains independent from the square Windows 95 chrome. */
 #wp_moon { border-radius: 83px !important; }
 #wp_moon_halo { border-radius: 150px !important; }
 .star { border-radius: 50% !important; }
+
 .hidden { display: none !important; }
+
 /* Desktop icons --------------------------------------------------------- */
 #w95_desktop_icons {
   position: fixed;
@@ -252,6 +216,7 @@ body {
   gap: 8px;
   pointer-events: none;
 }
+
 .w95_desktop_icon {
   width: 76px;
   min-height: 70px;
@@ -265,6 +230,7 @@ body {
   line-height: 13px;
   text-shadow: 1px 1px 0 #000;
 }
+
 .w95_pixel_icon {
   position: relative;
   display: block;
@@ -272,6 +238,7 @@ body {
   height: 34px;
   image-rendering: pixelated;
 }
+
 .w95_icon_computer::before {
   content: "";
   position: absolute;
@@ -294,6 +261,7 @@ body {
   border: 1px solid #808080;
   box-shadow: 7px 18px 0 -5px #000, 7px 16px 0 -3px #c0c0c0;
 }
+
 .w95_icon_documents::before {
   content: "";
   position: absolute;
@@ -316,6 +284,7 @@ body {
   border: 2px solid #000;
   border-bottom: 0;
 }
+
 .w95_icon_network::before {
   content: "";
   position: absolute;
@@ -337,6 +306,7 @@ body {
   background: #000080;
   box-shadow: 13px 12px 0 #008080, 9px 23px 0 -4px #000;
 }
+
 .w95_icon_recycle::before {
   content: "";
   position: absolute;
@@ -358,6 +328,7 @@ body {
   background: #c0c0c0;
   border: 2px solid #000;
 }
+
 /* Taskbar --------------------------------------------------------------- */
 #menubar,
 #menubar.edge_bottom {
@@ -379,6 +350,7 @@ body {
   border-top: 2px solid var(--w95-button-light) !important;
   box-shadow: inset 0 1px var(--w95-button-highlight) !important;
 }
+
 #mb_left,
 #mb_center,
 #mb_right {
@@ -390,8 +362,10 @@ body {
   display: flex !important;
   align-items: stretch !important;
 }
+
 #mb_left { flex: 0 0 auto !important; }
 #mb_center { flex: 1 1 auto !important; min-width: 0 !important; overflow: hidden !important; }
+
 #mb_logo {
   position: relative !important;
   min-width: 58px !important;
@@ -412,6 +386,7 @@ body {
   border-bottom: 2px solid var(--w95-button-dark) !important;
   box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight) !important;
 }
+
 #mb_logo:active,
 #mb_logo.active,
 #mb_logo[aria-expanded="true"] {
@@ -422,6 +397,7 @@ body {
   border-bottom-color: var(--w95-button-light) !important;
   box-shadow: inset 1px 1px var(--w95-button-shadow) !important;
 }
+
 #mb_logo_glyph {
   flex: 0 0 auto;
   width: 17px !important;
@@ -434,8 +410,10 @@ body {
     linear-gradient(#f0d000, #f0d000) 9px 9px / 7px 6px no-repeat !important;
   transform: skewY(-7deg);
 }
+
 #mb_start_label { display: inline !important; color: #000 !important; }
 #mb_app { display: none !important; }
+
 #win_list {
   flex: 1 1 auto !important;
   width: 100% !important;
@@ -446,6 +424,7 @@ body {
   gap: 2px !important;
   overflow: hidden !important;
 }
+
 .win_item {
   flex: 0 1 160px !important;
   min-width: 72px !important;
@@ -464,12 +443,14 @@ body {
   border-bottom: 2px solid var(--w95-button-dark) !important;
   box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight) !important;
 }
+
 /* .win_item sets display:flex !important after .hidden; beat it explicitly. */
 .win_item.hidden { display: none !important; }
 .win_glyph {
   width: 14px; flex: 0 0 14px; margin-right: 3px;
   font-size: 11px; line-height: 14px; text-align: center; color: inherit;
 }
+
 .win_item.active {
   padding: 3px 6px 1px 8px !important;
   background:
@@ -481,6 +462,7 @@ body {
   box-shadow: inset 1px 1px var(--w95-button-shadow) !important;
   font-weight: 700 !important;
 }
+
 .win_item.minimized { color: #404040 !important; }
 .win_label {
   display: block !important;
@@ -491,6 +473,7 @@ body {
   color: inherit !important;
   line-height: 16px !important;
 }
+
 #mb_right {
   flex: 0 0 auto !important;
   margin-left: 0 !important;
@@ -504,12 +487,14 @@ body {
   border-bottom: 2px solid var(--w95-button-light) !important;
   box-shadow: inset 1px 1px var(--w95-button-dark), inset -1px -1px var(--w95-button-highlight) !important;
 }
+
 #tray_area {
   display: flex !important;
   align-items: center !important;
   height: 18px !important;
   gap: 0 !important;
 }
+
 .tray_item,
 .mb_status,
 #mb_clock {
@@ -525,14 +510,17 @@ body {
   line-height: 18px !important;
   box-shadow: none !important;
 }
+
 .tray_item { width: 19px !important; padding: 0 !important; }
 .tray_item.hidden { display: none !important; }
 #tray_area.hidden { display: none !important; }
 .tray_glyph,
 .mb_status .luna_icon { color: #000 !important; font-size: 11px !important; }
+
 #mb_clip,
 #mb_cc,
 #mb_weather { display: none !important; }
+
 #mb_wifi,
 #mb_bat {
   width: 20px !important;
@@ -544,6 +532,7 @@ body {
 }
 #mb_wifi .luna_icon,
 #mb_bat .luna_icon { font-size: 11px !important; }
+
 #mb_clock {
   min-width: 64px !important;
   max-width: 88px !important;
@@ -553,6 +542,7 @@ body {
   text-overflow: clip !important;
   font-size: 11px !important;
 }
+
 /* Menus ----------------------------------------------------------------- */
 .menu_panel {
   position: fixed !important;
@@ -569,6 +559,7 @@ body {
   box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight), 2px 2px 0 rgba(0,0,0,.45) !important;
   color-scheme: light;
 }
+
 .menu_section_label {
   display: block !important;
   min-height: 20px !important;
@@ -576,6 +567,7 @@ body {
   color: #000 !important;
   font-weight: 700 !important;
 }
+
 .menu_item {
   min-height: 22px !important;
   padding: 3px 6px !important;
@@ -615,6 +607,7 @@ body {
   border-bottom: 1px solid var(--w95-button-light) !important;
   background: transparent !important;
 }
+
 #luna_menu {
   left: 2px !important;
   right: auto !important;
@@ -625,6 +618,7 @@ body {
   padding: 2px 2px 2px 29px !important;
   overflow: auto !important;
 }
+
 #luna_menu::before {
   content: "Windows 95";
   position: absolute;
@@ -647,10 +641,12 @@ body {
   transform: rotate(180deg);
   text-shadow: 1px 1px #000;
 }
+
 #luna_menu > .menu_section_label { display: none !important; }
 #luna_menu .menu_item { min-height: 34px !important; padding: 4px 7px !important; }
 #luna_menu .mi_sym { font-size: 18px !important; flex-basis: 26px !important; width: 26px !important; }
 #luna_menu .mi_key { display: none !important; }
+
 #wifi_menu,
 #bt_menu,
 #clip_menu,
@@ -661,14 +657,17 @@ body {
   max-height: calc(100vh - var(--w95-taskbar-height) - 6px) !important;
   overflow: auto !important;
 }
+
 /* Remove modern desktop furniture -------------------------------------- */
 #dock,
 #dock.hidden { display: none !important; }
+
 /* Classic dialogs and utility windows ---------------------------------- */
 .modal_backdrop {
   background: transparent !important;
   opacity: 1 !important;
 }
+
 .sheet_box,
 #settings_sheet.sheet_box,
 #about_box.about_box,
@@ -683,6 +682,7 @@ body {
   border-bottom: 2px solid var(--w95-button-dark) !important;
   box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight), 3px 3px 0 rgba(0,0,0,.45) !important;
 }
+
 #settings_title {
   position: relative !important;
   height: 20px !important;
@@ -698,6 +698,7 @@ body {
   text-align: left !important;
   border: 0 !important;
 }
+
 #settings_drag,
 #about_drag,
 #confirm_drag {
@@ -709,6 +710,7 @@ body {
   background: var(--w95-selection) !important;
   z-index: 2 !important;
 }
+
 #about_drag::after,
 #confirm_drag::after {
   position: absolute;
@@ -721,10 +723,12 @@ body {
 }
 #about_drag::after { content: "About Luna OS"; }
 #confirm_drag::after { content: "Shut Down Windows"; }
+
 #about_box,
 #confirm_box { padding-top: 24px !important; }
 #about_content,
 #confirm_content { color: #000 !important; }
+
 .tl {
   z-index: 5 !important;
   position: absolute !important;
@@ -752,6 +756,7 @@ body {
 .tl_red { right: 6px !important; left: auto !important; }
 .tl_yellow,
 .tl_green { display: none !important; }
+
 #settings_body,
 #settings_sidebar,
 #settings_content,
@@ -760,15 +765,18 @@ body {
   background: var(--w95-button-face) !important;
   color: #000 !important;
 }
+
 #settings_sidebar {
   border-right: 2px groove var(--w95-button-light) !important;
 }
+
 .panel_heading,
 .pref_section,
 .cc_section {
   color: #000 !important;
   font-weight: 700 !important;
 }
+
 .stab,
 .skin_card,
 .cur_card,
@@ -782,6 +790,7 @@ body {
   border: 1px solid transparent !important;
   box-shadow: none !important;
 }
+
 .stab:hover,
 .skin_card:hover,
 .cur_card:hover,
@@ -791,6 +800,7 @@ body {
   background: var(--w95-button-highlight) !important;
   color: #000 !important;
 }
+
 .stab.active,
 .skin_card.selected,
 .cur_card.selected,
@@ -803,10 +813,12 @@ body {
   border: 1px dotted #fff !important;
   box-shadow: none !important;
 }
+
 .stab.active *,
 .skin_card.selected *,
 .cur_card.selected *,
 .kb_card.selected * { color: #fff !important; }
+
 .pref_input,
 .pref_input_full,
 #wifi_password,
@@ -825,6 +837,7 @@ input[type="password"] {
   box-shadow: inset 1px 1px var(--w95-button-dark) !important;
   outline: none !important;
 }
+
 .dlg_btn,
 button,
 input[type="button"],
@@ -841,6 +854,7 @@ input[type="submit"] {
   box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight) !important;
   font-weight: 400 !important;
 }
+
 .dlg_btn.primary,
 .dlg_btn.danger { background: var(--w95-button-face) !important; color: #000 !important; }
 .dlg_btn:active,
@@ -859,6 +873,7 @@ input:focus-visible,
   outline: 1px dotted #000 !important;
   outline-offset: -4px !important;
 }
+
 .cc_toggle,
 .wm_switch {
   width: 34px !important;
@@ -884,6 +899,7 @@ input:focus-visible,
 }
 .cc_toggle.on .cc_knob,
 .wm_pref.on .wm_switch_knob { left: 18px !important; }
+
 .cc_track,
 .cc_bar,
 .st_bar {
@@ -897,6 +913,7 @@ input:focus-visible,
 .cc_fill,
 .cc_bar_fill,
 .st_fill { background: var(--w95-selection) !important; }
+
 /* Alt+Tab --------------------------------------------------------------- */
 #switcher {
   background: transparent !important;
@@ -913,6 +930,7 @@ input:focus-visible,
 }
 .sw_app,
 .sw_title { color: inherit !important; }
+
 /* Launchpad becomes a classic Programs window -------------------------- */
 #launchpad {
   position: fixed !important;
@@ -965,6 +983,7 @@ input:focus-visible,
 .lp_app:hover { background: var(--w95-selection) !important; color: #fff !important; }
 .lp_label { color: inherit !important; }
 #lp_hint { color: #000 !important; }
+
 /* Toast ----------------------------------------------------------------- */
 #toast {
   right: 8px !important;
@@ -974,18 +993,19 @@ input:focus-visible,
 #toast_title,
 #toast_msg,
 #toast_close { color: #000 !important; }
+
 /* Classic selection and scrollbars ------------------------------------- */
 ::selection { background: var(--w95-selection); color: #fff; }
 * { scrollbar-color: #c0c0c0 #dfdfdf; scrollbar-width: auto; }
 
 @media (max-width: 760px) {
-#tray_area { display: none !important; }
-#mb_wifi,
-  #mb_bat { display: none !important; }
-#mb_clock { min-width: 52px !important; max-width: 64px !important; }
-.win_item { min-width: 54px !important; }
-#w95_desktop_icons { transform: scale(.9); transform-origin: top left; }
+  #tray_area { display: none !important; }
+  #mb_wifi, #mb_bat { display: none !important; }
+  #mb_clock { min-width: 52px !important; max-width: 64px !important; }
+  .win_item { min-width: 54px !important; }
+  #w95_desktop_icons { transform: scale(.9); transform-origin: top left; }
 }
+
 /* Keep the draggable settings title bar readable above the base overlay. */
 #settings_drag::after {
   content: "System Settings";
@@ -997,15 +1017,16 @@ input:focus-visible,
   line-height: 14px;
   pointer-events: none;
 }
-/* Compact icon-only status items: labels were removed from Wi-Fi/AC,
-so do
+
+/* Compact icon-only status items: labels were removed from Wi-Fi/AC, so do
  * not retain their old text-sized minimum hit boxes. */
 #mb_wifi { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
 #mb_bat.icon_only { width: 30px; min-width: 30px; padding-left: 5px; padding-right: 5px; }
-/* Luna shell UX refinements: notifications,
-tray tips,
-Email app. */
+
+
+/* Luna shell UX refinements: notifications, tray tips, Email app. */
 .g_email { background: linear-gradient(145deg, #71b7ff, #5268df); }
+
 .notify_card {
   display: flex; flex-direction: column; gap: 3px; min-width: 0;
   padding: 8px 10px; margin: 3px 0; border-radius: 8px;
@@ -1022,6 +1043,7 @@ Email app. */
   white-space: normal; overflow-wrap: anywhere;
 }
 .notify_legacy { display: none; }
+
 .tray_item { position: relative; }
 .tray_tip {
   position: absolute; top: 3px; right: 28px; min-width: 72px; max-width: 260px;

@@ -1,4 +1,4 @@
-//* Hallmark · theme: Classic Mac OS (Platinum) · chrome: menubar
+/* Hallmark · theme: Classic Mac OS (Platinum) · chrome: menubar
  * audience: retro desktop users · use: live desktop skin switching
  */
 :root {
@@ -42,49 +42,40 @@
   --radius-md: 0;
   --radius-sm: 0;
 }
-html,
-body { background: var(--mac-desk); color: var(--mac-ink); }
+
+html, body { background: var(--mac-desk); color: var(--mac-ink); }
+
 #menubar {
   height: 22px; top: 0; bottom: auto; padding: 0 6px;
   background: linear-gradient(180deg, var(--mac-strip-hi), var(--mac-strip) 70%, var(--mac-strip-lo));
   border: 0; border-bottom: 1px solid #000000;
   border-radius: 0; box-shadow: none;
 }
-#mb_left,
-#mb_center,
-#mb_right { height: 22px; }
+#mb_left, #mb_center, #mb_right { height: 22px; }
 #mb_logo {
   width: 22px; height: 18px; border-radius: 0;
   background: transparent; border: 0; box-shadow: none;
 }
-#mb_logo_glyph,
-#mb_app,
-.mb_app_name,
-.mb_item,
-.mb_status,
-.win_label {
+#mb_logo_glyph, #mb_app, .mb_app_name, .mb_item, .mb_status, .win_label {
   color: var(--mac-ink); font-family: "Chicago", "Charcoal", Geneva, sans-serif;
 }
 .tray_glyph { color: var(--mac-ink); }
 .mb_app_name { font-weight: 700; }
 .mb_item { border-radius: 0; height: 18px; padding: 0 8px; }
-.mb_item:hover,
-.tray_item:hover { background-color: var(--mac-sel); color: var(--mac-white); }
-.mb_item:hover .luna_icon,
-.tray_item:hover .tray_glyph { color: var(--mac-white); }
+.mb_item:hover, .tray_item:hover { background-color: var(--mac-sel); color: var(--mac-white); }
+.mb_item:hover .luna_icon, .tray_item:hover .tray_glyph { color: var(--mac-white); }
 .win_item {
   height: 18px; border-radius: 0;
   background: transparent; border: 0;
 }
 .win_item.active { background: var(--mac-sel); }
 .win_item.active .win_label { color: var(--mac-white); }
-.win_item.hidden,
-.tray_item.hidden,
-#tray_area.hidden { display: none !important; }
+.win_item.hidden, .tray_item.hidden, #tray_area.hidden { display: none !important; }
 .win_glyph {
   width: 12px; flex: 0 0 12px; margin-right: 3px;
   font-size: 11px; line-height: 12px; text-align: center;
 }
+
 .menu_panel {
   top: 22px; bottom: auto;
   background: var(--mac-strip-hi); color: var(--mac-ink);
@@ -93,30 +84,20 @@ body { background: var(--mac-desk); color: var(--mac-ink); }
 }
 .menu_item { border-radius: 0; }
 .menu_item:hover { background: var(--mac-sel); box-shadow: none; }
-.menu_item:hover .mi_label,
-.menu_item:hover .mi_sym,
-.menu_item:hover .mi_key { color: var(--mac-white); }
-.menu_section_label,
-.mi_label,
-.mi_sym,
-.mi_key { color: var(--mac-ink); }
+.menu_item:hover .mi_label, .menu_item:hover .mi_sym, .menu_item:hover .mi_key { color: var(--mac-white); }
+.menu_section_label, .mi_label, .mi_sym, .mi_key { color: var(--mac-ink); }
 .menu_sep { background-color: #000000; }
-#dock,
-#dock.hidden { display: none !important; }
-#toast,
-#switcher_strip {
+
+#dock, #dock.hidden { display: none !important; }
+
+#toast, #switcher_strip {
   background: var(--mac-strip); color: var(--mac-ink);
   border: 1px solid #000000; border-radius: 0;
   box-shadow: 2px 2px 0 var(--mac-shadow);
 }
-#toast_title,
-#toast_msg,
-.sw_title,
-.sw_app { color: var(--mac-ink); }
-.sheet_box,
-#settings_sheet.sheet_box,
-#about_box.about_box,
-#confirm_box.dialog_alert {
+#toast_title, #toast_msg, .sw_title, .sw_app { color: var(--mac-ink); }
+
+.sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
   background: var(--mac-strip); color: var(--mac-ink);
   border: 2px solid #000000; border-radius: 0;
   box-shadow: 3px 3px 0 var(--mac-shadow);
@@ -126,40 +107,16 @@ body { background: var(--mac-desk); color: var(--mac-ink); }
   color: var(--mac-ink); text-align: center; padding-left: 0;
   border-bottom: 1px solid #000000;
 }
-#settings_sidebar,
-#settings_btns,
-#confirm_btns { background: var(--mac-strip); }
+#settings_sidebar, #settings_btns, #confirm_btns { background: var(--mac-strip); }
 .panel_heading { color: var(--mac-sel); }
-.stab,
-.pref_label,
-.pref_hint,
-.pref_section,
-.wm_pref_name,
-.wm_pref_desc,
-.skin_name,
-.skin_desc,
-.cur_name,
-.cur_desc,
-.kb_name,
-.kb_desc { color: var(--mac-ink); }
-.stab:hover,
-.skin_card:hover,
-.cur_card:hover,
-.kb_card:hover,
-.wm_pref:hover { background-color: var(--mac-strip-hi); color: var(--mac-ink); }
-.stab.active,
-.skin_card.selected,
-.cur_card.selected,
-.kb_card.selected,
-.wm_choice.selected {
+.stab, .pref_label, .pref_hint, .pref_section, .wm_pref_name, .wm_pref_desc,
+.skin_name, .skin_desc, .cur_name, .cur_desc, .kb_name, .kb_desc { color: var(--mac-ink); }
+.stab:hover, .skin_card:hover, .cur_card:hover, .kb_card:hover, .wm_pref:hover { background-color: var(--mac-strip-hi); color: var(--mac-ink); }
+.stab.active, .skin_card.selected, .cur_card.selected, .kb_card.selected, .wm_choice.selected {
   background: var(--mac-sel); color: var(--mac-white); border-color: #000000; box-shadow: none;
 }
-.stab.active .stab_icon,
-.skin_card.selected .skin_name,
-.skin_card.selected .skin_desc { color: var(--mac-white); }
-.pref_input,
-.pref_input_full,
-#wifi_password {
+.stab.active .stab_icon, .skin_card.selected .skin_name, .skin_card.selected .skin_desc { color: var(--mac-white); }
+.pref_input, .pref_input_full, #wifi_password {
   background: var(--mac-white); color: var(--mac-ink); border-color: #000000; border-radius: 0;
 }
 .dlg_btn {
@@ -169,16 +126,16 @@ body { background: var(--mac-desk); color: var(--mac-ink); }
 .dlg_btn.primary { background: var(--mac-sel); color: var(--mac-white); border-color: #000000; }
 .dlg_btn:hover { background: var(--mac-white); color: var(--mac-ink); }
 .dlg_btn.primary:hover { background: #0000a0; color: var(--mac-white); }
-.dlg_btn:focus-visible,
-.skin_card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.dlg_btn:focus-visible, .skin_card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 
 @media (prefers-reduced-motion: reduce) {
-* { animation-duration: 1ms; transition-duration: 1ms; }
+  * { animation-duration: 1ms; transition-duration: 1ms; }
 }
-/* Luna shell UX refinements: notifications,
-tray tips,
-Email app. */
+
+
+/* Luna shell UX refinements: notifications, tray tips, Email app. */
 .g_email { background: linear-gradient(145deg, #71b7ff, #5268df); }
+
 .notify_card {
   display: flex; flex-direction: column; gap: 3px; min-width: 0;
   padding: 8px 10px; margin: 3px 0; border-radius: 8px;
@@ -195,6 +152,7 @@ Email app. */
   white-space: normal; overflow-wrap: anywhere;
 }
 .notify_legacy { display: none; }
+
 .tray_item { position: relative; }
 .tray_tip {
   position: absolute; top: 3px; right: 28px; min-width: 72px; max-width: 260px;

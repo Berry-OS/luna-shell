@@ -1,4 +1,4 @@
-//* Hallmark · theme: Amiga Workbench · chrome: menubar · enrichment: Tier A CSS
+/* Hallmark · theme: Amiga Workbench · chrome: menubar · enrichment: Tier A CSS
  * audience: retro desktop users · use: live desktop skin switching
  */
 :root {
@@ -43,46 +43,37 @@
   --radius-md: 0;
   --radius-sm: 0;
 }
-html,
-body { background: var(--ami-desk); color: var(--ami-ink); }
+
+html, body { background: var(--ami-desk); color: var(--ami-ink); }
+
 #menubar {
   height: 24px; top: 0; bottom: auto; padding: 0 4px;
   background: linear-gradient(180deg, var(--ami-orange-hi), var(--ami-orange) 50%, var(--ami-orange-lo));
   border: 0; border-bottom: 2px solid #000000;
   border-radius: 0; box-shadow: none;
 }
-#mb_left,
-#mb_center,
-#mb_right { height: 24px; }
+#mb_left, #mb_center, #mb_right { height: 24px; }
 #mb_logo {
   width: 24px; height: 20px; border-radius: 0;
   background: var(--ami-blue); border: 1px solid #000000; box-shadow: none;
 }
 #mb_logo_glyph { color: var(--ami-white); }
-#mb_app,
-.mb_app_name,
-.mb_item,
-.mb_status,
-.tray_glyph,
-.win_label { color: var(--ami-ink); }
+#mb_app, .mb_app_name, .mb_item, .mb_status, .tray_glyph, .win_label { color: var(--ami-ink); }
 .mb_item { border-radius: 0; height: 20px; }
-.mb_item:hover,
-.tray_item:hover { background-color: var(--ami-blue); color: var(--ami-white); }
-.mb_item:hover .luna_icon,
-.tray_item:hover .tray_glyph { color: var(--ami-white); }
+.mb_item:hover, .tray_item:hover { background-color: var(--ami-blue); color: var(--ami-white); }
+.mb_item:hover .luna_icon, .tray_item:hover .tray_glyph { color: var(--ami-white); }
 .win_item {
   height: 20px; border-radius: 0;
   background: var(--ami-blue); border: 1px solid #000000;
 }
 .win_item .win_label { color: var(--ami-white); }
 .win_item.active { background: var(--ami-blue-lo); box-shadow: inset 1px 1px #000000; }
-.win_item.hidden,
-.tray_item.hidden,
-#tray_area.hidden { display: none !important; }
+.win_item.hidden, .tray_item.hidden, #tray_area.hidden { display: none !important; }
 .win_glyph {
   width: 12px; flex: 0 0 12px; margin-right: 3px;
   font-size: 11px; line-height: 12px; text-align: center;
 }
+
 .menu_panel {
   top: 26px; bottom: auto;
   background: var(--ami-grey); color: var(--ami-ink);
@@ -91,11 +82,9 @@ body { background: var(--ami-desk); color: var(--ami-ink); }
 }
 .menu_item { border-radius: 0; }
 .menu_item:hover { background: var(--ami-orange); box-shadow: none; }
-.menu_section_label,
-.mi_label,
-.mi_sym,
-.mi_key { color: var(--ami-ink); }
+.menu_section_label, .mi_label, .mi_sym, .mi_key { color: var(--ami-ink); }
 .menu_sep { background-color: #000000; }
+
 #dock {
   left: 50%; bottom: 12px; margin-left: -200px;
   width: 400px; height: 52px; padding: 4px 8px; gap: 4px;
@@ -106,20 +95,15 @@ body { background: var(--ami-desk); color: var(--ami-ink); }
 .dock_icon { width: 36px; height: 36px; padding-top: 8px; border-radius: 0; border: 1px solid #000000; box-shadow: none; }
 .dock_dot { background-color: var(--ami-orange); box-shadow: none; }
 .dock_sep { background: #000000; }
-#toast,
-#switcher_strip {
+
+#toast, #switcher_strip {
   background: var(--ami-grey); color: var(--ami-ink);
   border: 2px solid #000000; border-radius: 0;
   box-shadow: 3px 3px 0 var(--ami-shadow);
 }
-#toast_title,
-#toast_msg,
-.sw_title,
-.sw_app { color: var(--ami-ink); }
-.sheet_box,
-#settings_sheet.sheet_box,
-#about_box.about_box,
-#confirm_box.dialog_alert {
+#toast_title, #toast_msg, .sw_title, .sw_app { color: var(--ami-ink); }
+
+.sheet_box, #settings_sheet.sheet_box, #about_box.about_box, #confirm_box.dialog_alert {
   background: var(--ami-grey); color: var(--ami-ink);
   border: 2px solid #000000; border-radius: 0;
   box-shadow: 4px 4px 0 var(--ami-shadow);
@@ -129,40 +113,16 @@ body { background: var(--ami-desk); color: var(--ami-ink); }
   color: var(--ami-ink); text-align: left; padding-left: 88px;
   border-bottom: 2px solid #000000;
 }
-#settings_sidebar,
-#settings_btns,
-#confirm_btns { background: var(--ami-grey); }
+#settings_sidebar, #settings_btns, #confirm_btns { background: var(--ami-grey); }
 .panel_heading { color: var(--ami-blue); }
-.stab,
-.pref_label,
-.pref_hint,
-.pref_section,
-.wm_pref_name,
-.wm_pref_desc,
-.skin_name,
-.skin_desc,
-.cur_name,
-.cur_desc,
-.kb_name,
-.kb_desc { color: var(--ami-ink); }
-.stab:hover,
-.skin_card:hover,
-.cur_card:hover,
-.kb_card:hover,
-.wm_pref:hover { background-color: #c8c8c8; color: var(--ami-ink); }
-.stab.active,
-.skin_card.selected,
-.cur_card.selected,
-.kb_card.selected,
-.wm_choice.selected {
+.stab, .pref_label, .pref_hint, .pref_section, .wm_pref_name, .wm_pref_desc,
+.skin_name, .skin_desc, .cur_name, .cur_desc, .kb_name, .kb_desc { color: var(--ami-ink); }
+.stab:hover, .skin_card:hover, .cur_card:hover, .kb_card:hover, .wm_pref:hover { background-color: #c8c8c8; color: var(--ami-ink); }
+.stab.active, .skin_card.selected, .cur_card.selected, .kb_card.selected, .wm_choice.selected {
   background: var(--ami-orange); color: var(--ami-ink); border-color: #000000; box-shadow: none;
 }
-.stab.active .stab_icon,
-.skin_card.selected .skin_name,
-.skin_card.selected .skin_desc { color: var(--ami-ink); }
-.pref_input,
-.pref_input_full,
-#wifi_password {
+.stab.active .stab_icon, .skin_card.selected .skin_name, .skin_card.selected .skin_desc { color: var(--ami-ink); }
+.pref_input, .pref_input_full, #wifi_password {
   background: var(--ami-white); color: var(--ami-ink); border-color: #000000; border-radius: 0;
 }
 .dlg_btn {
@@ -172,16 +132,16 @@ body { background: var(--ami-desk); color: var(--ami-ink); }
 .dlg_btn.primary { background: var(--ami-orange); color: var(--ami-ink); }
 .dlg_btn:hover { background: #c8c8c8; color: var(--ami-ink); }
 .dlg_btn.primary:hover { background: var(--ami-orange-hi); color: var(--ami-ink); }
-.dlg_btn:focus-visible,
-.skin_card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
+.dlg_btn:focus-visible, .skin_card:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 1px; }
 
 @media (prefers-reduced-motion: reduce) {
-* { animation-duration: 1ms; transition-duration: 1ms; }
+  * { animation-duration: 1ms; transition-duration: 1ms; }
 }
-/* Luna shell UX refinements: notifications,
-tray tips,
-Email app. */
+
+
+/* Luna shell UX refinements: notifications, tray tips, Email app. */
 .g_email { background: linear-gradient(145deg, #71b7ff, #5268df); }
+
 .notify_card {
   display: flex; flex-direction: column; gap: 3px; min-width: 0;
   padding: 8px 10px; margin: 3px 0; border-radius: 8px;
@@ -198,6 +158,7 @@ Email app. */
   white-space: normal; overflow-wrap: anywhere;
 }
 .notify_legacy { display: none; }
+
 .tray_item { position: relative; }
 .tray_tip {
   position: absolute; top: 3px; right: 28px; min-width: 72px; max-width: 260px;
