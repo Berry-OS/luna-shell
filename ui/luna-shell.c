@@ -593,6 +593,135 @@ static const char* default_html =
 #include "luna-shell.html.h"
 ;
 
+/* Shell-owned desktop widgets (injected into #bg_layer; skins must not replace). */
+static const char g_shell_widgets_html[] =
+#include "luna-shell-widgets.html.h"
+;
+
+static const char g_shell_widgets_css[] =
+#include "luna-shell-widgets.css.h"
+;
+
+static unsigned long long g_shell_widgets_css_gen;
+static int g_dock_width_dirty = 1;
+static int g_shell_pending_right;
+static double g_shell_right_x;
+static double g_shell_right_y;
+/* Compositor IPC and shell keyboard both route Launchpad shortcuts when the
+ * overlay owns keyboard focus.  Suppress the duplicate shell dispatch. */
+static int g_shell_ipc_launchpad_toggle = 0;
+
+static const char* shell_widgets_div_close(const char* open) {
+    int depth = 0;
+    const char* p = open;
+    if (!p) return NULL;
+    while (*p) {
+        if (!strncmp(p, "<!--", 4)) {
+            const char* end = strstr(p + 4, "-->");
+            if (!end) return NULL;
+            p = end + 3;
+            continue;
+        }
+        if (!strncmp(p, "<div", 4) &&
+            (p[4] == '>' || p[4] == ' ' || p[4] == '\t' || p[4] == '\n')) {
+            depth++;
+            p += 4;
+            continue;
+        }
+        if (!strncmp(p, "</div>", 6)) {
+            depth--;
+            if (depth == 0) return p;
+            p += 6;
+            continue;
+        }
+        p++;
+    }
+    return NULL;
+}
+
+static int shell_widgets_legacy_open(const char* p) {
+    return !strncmp(p, "<div id=\"widget_clock\"", 22) ||
+           !strncmp(p, "<div id=\"widget_stats\"", 22) ||
+           !strncmp(p, "<div id=\"widget_weather\"", 24) ||
+           !strncmp(p, "<div id=\"luna_shell_widgets\"", 28);
+}
+
+static char* shell_merge_widgets_html(const char* src) {
+    if (!src) return NULL;
+    size_t n = strlen(src);
+    char* clean = (char*)malloc(n + 1);
+    if (!clean) return NULL;
+    const char* p = src;
+    char* q = clean;
+    while (*p) {
+        if (shell_widgets_legacy_open(p)) {
+            const char* close = shell_widgets_div_close(p);
+            if (close) {
+                p = close + 6;
+                continue;
+            }
+        }
+        *q++ = *p++;
+    }
+    *q = '\0';
+
+    const char* insert = NULL;
+    const char* bg = strstr(clean, "<div id=\"bg_layer\"");
+    if (bg) insert = shell_widgets_div_close(bg);
+    if (!insert) insert = strstr(clean, "</body>");
+    if (!insert) insert = clean + strlen(clean);
+
+    size_t clean_n = strlen(clean);
+    size_t head_n = (size_t)(insert - clean);
+    size_t widgets_n = strlen(g_shell_widgets_html);
+    char* out = (char*)malloc(clean_n + widgets_n + 1);
+    if (!out) { free(clean); return NULL; }
+    memcpy(out, clean, head_n);
+    memcpy(out + head_n, g_shell_widgets_html, widgets_n);
+    memcpy(out + head_n + widgets_n, insert, clean_n - head_n + 1);
+    free(clean);
+    return out;
+}
+
+static void shell_parse_layout_html(const char* src) {
+    char* html = shell_merge_widgets_html(src);
+    luna_parse_html(html ? html : src);
+    free(html);
+}
+
+static int shell_load_layout_file(const char* path) {
+    char* src = read_file(path);
+    if (!src) return 0;
+    shell_parse_layout_html(src);
+    free(src);
+    return 1;
+}
+
+static void shell_ensure_widget_css(void) {
+    unsigned long long gen = (unsigned long long)luna_css_generation();
+    if (g_shell_widgets_css_gen == gen) return;
+    luna_parse_css(g_shell_widgets_css);
+    /* luna_parse_css() advances the generation.  Cache that post-parse value;
+     * caching `gen` makes maintenance parse this sheet again on every tick,
+     * continuously restyling the document before :hover can expose a tooltip. */
+    g_shell_widgets_css_gen = (unsigned long long)luna_css_generation();
+}
+
+static void shell_dispatch_pending_right_click(void);
+static void shell_sync_bg_input_region(void);
+
+static void shell_mouse_button(int button, int action, int mods, double x, double y) {
+    luna_mouse_button(button, action, mods, x, y);
+    if (button == LUNA_MOUSE_BUTTON_RIGHT && action == LUNA_PRESS) {
+        g_shell_pending_right = 1;
+        g_shell_right_x = x;
+        g_shell_right_y = y;
+        /* Open window menus on press so release-hook dismiss does not race a
+         * deferred dispatch from the frame loop. */
+        shell_dispatch_pending_right_click();
+    }
+}
+
 /* ── Applications (dock & launchpad) ──
  * default_cmd is the fallback; cmd[] is the mutable runtime command
  * (overridden by LUNA_APP_<NAME> env vars and by the settings dialog). */
@@ -678,6 +807,9 @@ static int g_cursor_present = 1;
 
 static void cursor_theme_reload(const char* name);
 static void cursor_theme_tick_and_refresh(void);
+static void on_win_click(LunaElement* e);
+static void on_tray_click(LunaElement* e);
+static void shell_runtime_maintenance(void);
 
 static void settings_path(char* buf, size_t n) {
     char dir[PATH_MAX];
@@ -1270,6 +1402,7 @@ static int skin_apply_styles(const char* id) {
         luna_parse_css(default_css);
         return 0;
     }
+    shell_ensure_widget_css();
     luna_mark_layout_dirty();
     shell_trim_heap();
     return 1;
@@ -1376,6 +1509,7 @@ enum {
     UI_WG_TIME,
     UI_WG_DATE,
     UI_WG_CLOCK_VIEW,
+    UI_WG_STOPWATCH_OPEN,
     UI_WG_STOPWATCH_VIEW,
     UI_WG_STOPWATCH_TIME,
     UI_WG_STOPWATCH_TOGGLE,
@@ -1395,7 +1529,8 @@ enum {
 };
 static const char* const g_ui_cache_ids[UI_CACHE_COUNT] = {
     "mb_clock", "mb_bat", "cc_cpu_fill", "cc_mem_fill",
-    "wg_time", "wg_date", "wg_clock_view", "wg_stopwatch_view",
+    "wg_time", "wg_date", "wg_clock_view", "wg_stopwatch_open",
+    "wg_stopwatch_view",
     "wg_stopwatch_time", "wg_stopwatch_toggle", "wg_stopwatch_state",
     "widget_clock", "widget_stats", "widget_weather",
     "st_cpu_val", "st_cpu_fill",
@@ -1610,6 +1745,7 @@ static void shell_action_dispatch(const char* action) {
     if (!action || !*action) return;
     shell_note_user_activity();
     if (!strcmp(action, "launchpad_toggle")) {
+        g_shell_ipc_launchpad_toggle = 1;
         if (is_shown(g_launchpad_idx)) launchpad_close();
         else on_launchpad_open(NULL);
     } else if (!strcmp(action, "settings_open")) {
@@ -2607,6 +2743,46 @@ static LunaTrayEntry* tray_entry_for_key(const char* key) {
     return NULL;
 }
 
+static void tray_window_tooltip(char* out, size_t n, const char* key,
+                                const LunaTrayEntry* tray) {
+    const char* app_name = tray && tray->label[0] ? tray->label : NULL;
+    const char* title = NULL;
+    uint64_t sid = tray_lookup_surface(key);
+    for (int w = 0; w < g_win_count; w++) {
+        if (g_wins[w].id != sid) continue;
+        title = g_wins[w].title[0] ? g_wins[w].title : NULL;
+        if (!app_name) {
+            for (int a = 0; a < APP_COUNT; a++) {
+                if (app_id_matches_key(g_wins[w].app_id, g_apps[a].key)) {
+                    app_name = g_apps[a].name;
+                    break;
+                }
+            }
+            if (!app_name && g_wins[w].app_id[0]) app_name = g_wins[w].app_id;
+        }
+        break;
+    }
+    if (!app_name) app_name = "Application";
+    if (title && strcmp(title, app_name))
+        snprintf(out, n, "%s\n%s", app_name, title);
+    else
+        snprintf(out, n, "%s", app_name);
+}
+
+static void shell_sync_tray_window_tips(void) {
+    for (int s = 0; s < MAX_TRAY_SLOTS; s++) {
+        if (!tray_key_is_window(g_tray_slot_key[s])) continue;
+        char tip[192];
+        tray_window_tooltip(tip, sizeof(tip), g_tray_slot_key[s],
+                            tray_entry_for_key(g_tray_slot_key[s]));
+        if (tip[0] && g_tray_tip_idx[s] >= 0) {
+            LunaElement* te = luna_element_at(g_tray_tip_idx[s]);
+            if (te && strcmp(te->text, tip))
+                luna_set_text(g_tray_tip_idx[s], tip);
+        }
+    }
+}
+
 static void tray_sync_window_tips_and_visibility(void) {
     int visible = 0;
     for (int s = 0; s < MAX_TRAY_SLOTS; s++) {
@@ -2616,8 +2792,13 @@ static void tray_sync_window_tips_and_visibility(void) {
         LunaTrayEntry* t = is_window ? tray_entry_for_key(key) : NULL;
         if (g_tray_tip_idx[s] >= 0) {
             const char* tip = t ? (t->tooltip[0] ? t->tooltip : t->label) : "";
-            luna_set_text(g_tray_tip_idx[s], tip);
-            set_hidden(g_tray_tip_idx[s], !tip[0]);
+            if (is_window) {
+                char window_tip[192];
+                tray_window_tooltip(window_tip, sizeof(window_tip), key, t);
+                luna_set_text(g_tray_tip_idx[s], window_tip);
+            } else {
+                luna_set_text(g_tray_tip_idx[s], tip);
+            }
         }
         if (hide_window && g_tray_slot_idx[s] >= 0) {
             set_hidden(g_tray_slot_idx[s], 1);
@@ -2629,42 +2810,6 @@ static void tray_sync_window_tips_and_visibility(void) {
         set_hidden(g_tray_area_idx, visible == 0);
 }
 
-
-static int g_tray_hover_slot = -1;
-
-static int tray_close_hover_tip(void) {
-    if (g_tray_hover_slot < 0) return 0;
-    int idx = g_tray_slot_idx[g_tray_hover_slot];
-    if (idx >= 0) luna_update_classes(idx, "tip_open", NULL);
-    g_tray_hover_slot = -1;
-    return 1;
-}
-
-static int tray_sync_hover_tip(void) {
-    int next = -1;
-    for (int s = 0; s < MAX_TRAY_SLOTS; s++) {
-        int idx = g_tray_slot_idx[s];
-        if (idx < 0 || !tray_key_is_window(g_tray_slot_key[s])) continue;
-        LunaElement* slot = luna_element_at(idx);
-        LunaElement* glyph = g_tray_glyph_idx[s] >= 0
-                           ? luna_element_at(g_tray_glyph_idx[s]) : NULL;
-        if ((slot && slot->is_hovered) || (glyph && glyph->is_hovered)) {
-            next = s;
-            break;
-        }
-    }
-    if (next == g_tray_hover_slot) return 0;
-    if (g_tray_hover_slot >= 0) {
-        int old_idx = g_tray_slot_idx[g_tray_hover_slot];
-        if (old_idx >= 0) luna_update_classes(old_idx, "tip_open", NULL);
-    }
-    if (next >= 0) {
-        int new_idx = g_tray_slot_idx[next];
-        if (new_idx >= 0) luna_update_classes(new_idx, NULL, "tip_open");
-    }
-    g_tray_hover_slot = next;
-    return 1;
-}
 
 static void update_tray_ui(void) {
     /* Windowed GLFW/X11 preview is not a session host: leave the tray
@@ -3947,6 +4092,7 @@ static void stopwatch_set_mode(int enabled) {
     g_stopwatch_next_deadline = (enabled && g_stopwatch_running) ? g_now : 0.0;
     if (enabled) stopwatch_render();
     luna_mark_layout_dirty();
+    shell_sync_bg_input_region();
     shell_request_repaint(0);
 }
 
@@ -5599,7 +5745,8 @@ static void app_set_dot(LunaApp* app, int running) {
     char dot_id[64];
     snprintf(dot_id, sizeof(dot_id), "dot_%s", app->key);
     int idx = luna_get_element_by_id(dot_id);
-    if (idx != -1) luna_element_at(idx)->opacity = running ? 1.0f : 0.0f;
+    if (idx != -1)
+        luna_update_classes(idx, "running", running ? "running" : NULL);
 }
 
 /* Settings may refer to an XDG desktop file instead of a shell command:
@@ -6607,13 +6754,18 @@ static void on_mouse_release_hook(int hit, int drag_moved) {
         !hit_inside(hit, g_alarm_ring_idx))
         dismiss_calendar_menu();
     if (is_shown(g_win_menu_idx) && !hit_inside(hit, g_win_menu_idx)) {
-        /* Keep open when the click was on a win_item (handler opens/repositions). */
-        int on_win = 0;
+        /* Keep open when the click was on a win_item or tray window icon
+         * (handler opens/repositions on press or release). */
+        int on_anchor = 0;
         for (int p = hit; p != -1; p = luna_element_at(p)->parent_idx) {
             const char* id = luna_element_at(p)->id;
-            if (id[0]=='w' && id[1]=='i' && id[2]=='n' && id[3]=='_') { on_win = 1; break; }
+            if (!id || !id[0]) continue;
+            if (id[0]=='w' && id[1]=='i' && id[2]=='n' && id[3]=='_') { on_anchor = 1; break; }
+            if (id[0]=='t' && id[1]=='r' && id[2]=='a' && id[3]=='y' && id[4]=='_') {
+                on_anchor = 1; break;
+            }
         }
-        if (!on_win) dismiss_win_menu();
+        if (!on_anchor) dismiss_win_menu();
     }
     if (is_shown(g_clip_menu_idx) &&
         !hit_inside(hit, g_clip_menu_idx) &&
@@ -6852,6 +7004,7 @@ static void apply_dock_app_settings(void) {
         }
     }
     /* #dock uses fit-content, so hidden launchers collapse automatically. */
+    g_dock_width_dirty = 1;
     luna_mark_layout_dirty();
     shell_request_repaint(2);
 }
@@ -8462,6 +8615,10 @@ static int shortcut_handle_key(int key, int mods, int action) {
 }
 
 static int shortcut_try_dispatch(int key, int mods) {
+    if (g_shell_ipc_launchpad_toggle) {
+        g_shell_ipc_launchpad_toggle = 0;
+        return 1;
+    }
     if (shortcut_match(g_settings.shortcut_launchpad, key, mods)) {
         if (is_shown(g_launchpad_idx)) launchpad_close();
         else on_launchpad_open(NULL);
@@ -8875,6 +9032,7 @@ static void on_win_click(LunaElement* e) {
     /* Right-click → window context menu */
     if (luna_last_click_button() == LUNA_MOUSE_BUTTON_RIGHT) {
         win_menu_open(wid, slot_idx, w ? w->title : NULL);
+        luna_consume_pointer_event();
         return;
     }
 
@@ -9118,6 +9276,7 @@ static void on_tray_click(LunaElement* e) {
                     win_menu_open(sid, idx,
                                   w ? w->title :
                                   (t ? (t->tooltip[0] ? t->tooltip : t->label) : NULL));
+                    luna_consume_pointer_event();
                     return;
                 }
                 char cmd[64];
@@ -9523,6 +9682,8 @@ static void bind_indices(void) {
 
     for (int i = 0; i < UI_CACHE_COUNT; i++)
         g_ui_idx[i] = luna_get_element_by_id(g_ui_cache_ids[i]);
+    if (g_ui_idx[UI_WIDGET_CLOCK] < 0)
+        fprintf(stderr, "[luna-shell] widget_clock missing — desktop widgets were not injected\n");
 
     /* Older skins predate explicit Storage IDs. Resolve those two cached
      * elements from the stats widget so live updates remain skin-compatible. */
@@ -9607,9 +9768,9 @@ static void bind_indices(void) {
     wire_subtree(luna_get_element_by_id("mb_clock"),      on_calendar_menu);
     wire_subtree(luna_get_element_by_id("wg_date"),       on_calendar_menu);
     wire_subtree(luna_get_element_by_id("wg_time"),       on_calendar_menu);
-    wire_subtree(luna_get_element_by_id("wg_stopwatch_open"), on_stopwatch_open);
+    wire_subtree(g_ui_idx[UI_WG_STOPWATCH_OPEN],          on_stopwatch_open);
     wire_subtree(luna_get_element_by_id("wg_stopwatch_back"), on_stopwatch_back);
-    wire_subtree(luna_get_element_by_id("wg_stopwatch_toggle"), on_stopwatch_toggle);
+    wire_subtree(g_ui_idx[UI_WG_STOPWATCH_TOGGLE],      on_stopwatch_toggle);
     wire_subtree(luna_get_element_by_id("wg_stopwatch_reset"), on_stopwatch_reset);
     stopwatch_set_mode(g_stopwatch_mode);
     stopwatch_render();
@@ -9838,7 +9999,11 @@ static void bind_indices(void) {
         }
         if (strstr(e->class_name, "tray_tip")) {
             for (int s = 0; s < MAX_TRAY_SLOTS; s++)
-                if (g_tray_slot_idx[s] == p) { g_tray_tip_idx[s] = i; break; }
+                if (g_tray_slot_idx[s] == p) {
+                    g_tray_tip_idx[s] = i;
+                    luna_update_classes(i, "hidden", NULL);
+                    break;
+                }
             continue;
         }
         /* switcher title / app labels */
@@ -9904,9 +10069,26 @@ typedef struct {
     void (*get_fb_size)(int* w, int* h);
     void (*swap_buffers)(void);
     void (*poll_events)(void);
+    int  (*present_busy)(void);
     void (*set_cursor)(int cursor_type);
     void (*terminate)(void);
 } LunaBackend;
+
+/* llvmpipe / softpipe finish before handing wl_shm buffers to the compositor.
+ * Hardware GL can pipeline with glFlush(); glFinish() on every surface was a
+ * regular render-thread hitch on Berry-class GPUs. */
+static void shell_gl_sync_before_swap(void) {
+    static int needs_finish = -1;
+    if (needs_finish < 0) {
+        const char* r = (const char*)glGetString(GL_RENDERER);
+        needs_finish = (r && (strstr(r, "llvmpipe") || strstr(r, "softpipe") ||
+                              strstr(r, "SwiftShader"))) ? 1 : 0;
+    }
+    if (needs_finish)
+        glFinish();
+    else
+        glFlush();
+}
 
 static const LunaBackend* g_backend = NULL;
 static const LunaBackend g_wl_backend; /* forward declaration */
@@ -10235,6 +10417,7 @@ static struct {
     EGLContext ctx;
     EGLSurface surf;
     int flip_pending;
+    struct gbm_bo* flip_bo; /* BO queued for the outstanding page flip */
 
     struct udev*      udev;
     struct libinput*  li;
@@ -10338,7 +10521,10 @@ static void cursor_theme_tick_and_refresh(void) {
             g_backend->set_cursor(g_cur_theme.active_role);
         g_cursor_frame_changed = 0;
     }
-    if (!g_cursor_present) return;
+    if (!g_cursor_present) {
+        shell_runtime_maintenance();
+        return;
+    }
     /* Do not inject decorative cursor-surface commits into a drag/click
      * sequence.  Re-arm an expired deadline so poll() cannot busy-spin while
      * animation is deferred; resume from the current frame after the grace. */
@@ -10351,14 +10537,14 @@ static void cursor_theme_tick_and_refresh(void) {
             if (delay < 1) delay = 1;
             a->frame_until = g_now + (double)delay / 1000.0;
         }
-        return;
+    } else if (luna_cur_theme_tick(&g_cur_theme, g_now)) {
+        /* Re-push the current role so animated .ani frames advance. */
+        g_cursor_frame_changed = 1;
+        if (g_backend && g_backend->set_cursor)
+            g_backend->set_cursor(g_cur_theme.active_role);
+        g_cursor_frame_changed = 0;
     }
-    if (!luna_cur_theme_tick(&g_cur_theme, g_now)) return;
-    /* Re-push the current role so animated .ani frames advance. */
-    g_cursor_frame_changed = 1;
-    if (g_backend && g_backend->set_cursor)
-        g_backend->set_cursor(g_cur_theme.active_role);
-    g_cursor_frame_changed = 0;
+    shell_runtime_maintenance();
 }
 
 /* Paint a simple ARGB cursor glyph into the dumb buffer.
@@ -10477,7 +10663,15 @@ static int kms_open_drm_device(void) {
         int fd = open(nodes[i], O_RDWR | O_CLOEXEC);
         if (fd < 0) continue;
         drmModeRes* res = drmModeGetResources(fd);
-        if (res) { drmModeFreeResources(res); return fd; }
+        if (res) {
+            drmModeFreeResources(res);
+            /* Page-flip completions are drained from poll(); a blocking read
+             * there would stall the whole shell on real KMS drivers. */
+            int flags = fcntl(fd, F_GETFL);
+            if (flags >= 0)
+                fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+            return fd;
+        }
         close(fd);
     }
     return -1;
@@ -10685,7 +10879,7 @@ static void kms_process_input(void) {
             int action = libinput_event_pointer_get_button_state(p) == LIBINPUT_BUTTON_STATE_PRESSED
                        ? LUNA_PRESS : LUNA_RELEASE;
             shell_note_user_activity();
-            luna_mouse_button(btn, action, xkb_mod_bits(g_kms.xkb_state), g_kms.mouse_x, g_kms.mouse_y);
+            shell_mouse_button(btn, action, xkb_mod_bits(g_kms.xkb_state), g_kms.mouse_x, g_kms.mouse_y);
             break;
         }
         case LIBINPUT_EVENT_POINTER_AXIS: {
@@ -10748,11 +10942,32 @@ static uint32_t kms_fb_for_bo(struct gbm_bo* bo) {
 
 static void kms_page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsigned int usec, void* data) {
     (void)fd; (void)frame; (void)sec; (void)usec; (void)data;
+    if (g_kms.prev_bo) {
+        gbm_surface_release_buffer(g_kms.gbm_surf, g_kms.prev_bo);
+        g_kms.prev_bo = NULL;
+    }
+    g_kms.prev_bo = g_kms.flip_bo;
+    g_kms.flip_bo = NULL;
     g_kms.flip_pending = 0;
 }
 
+static void kms_drain_page_flips(void) {
+    if (!g_kms.flip_pending) return;
+    drmEventContext evctx = { .version = 2, .page_flip_handler = kms_page_flip_handler };
+    for (;;) {
+        if (drmHandleEvent(g_kms.fd, &evctx) != 0)
+            break;
+        if (!g_kms.flip_pending)
+            return;
+    }
+}
+
+static int kms_present_busy(void) { return g_kms.flip_pending; }
+
 static void kms_swap_buffers(void) {
-    glFinish();
+    if (g_kms.flip_pending)
+        return;
+    shell_gl_sync_before_swap();
     if (!eglSwapBuffers(g_kms.dpy, g_kms.surf)) {
         fprintf(stderr, "[luna-shell/kms] eglSwapBuffers failed (EGL 0x%x)\n",
                 eglGetError());
@@ -10777,60 +10992,24 @@ static void kms_swap_buffers(void) {
         }
         /* Cursor plane needs an active CRTC — enable after the first modeset. */
         kms_cursor_show();
-    } else {
-        g_kms.flip_pending = 1;
-        int flip_queued = drmModePageFlip(g_kms.fd, g_kms.crtc_id, fb_id,
-                                          DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0;
-        if (flip_queued) {
-            while (g_kms.flip_pending) {
-                struct pollfd pfds[2];
-                int nfd = 1;
-                pfds[0].fd = g_kms.fd;
-                pfds[0].events = POLLIN;
-                /* Keep draining libinput while waiting for the flip so the
-                 * pointer/keyboard never "freeze", and so we don't lose the
-                 * quit chord between frames. */
-                if (g_kms.li) {
-                    pfds[1].fd = libinput_get_fd(g_kms.li);
-                    pfds[1].events = POLLIN;
-                    nfd = 2;
-                }
-                int pr = poll(pfds, nfd, -1);
-                if (pr < 0) { if (errno == EINTR) continue; break; }
-                if (nfd > 1 && (pfds[1].revents & POLLIN))
-                    kms_process_input();
-                if (pfds[0].revents & POLLIN) {
-                    drmEventContext evctx = { .version = 2, .page_flip_handler = kms_page_flip_handler };
-                    if (drmHandleEvent(g_kms.fd, &evctx) != 0) break;
-                }
-            }
-        }
-        /* The old BO is still being scanned out until the flip event arrives.
-         * Releasing it after a failed/incomplete page flip lets GBM recycle the
-         * visible buffer and manifests as intermittent console flicker. */
-        if (!flip_queued) {
-            fprintf(stderr, "[luna-shell/kms] page flip failed: %s\n",
-                    strerror(errno));
-            g_kms.flip_pending = 0;
-            gbm_surface_release_buffer(g_kms.gbm_surf, bo);
-            return;
-        }
-        if (g_kms.flip_pending) {
-            /* The kernel accepted the flip, so either BO may be active now.
-             * Keep both locked and leave cleanly rather than recycling a
-             * potentially scanned-out buffer after an event-channel failure. */
-            fprintf(stderr, "[luna-shell/kms] page flip completion failed\n");
-            g_should_close = 1;
-            return;
-        }
-        /* The scanout BO is handed straight from EGL/GBM to KMS: no CPU copy.
-         * Release the previous BO only after the flip fence/event says KMS is
-         * finished with it.  Cursor planes are independent of primary-plane
-         * flips, so do not re-program/move the cursor on every frame; those two
-         * synchronous DRM ioctls were needless render-thread jitter. */
-        gbm_surface_release_buffer(g_kms.gbm_surf, g_kms.prev_bo);
+        g_kms.prev_bo = bo;
+        return;
     }
-    g_kms.prev_bo = bo;
+
+    g_kms.flip_pending = 1;
+    g_kms.flip_bo = bo;
+    if (drmModePageFlip(g_kms.fd, g_kms.crtc_id, fb_id,
+                        DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0) {
+        fprintf(stderr, "[luna-shell/kms] page flip failed: %s\n",
+                strerror(errno));
+        g_kms.flip_pending = 0;
+        g_kms.flip_bo = NULL;
+        gbm_surface_release_buffer(g_kms.gbm_surf, bo);
+        return;
+    }
+    /* prev_bo stays locked until the flip event retires it.  Blocking in
+     * swap_buffers for that event was the regular console hitch on real KMS
+     * hardware; QEMU often delivers the event immediately so the bug hid there. */
 }
 
 static int kms_backend_start(void) {
@@ -10866,25 +11045,38 @@ static void kms_backend_poll_events(void) {
         (double)g_single_poll_timeout_ms / 1000.0;
 
     for (;;) {
-        struct pollfd pfds[4] = {
-            { .fd = g_kms.li ? libinput_get_fd(g_kms.li) : -1, .events = POLLIN },
-            { .fd = state_fd, .events = POLLIN },
-            { .fd = async_fd, .events = POLLIN },
-            { .fd = action_fd, .events = POLLIN },
-        };
+        struct pollfd pfds[5];
+        int nfds = 0;
+        pfds[nfds++] = (struct pollfd){ .fd = g_kms.fd, .events = POLLIN };
+        if (g_kms.li)
+            pfds[nfds++] = (struct pollfd){ .fd = libinput_get_fd(g_kms.li), .events = POLLIN };
+        if (state_fd >= 0)
+            pfds[nfds++] = (struct pollfd){ .fd = state_fd, .events = POLLIN };
+        if (async_fd >= 0)
+            pfds[nfds++] = (struct pollfd){ .fd = async_fd, .events = POLLIN };
+        if (action_fd >= 0)
+            pfds[nfds++] = (struct pollfd){ .fd = action_fd, .events = POLLIN };
         int timeout_ms = shell_poll_coalesced_timeout_ms(outer_deadline);
         int pr;
-        do { pr = poll(pfds, 4, timeout_ms); }
+        do { pr = poll(pfds, nfds, timeout_ms); }
         while (pr < 0 && errno == EINTR);
 
-        int input_ready = pr > 0 && pfds[0].fd >= 0 &&
-                          (pfds[0].revents & POLLIN);
-        int state_ready = pr > 0 && state_fd >= 0 &&
-                          (pfds[1].revents & POLLIN);
-        int async_ready = pr > 0 && async_fd >= 0 &&
-                          (pfds[2].revents & POLLIN);
-        int action_ready = pr > 0 && action_fd >= 0 &&
-                           (pfds[3].revents & POLLIN);
+        if (pr > 0 && (pfds[0].revents & POLLIN))
+            kms_drain_page_flips();
+
+        int input_ready = 0, state_ready = 0, async_ready = 0, action_ready = 0;
+        for (int i = 0; i < nfds; i++) {
+            if (!(pfds[i].revents & POLLIN)) continue;
+            if (pfds[i].fd == g_kms.fd) continue;
+            if (g_kms.li && pfds[i].fd == libinput_get_fd(g_kms.li))
+                input_ready = 1;
+            else if (state_fd >= 0 && pfds[i].fd == state_fd)
+                state_ready = 1;
+            else if (async_fd >= 0 && pfds[i].fd == async_fd)
+                async_ready = 1;
+            else if (action_fd >= 0 && pfds[i].fd == action_fd)
+                action_ready = 1;
+        }
         if (action_ready)
             (void)shell_action_drain();
         if (state_ready) {
@@ -10920,6 +11112,7 @@ static void kms_backend_terminate(void) {
     if (g_kms.xkb_keymap) xkb_keymap_unref(g_kms.xkb_keymap);
     if (g_kms.xkb_ctx)    xkb_context_unref(g_kms.xkb_ctx);
     if (g_kms.prev_bo)    gbm_surface_release_buffer(g_kms.gbm_surf, g_kms.prev_bo);
+    if (g_kms.flip_bo)    gbm_surface_release_buffer(g_kms.gbm_surf, g_kms.flip_bo);
     if (g_kms.saved_crtc) {
         drmModeSetCrtc(g_kms.fd, g_kms.saved_crtc->crtc_id, g_kms.saved_crtc->buffer_id,
                        g_kms.saved_crtc->x, g_kms.saved_crtc->y, &g_kms.conn_id, 1, &g_kms.saved_crtc->mode);
@@ -10938,6 +11131,7 @@ static const LunaBackend g_kms_backend = {
     .get_fb_size  = kms_backend_get_fb_size,
     .swap_buffers = kms_swap_buffers,
     .poll_events  = kms_backend_poll_events,
+    .present_busy = kms_present_busy,
     .set_cursor   = kms_backend_set_cursor,
     .terminate    = kms_backend_terminate,
 };
@@ -10997,19 +11191,21 @@ static LunaSurface g_surfs[] = {
     { .name="bg",           .root_id="bg_layer",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_BACKGROUND, .anchor=ZWLR_ANCHOR_ALL,
       .exclusive_zone=0, .is_kbd=0 },
-    /* Keep the layer surface and its exclusive zone exactly as tall as the
-     * 32px #menubar CSS box.  A 28px surface clipped the window chips and let
-     * toplevel windows occupy their bottom four pixels, making the two layers
-     * appear to overlap. */
-    { .name="menubar",      .root_id="menubar",
+    /* The top-edge buffer includes 56 transparent overflow pixels for the
+     * CSS tooltip.  Allocate them before EGL creation: resizing this surface
+     * later is unreliable on software/QEMU Wayland and can leave the old 32px
+     * buffer attached.  Its exclusive zone and input region remain the 32px
+     * #menubar box, so the transparent overflow never intercepts clicks (in
+     * particular clicks used to dismiss an IME candidate window). */
+    { .name="menubar",      .root_id="menubar", .input_root_id="menubar",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_TOP,
       .anchor=ZWLR_ANCHOR_TOP|ZWLR_ANCHOR_LEFT|ZWLR_ANCHOR_RIGHT,
-      .exclusive_zone=32, .fixed_h=32 },
+      .exclusive_zone=32, .fixed_h=88 },
     /* dock: floating bar at the bottom */
     { .name="dock",         .root_id="dock",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_TOP,
       .anchor=ZWLR_ANCHOR_BOTTOM,
-      .exclusive_zone=92, .margin_bottom=12, .fixed_w=542, .fixed_h=80 },
+      .exclusive_zone=92, .margin_bottom=12, .fixed_w=640, .fixed_h=84 },
     /* overlays — full-screen so click-outside dismiss works */
     { .name="luna_menu",    .root_id="luna_menu",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
@@ -11415,7 +11611,6 @@ static void wl_native_dialog_drag_end(void) {
 static void wl_forward_pointer_motion(void) {
     if (!g_pointer_surface) return;
     int changed = luna_mouse_move_changed(g_wl.mouse_x, g_wl.mouse_y);
-    if (tray_sync_hover_tip()) changed = 1;
     if (changed) shell_request_repaint((int)(g_pointer_surface - g_surfs));
 }
 
@@ -11548,8 +11743,12 @@ static void wl_surface_doc_origin(const LunaSurface* s, float* x, float* y) {
 
     LunaElement* e = luna_element_at(s->root_idx);
     if (!e) return;
-    *x = e->x;
-    *y = e->y;
+    /* Layer surfaces are cropped from document space.  Include the root's
+     * own CSS transform (notably dock left:50% + translateX(-50%)); otherwise
+     * the native surface starts at the untransformed anchor and clips the
+     * first launcher while pointer coordinates miss by half the dock width. */
+    *x = e->x + e->cur_tx;
+    *y = e->y + e->cur_ty;
     /* Full-output overlay coordinates already match document coordinates. */
     if (s->is_overlay && !s->fixed_w && !s->fixed_h) {
         *x = 0.0f;
@@ -11584,8 +11783,6 @@ static void wlp_enter(void* d, struct wl_pointer* p, uint32_t s, struct wl_surfa
 }
 static void wlp_leave(void* d, struct wl_pointer* p, uint32_t s, struct wl_surface* surf) {
     (void)d; (void)p; (void)s; (void)surf;
-    if (tray_close_hover_tip() && g_pointer_surface)
-        shell_request_repaint((int)(g_pointer_surface - g_surfs));
     g_pointer_surface = NULL;
     g_wl.pointer_entered = 0;
     g_cursor_present = 0;
@@ -11634,7 +11831,7 @@ static void wlp_button(void* d, struct wl_pointer* p, uint32_t s, uint32_t t, ui
         return;
     }
 
-    luna_mouse_button(btn, action, g_wl.mods, g_wl.mouse_x, g_wl.mouse_y);
+    shell_mouse_button(btn, action, g_wl.mods, g_wl.mouse_x, g_wl.mouse_y);
 }
 static void wlp_axis(void* d, struct wl_pointer* p, uint32_t t, uint32_t axis, wl_fixed_t value) {
     (void)d; (void)p; (void)t;
@@ -11943,6 +12140,12 @@ static EGLBoolean surf_swap(LunaSurface* s) {
     if (!s->full_damage && !has_dmg)
         return EGL_TRUE;   /* identical frame — skip the commit entirely */
 
+    /* eglSwapInterval is per-display.  A non-zero interval here waits for the
+     * compositor's vblank while the compositor is already paced by KMS page
+     * flips — the two independent clocks miss each other and show up as a
+     * regular ~30 Hz hitch on real hardware (QEMU often hides it). */
+    eglSwapInterval(g_wl.dpy, 0);
+
     if (s->full_damage || !g_egl_swap_damage) {
         s->full_damage = 0;
         return eglSwapBuffers(g_wl.dpy, s->egl_surf);
@@ -12064,6 +12267,64 @@ static void surf_reconfigure_chrome(LunaSurface* s) {
     s->full_damage = 1;
 }
 
+static void shell_dispatch_pending_right_click(void) {
+    if (!g_shell_pending_right) return;
+    g_shell_pending_right = 0;
+    int hit = hit_test_at(g_shell_right_x, g_shell_right_y);
+    for (int i = hit; i != -1; ) {
+        LunaElement* e = luna_element_at(i);
+        if (!e) break;
+        const char* id = e->id;
+        int handled = 0;
+        if (id && !strncmp(id, "tray_", 5) && id[5] >= '0' && id[5] <= '9') {
+            int slot = atoi(id + 5);
+            if (slot >= 0 && slot < MAX_TRAY_SLOTS &&
+                tray_key_is_window(g_tray_slot_key[slot])) {
+                on_tray_click(e);
+                handled = 1;
+            }
+        } else if (id && !strncmp(id, "win_", 4) && id[4] >= '0' && id[4] <= '9') {
+            on_win_click(e);
+            handled = 1;
+        }
+        if (handled) {
+            luna_consume_pointer_event();
+            shell_request_repaint(-1);
+            break;
+        }
+        i = e->parent_idx;
+    }
+}
+
+static void shell_sync_dock_width(void) {
+    if (g_backend != &g_wl_backend) return;
+    LunaSurface* dock = &g_surfs[LUNA_SURF_DOCK];
+    if (!dock->layer_surf) return;
+    if (!g_dock_width_dirty && dock->fixed_w > 0) return;
+    int di = luna_get_element_by_id("dock");
+    LunaElement* de = di >= 0 ? luna_element_at(di) : NULL;
+    if (!de || !is_shown(di)) return;
+    /* luna-ui resolves width:fit-content.  The native layer only mirrors that
+     * CSS border-box width; it must not maintain a second layout algorithm. */
+    int dw = (int)ceilf(de->w);
+    int max_w = (int)luna_window_width - 24;
+    if (dw < 96) dw = 96;
+    if (dw > max_w) dw = max_w;
+    if (dw != dock->fixed_w) {
+        dock->fixed_w = dw;
+        surf_reconfigure_chrome(dock);
+        shell_request_repaint(2);
+        if (g_wl.display) wl_display_flush(g_wl.display);
+    }
+    g_dock_width_dirty = 0;
+}
+
+static void shell_runtime_maintenance(void) {
+    shell_ensure_widget_css();
+    shell_sync_tray_window_tips();
+    shell_dispatch_pending_right_click();
+}
+
 #ifdef LUNA_BACKEND_X11
 static void x11_tray_layout(void);
 #endif
@@ -12074,13 +12335,23 @@ static void x11_tray_layout(void);
 static void apply_dock_visibility(void) {
     int dock_hidden = !g_settings.dock_enabled || g_chrome_dock_hidden;
     int dock_idx = luna_get_element_by_id("dock");
-    if (dock_idx >= 0)
+    if (dock_idx >= 0) {
         set_hidden(dock_idx, dock_hidden);
+        /* A layer-shell surface is already centred by its BOTTOM-only anchor.
+         * Lay the CSS root out at the origin of that compact surface; keeping
+         * left:50% here applies the desktop centring a second time and makes
+         * the first dock item start at the screen centre. */
+        if (g_backend == &g_wl_backend)
+            luna_update_classes(dock_idx, "dock_layer", "dock_layer");
+        if (!dock_hidden)
+            g_dock_width_dirty = 1;
+    }
     const char* widget_ids[] = { "widget_clock", "widget_stats", "widget_weather" };
     for (size_t i = 0; i < sizeof(widget_ids) / sizeof(widget_ids[0]); i++) {
         int idx = luna_get_element_by_id(widget_ids[i]);
         if (idx >= 0) set_hidden(idx, !g_settings.widgets_enabled);
     }
+    shell_sync_bg_input_region();
     luna_mark_layout_dirty();
 
     if (g_surfs[LUNA_SURF_DOCK].layer_surf) {
@@ -12100,8 +12371,8 @@ static void apply_dock_visibility(void) {
             dock->margin_right = 0;
             dock->margin_bottom = 12;
             dock->margin_left = 0;
-            dock->fixed_w = 542;
-            dock->fixed_h = 80;
+            dock->fixed_h = 84;
+            g_dock_width_dirty = 1;
             surf_reconfigure_chrome(dock);
             if (dock->egl_surf == EGL_NO_SURFACE) {
                 dock->was_shown = 1;
@@ -12142,7 +12413,10 @@ static void skin_apply_chrome(int skin_idx) {
                 break;
             }
 
-        mb->fixed_h = height;
+        /* The two-line top-bar tooltip is nested below its icon. Keep the exclusive
+         * zone at the bar height, but give the transparent surface enough
+         * pixels to render the popup without clipping it. */
+        mb->fixed_h = edge == SKIN_EDGE_TOP ? height + 56 : height;
         mb->exclusive_zone = height;
         mb->fixed_w = 0;
         mb->margin_top = mb->margin_right = mb->margin_bottom = mb->margin_left = 0;
@@ -12170,7 +12444,7 @@ static void skin_apply_chrome(int skin_idx) {
 }
 
 static void surf_update_input_region(LunaSurface* s) {
-    if (!s || !s->wl_surf || !s->was_shown) return;
+    if (!s || !s->wl_surf || (s->is_overlay && !s->was_shown)) return;
 
     if (s == &g_surfs[LUNA_SURF_BG]) {
         static uint64_t last_sig = 0;
@@ -12239,6 +12513,11 @@ static void surf_update_input_region(LunaSurface* s) {
     wl_region_destroy(region);
     wl_surface_commit(s->wl_surf);
     s->input_x = x; s->input_y = y; s->input_w = w; s->input_h = h;
+}
+
+static void shell_sync_bg_input_region(void) {
+    if (g_backend != &g_wl_backend) return;
+    surf_update_input_region(&g_surfs[LUNA_SURF_BG]);
 }
 
 /* A surface only takes part in the frame loop when it has something to show. */
@@ -12370,10 +12649,10 @@ static int wl_backend_start(void) {
                 fprintf(stderr, "[luna-shell/wl] eglMakeCurrent failed (bg, EGL 0x%x)\n", eglGetError());
                 return 0;
             }
-            /* Throttle on the background surface only.  With one swap interval
-             * per surface every frame would block on several frame callbacks
-             * in a row instead of one. */
-            eglSwapInterval(g_wl.dpy, 1);
+            /* Throttle via poll() in the main loop, not EGL swap interval.
+             * The compositor already paces scanout with asynchronous KMS page
+             * flips; a non-zero interval here double-waits for vblank. */
+            eglSwapInterval(g_wl.dpy, 0);
         } else {
             eglMakeCurrent(g_wl.dpy, s->egl_surf, s->egl_surf, g_wl.ctx);
             eglSwapInterval(g_wl.dpy, 0);
@@ -12446,10 +12725,8 @@ static void wl_surf_render(LunaSurface* s, int surf_idx) {
         luna_render(fw, fh);
     }
     /* llvmpipe / mesa_glthread can still be writing the color buffer when
-     * eglSwapBuffers returns.  The compositor CPU-mmaps that wl_shm on
-     * commit; without a finish the first frame is only glClear, and the
-     * dirty-probe then skips every later swap — black wallpaper, cursor. */
-    glFinish();
+     * eglSwapBuffers returns on software GL.  Hardware GL can pipeline. */
+    shell_gl_sync_before_swap();
     if (!surf_swap(s)) {
         EGLint err = eglGetError();
         fprintf(stderr, "[luna-shell/wl] eglSwapBuffers failed for '%s' (EGL 0x%x)\n",
@@ -12481,6 +12758,11 @@ static void wl_surfs_update(void) {
         } else {
             wl_surface_doc_origin(s, &s->doc_x, &s->doc_y);
         }
+        /* Chrome may paint outside its interactive box (the menubar tooltip
+         * is the important case).  Leave that transparent overflow click-
+         * through so an IME candidate window can still be dismissed. */
+        if (!s->is_overlay && s->input_root_idx >= 0)
+            surf_update_input_region(s);
     }
 
     /* Handle overlay visibility changes */
@@ -12495,6 +12777,7 @@ static void wl_surfs_update(void) {
         }
         if (shown) surf_update_input_region(s);
     }
+    shell_sync_bg_input_region();
 }
 
 static void wl_backend_get_fb_size(int* w, int* h) {
@@ -12747,11 +13030,14 @@ static void wl_backend_terminate(void) {
     if (g_wl.display)    wl_display_disconnect(g_wl.display);
 }
 
+static int wl_backend_present_busy(void) { return 0; }
+
 static const LunaBackend g_wl_backend = {
     .start        = wl_backend_start,
     .get_fb_size  = wl_backend_get_fb_size,
     .swap_buffers = wl_backend_swap_buffers,
     .poll_events  = wl_backend_poll_events,
+    .present_busy = wl_backend_present_busy,
     .set_cursor   = wl_backend_set_cursor,
     .terminate    = wl_backend_terminate,
 };
@@ -13110,7 +13396,7 @@ static void x11_process_events(void) {
                     case Button2: btn = 2; break;
                     default:      btn = 3; break;
                 }
-                luna_mouse_button(btn, action, g_x11.mods, g_x11.mouse_x, g_x11.mouse_y);
+                shell_mouse_button(btn, action, g_x11.mods, g_x11.mouse_x, g_x11.mouse_y);
             }
             break;
         }
@@ -13199,11 +13485,14 @@ static void x11_backend_terminate(void) {
     if (g_x11.display) XCloseDisplay(g_x11.display);
 }
 
+static int x11_backend_present_busy(void) { return 0; }
+
 static const LunaBackend g_x11_backend = {
     .start        = x11_backend_start,
     .get_fb_size  = x11_backend_get_fb_size,
     .swap_buffers = x11_backend_swap_buffers,
     .poll_events  = x11_backend_poll_events,
+    .present_busy = x11_backend_present_busy,
     .set_cursor   = x11_backend_set_cursor,
     .terminate    = x11_backend_terminate,
 };
@@ -13391,12 +13680,12 @@ int main(int argc, char** argv) {
     int loaded = 0;
     if (g_layout_path) {
         luna_set_html_base_dir(g_layout_path);
-        loaded = luna_load_html_file(g_layout_path);
+        loaded = shell_load_layout_file(g_layout_path);
     }
     if (!loaded) {
         fprintf(stderr, "[luna-shell] using embedded layout (no luna-desktop/shell/luna-shell.html)\n");
         luna_set_html_base_dir("skins/default");
-        luna_parse_html(default_html);
+        shell_parse_layout_html(default_html);
     } else {
         fprintf(stderr, "[luna-shell] layout %s\n", g_layout_path);
     }
@@ -13434,6 +13723,7 @@ int main(int argc, char** argv) {
             snprintf(g_settings.skin, sizeof(g_settings.skin), "default");
         }
     }
+    shell_ensure_widget_css();
     shell_trim_heap();
     luna_inject_body_background();
     register_handlers();
@@ -13679,7 +13969,6 @@ int main(int argc, char** argv) {
         slider_tick_when_needed(&g_scale_qt_slider);
         slider_tick_when_needed(&g_scale_cur_slider);
         cursor_theme_tick_and_refresh();
-        if (tray_sync_hover_tip()) shell_request_repaint(1);
         if (!interaction_busy && g_toast_deadline > 0.0 && g_now > g_toast_deadline) {
             set_hidden(g_toast_idx, 1);
             g_toast_deadline = 0.0;
@@ -13695,6 +13984,11 @@ int main(int argc, char** argv) {
             unsigned redraw_flags[LUNA_SURF_COUNT];
             (void)luna_needs_redraw_mask(g_now, dt, surf_roots,
                                          LUNA_SURF_COUNT, redraw_flags);
+            /* Class/visibility changes above mark layout dirty.  Mirror the
+             * CSS fit-content width only after luna_needs_redraw_mask() has
+             * completed that layout pass; reading it from maintenance used
+             * the old zero width and collapsed the native dock to 96px. */
+            shell_sync_dock_width();
             int settling = 0;
             for (int i = 0; i < LUNA_SURF_COUNT; i++)
                 if ((redraw_flags[i] & (LUNA_REDRAW_ANIM | LUNA_REDRAW_PAINT)) ==
@@ -13721,57 +14015,59 @@ int main(int argc, char** argv) {
                 if (redraw_flags[i] & LUNA_REDRAW_PAINT)
                     shell_request_repaint(i);
             }
-            for (int i = 0; i < LUNA_SURF_COUNT; i++) {
-                wl_surf_render(&g_surfs[i], i);
-            }
-            /* Interactive easing is capped at roughly 60 fps.  When idle,
-             * sleep until input or the next real shell/background deadline. */
+            /* Wait for the next frame slot (or input) before touching GL.
+             * Rendering first and sleeping afterward let real GPUs finish an
+             * entire frame and then idle, which reads as a regular hitch. */
             g_wl_poll_timeout_ms = settling
                 ? shell_wait_timeout_ms(17, g_now + 1.0 / 60.0)
                 : shell_wait_timeout_ms(1000,
                       bg_ticking
                           ? g_last_bg_paint + LUNA_WL_BG_FRAME_SEC
                           : 0.0);
+            g_backend->poll_events();
+            g_now = plat_time();
+            dt = g_now - last;
+            last = g_now;
+            if (dt < 0.0) dt = 0.0;
+            if (dt > LUNA_MAX_FRAME_DT) dt = LUNA_MAX_FRAME_DT;
+            for (int i = 0; i < LUNA_SURF_COUNT; i++) {
+                wl_surf_render(&g_surfs[i], i);
+            }
         } else {
             int redraw_flags = luna_needs_redraw(g_now, dt);
             int settling =
                 (redraw_flags & (LUNA_REDRAW_ANIM | LUNA_REDRAW_PAINT)) ==
                 (LUNA_REDRAW_ANIM | LUNA_REDRAW_PAINT);
             g_bg_animated = (redraw_flags & LUNA_REDRAW_ANIM) != 0;
-            /* The integrated update result is also the complete redraw decision
-             * for the single KMS/X11 framebuffer. */
-            /* Pointer/hover easing runs at vblank cadence, while an idle CSS
-             * wallpaper runs at 12 Hz.  The KMS hardware cursor remains
-             * full-rate without repainting the
-             * primary plane, saving GPU work and memory bandwidth.  A still
-             * wallpaper is entirely event-driven: the old two-second "safety"
-             * repaint was a periodic full-document render + KMS page flip and
-             * was visible as a regular hitch even though no pixel changed. */
             double idle_frame_deadline = g_bg_animated && !interaction_busy
                 ? g_last_bg_paint + LUNA_SINGLE_BG_FRAME_SEC
                 : 0.0;
             if (idle_frame_deadline > 0.0 && g_now >= idle_frame_deadline)
                 g_frame_dirty = 1;
-            if (g_frame_dirty || (redraw_flags & LUNA_REDRAW_PAINT)) {
+            int want_frame = g_frame_dirty || (redraw_flags & LUNA_REDRAW_PAINT);
+            if (g_backend->present_busy()) {
+                g_single_poll_timeout_ms = shell_wait_timeout_ms(17, g_now + 1.0 / 60.0);
+            } else {
+                g_single_poll_timeout_ms = want_frame
+                    ? (settling ? shell_wait_timeout_ms(17, g_now + 1.0 / 60.0) : 0)
+                    : shell_wait_timeout_ms(1000, idle_frame_deadline);
+            }
+            g_backend->poll_events();
+            g_now = plat_time();
+            dt = g_now - last;
+            last = g_now;
+            if (dt < 0.0) dt = 0.0;
+            if (dt > LUNA_MAX_FRAME_DT) dt = LUNA_MAX_FRAME_DT;
+            if (want_frame && !g_backend->present_busy()) {
                 glViewport(0, 0, fbw, fbh);
                 glClearColor(0.04f, 0.05f, 0.12f, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT);
                 luna_render(fbw, fbh);
-                /* The default framebuffer contents are undefined after EGL swap
-                 * on the X11 backend.  Capture while the completed Luna frame is
-                 * still current, otherwise --screenshot can return a black image
-                 * even though the window itself was rendered correctly. */
                 luna_flush_pending_screenshot();
                 g_backend->swap_buffers();
                 g_frame_dirty = 0;
                 g_last_bg_paint = g_now;
                 finish_screenshot_notification();
-                g_single_poll_timeout_ms = settling ? 0
-                    : shell_wait_timeout_ms(1000, g_bg_animated
-                          ? g_last_bg_paint + LUNA_SINGLE_BG_FRAME_SEC
-                          : 0.0);
-            } else {
-                g_single_poll_timeout_ms = shell_wait_timeout_ms(1000, idle_frame_deadline);
             }
         }
         /* Wayland surfaces perform their own swap in wl_surf_render(); keep
@@ -13780,7 +14076,6 @@ int main(int argc, char** argv) {
             luna_flush_pending_screenshot();
             finish_screenshot_notification();
         }
-        g_backend->poll_events();
     }
     session_save();
     luna_sni_shutdown();

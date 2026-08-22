@@ -200,7 +200,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   border-top: 1px solid var(--luna-glass-edge);
   box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.05) inset, 0 -4px 12px rgba(0, 0, 0, 0.14);
 }
-#mb_left  { display: flex; flex-direction: row; align-items: center; gap: 4px; height: 32px; flex: 0 0 auto; min-width: 80px; }
+#mb_left  { position: relative; display: flex; flex-direction: row; align-items: center; gap: 4px; height: 32px; flex: 0 0 auto; min-width: 80px; }
 #mb_center {
   flex: 1 1 auto; min-width: 0; overflow: hidden;
   display: flex; flex-direction: row; align-items: center; justify-content: center;
@@ -209,6 +209,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #mb_right { display: flex; flex-direction: row; align-items: center; justify-content: flex-end; gap: 4px; height: 32px; flex: 0 0 auto; }
 
 .mb_item {
+  position: relative;
   color: rgba(245, 245, 255, 0.92); font-size: 13px; text-align: center;
   height: 24px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
   background-color: transparent; white-space: nowrap; flex-shrink: 0;
@@ -227,7 +228,7 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .mb_status  { font-size: 12px; color: rgba(215, 222, 255, 0.80); }
 #mb_bat     { min-width: 44px; }
 #mb_wifi    { min-width: 58px; }
-#mb_clip    { min-width: 28px; font-size: 13px; }
+#mb_clip    { position: relative; min-width: 28px; font-size: 13px; }
 #mb_cc      { width: 30px; font-size: 14px; }
 #mb_clock   { min-width: 136px; font-size: 12px; font-weight: 500; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
 
@@ -271,10 +272,13 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   display: flex; flex-direction: row; align-items: center; gap: 3px;
   height: 24px; margin-right: 6px; padding-right: 8px;
   border-right: 1px solid rgba(255, 255, 255, 0.12);
+  overflow: visible;
 }
 .tray_item {
+  position: relative;
   width: 24px; height: 22px; border-radius: 6px; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
+  overflow: visible;
   transition: background-color var(--dur-fast) var(--ease-out);
 }
 .tray_item:hover { background-color: rgba(255, 255, 255, 0.15); }
@@ -1347,6 +1351,16 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
   display: flex; flex-direction: row; align-items: center; gap: 10px;
   padding: 8px 14px; z-index: 450;
 }
+#dock.dock_layer {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  transform: none;
+  width: fit-content;
+  max-width: none;
+  height: 82px;
+  margin: 0;
+}
 .dock_item { position: relative; width: 54px; height: 66px; flex: 0 0 54px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; outline: 2px solid transparent; outline-offset: 2px; border-radius: 17px; }
 .dock_item:focus-visible { outline-color: var(--luna-gold); }
 /* Dock motion is stylesheet-only (no per-frame C interpolation). */
@@ -1455,12 +1469,47 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
  * hover/right-click behavior independent of which glyph pixel was hit. */
 .tray_glyph { pointer-events: none; }
 .tray_tip {
-  position: absolute; top: 3px; right: 28px; min-width: 72px; max-width: 260px;
-  padding: 5px 8px; border-radius: 6px; background-color: rgba(17, 18, 28, 0.94);
-  color: rgba(255, 255, 255, 0.96); font-size: 11px; line-height: 14px;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  opacity: 0; pointer-events: none; z-index: 1200;
-  transition: opacity 120ms ease-out;
+  position: absolute; left: 50%; top: 30px; width: 240px; height: 52px;
+  box-sizing: border-box; padding: 8px; border-radius: 6px;
+  background-color: rgba(17, 18, 28, 0.96);
+  color: rgba(255, 255, 255, 0.96); font-size: 12px; line-height: 18px;
+  white-space: normal; overflow: hidden; text-overflow: ellipsis;
+  opacity: 0; visibility: hidden; transform: translateX(-50%);
+  pointer-events: none; z-index: 1200;
 }
-.tray_item:hover .tray_tip,
-.tray_item.tip_open .tray_tip { opacity: 1; }
+.tray_tip::before {
+  content: ''; position: absolute; left: 50%; top: -6px;
+  width: 12px; height: 12px; background-color: rgba(17, 18, 28, 0.96);
+  transform: translateX(-50%) rotate(45deg); z-index: -1;
+}
+@keyframes tray-tip-in { from { opacity: 0; } to { opacity: 1; } }
+.tray_item:hover .tray_tip {
+  visibility: visible; animation: tray-tip-in 0.16s forwards; animation-delay: 0.8s;
+}
+
+/* Ordinary nested-HTML tooltip, matching luna-ui/examples/tooltip.c. */
+.mb_tip {
+  position: absolute; left: 50%; top: 30px; width: 150px; height: 34px;
+  box-sizing: border-box; padding: 8px; border-radius: 6px;
+  background-color: rgba(17, 18, 28, 0.96);
+  color: rgba(255, 255, 255, 0.96); font-size: 12px; font-weight: normal;
+  line-height: 18px; text-align: center; white-space: nowrap;
+  opacity: 0; visibility: hidden; transform: translateX(-50%);
+  pointer-events: none; z-index: 1200;
+}
+.mb_tip::before {
+  content: ''; position: absolute; left: 50%; top: -6px;
+  width: 12px; height: 12px; background-color: rgba(17, 18, 28, 0.96);
+  transform: translateX(-50%) rotate(45deg); z-index: -1;
+}
+.mb_tip.tip_left { left: 0; transform: none; }
+.mb_tip.tip_left::before { left: 18px; transform: rotate(45deg); }
+.mb_tip.tip_right { left: auto; right: 0; transform: none; width: 220px; }
+.mb_tip.tip_right::before { left: auto; right: 18px; transform: rotate(45deg); }
+@keyframes mb-tip-in { from { opacity: 0; } to { opacity: 1; } }
+.mb_item:hover > .mb_tip {
+  visibility: visible; animation: mb-tip-in 0.16s forwards; animation-delay: 0.8s;
+}
+#mb_logo:hover + .mb_logo_tip {
+  visibility: visible; animation: mb-tip-in 0.16s forwards; animation-delay: 0.8s;
+}

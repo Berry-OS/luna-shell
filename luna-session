@@ -31,7 +31,8 @@ cleanup() {
     done
     for p in "${PIDS[@]}"; do alive "$p" && kill -KILL "$p" 2>/dev/null || true; done
     for p in "${PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
-    rm -f -- "${XDG_RUNTIME_DIR:-/tmp}/$SOCKET" 2>/dev/null || true
+    rm -f -- "${XDG_RUNTIME_DIR:-/tmp}/$SOCKET" \
+        "${XDG_RUNTIME_DIR:-/tmp}/$SOCKET.lock" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -45,6 +46,16 @@ if [[ -z ${XDG_RUNTIME_DIR:-} ]]; then
 fi
 install -d -m 700 "$XDG_RUNTIME_DIR"
 export XDG_RUNTIME_DIR
+
+# Own the socket name before removing a stale endpoint.  A session killed
+# without running cleanup leaves wayland-N behind; the compositor then fails
+# its first bind and the next invocation mysteriously succeeds.  The lock also
+# prevents a second live luna-session from stealing the active compositor's
+# socket.
+command -v flock >/dev/null 2>&1 || fail 'flock is required to own the Wayland socket'
+exec {SESSION_LOCK_FD}>"$XDG_RUNTIME_DIR/luna-session-$SOCKET.lock"
+flock -n "$SESSION_LOCK_FD" || fail "another Luna session owns $SOCKET"
+rm -f -- "$XDG_RUNTIME_DIR/$SOCKET" "$XDG_RUNTIME_DIR/$SOCKET.lock"
 
 # Resolve binaries.  A source checkout builds once when needed; an installed
 # session simply uses PATH.  There is no build/stat polling after launch.

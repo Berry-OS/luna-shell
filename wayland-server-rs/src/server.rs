@@ -613,8 +613,10 @@ impl Server {
       // epoll_wait(-1) when no client work remained, which meant a *lost* DRM
       // event also prevented the watchdog from ever waking up.
       let refresh_millihz = self.backend.refresh_millihz().max(10_000) as u64;
-      let present_watchdog_ms =
-        ((1_000_000u64 + refresh_millihz - 1) / refresh_millihz).clamp(1, 100) as i32;
+      let frame_ms = ((1_000_000u64 + refresh_millihz - 1) / refresh_millihz).max(1);
+      /* Match DriBackend::flip_event_grace_ms: poll_presentation only recovers
+       * after two nominal refresh periods, so waking epoll sooner just spins. */
+      let present_watchdog_ms = (20).max((frame_ms * 2) as i32).min(100);
       let timeout = if self.backend.present_busy() {
         present_watchdog_ms
       } else if work {
@@ -7652,6 +7654,7 @@ impl Server {
     // Geometry is applied immediately here, so a mapped surface must dirty the
     // scene even when the following wl_surface.commit carries no pixels.
     let mut geometry_changed = false;
+    let mut size_changed = false;
     match opcode {
       0 => { // set_size(width, height)
         let nw = args.get(0).map(|a| a.as_uint()).unwrap_or(0);
@@ -7661,6 +7664,7 @@ impl Server {
             *size_w = nw;
             *size_h = nh;
             geometry_changed = true;
+            size_changed = true;
           }
         }
       }
@@ -7731,6 +7735,20 @@ impl Server {
       _ => {}
     }
     if geometry_changed {
+      /* A layer size request changes the buffer dimensions the compositor
+       * expects.  Send a fresh configure on the following surface commit so
+       * clients resize wl_egl_window as required by layer-shell.  Applying
+       * only the scene rectangle left luna-shell's Dock with its bootstrap
+       * full-output buffer, whose content consequently began at screen
+       * centre after the narrower layer rectangle was centred.  Margin-only
+       * moves deliberately remain configure-free. */
+      if size_changed {
+        if let Some(Object {
+          role: Role::LayerSurface { configured, .. }, ..
+        }) = client.objects.get_mut(&id) {
+          *configured = false;
+        }
+      }
       let surf_id = match client.objects.get(&id) {
         Some(Object { role: Role::LayerSurface { surface_id, .. }, .. }) => *surface_id,
         _ => return,
@@ -10144,9 +10162,9 @@ impl Server {
     }
     // Global shell shortcuts — handled here so they win over focused GTK apps.
     // Delivered via a datagram socket so luna-shell executes immediately.
-    // F4 / Super — Launchpad (Alt+F4 is close, handled above).
+    // Super — Launchpad toggle (Alt+F4 closes the focused window above).
     if pressed && (self.kbd_mods & 8) == 0 {
-      if keycode == 62 || keycode == 125 || keycode == 126 {
+      if keycode == 125 || keycode == 126 {
         if let Some(ref ipc) = self.shell_ipc {
           ipc.send_shell_action("launchpad_toggle");
         }

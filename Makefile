@@ -105,6 +105,12 @@ endif
 $(UI_DIR)/luna-shell.css.h: $(DEFAULT_SKIN_DIR)/style.css $(UI_DIR)/gen_include.sh
 	cd $(UI_DIR) && ./gen_include.sh -o luna-shell.css.h ../$(DEFAULT_SKIN_DIR)/style.css
 
+$(UI_DIR)/luna-shell-widgets.css.h: skins/widgets.css $(UI_DIR)/gen_include.sh
+	cd $(UI_DIR) && ./gen_include.sh -o luna-shell-widgets.css.h ../skins/widgets.css
+
+$(UI_DIR)/luna-shell-widgets.html.h: skins/widgets.html $(UI_DIR)/gen_include.sh
+	cd $(UI_DIR) && ./gen_include.sh -o luna-shell-widgets.html.h ../skins/widgets.html
+
 $(UI_DIR)/luna-shell.html.h: $(DEFAULT_SKIN_DIR)/layout.html $(UI_DIR)/gen_include.sh
 	cd $(UI_DIR) && ./gen_include.sh -o luna-shell.html.h ../$(DEFAULT_SKIN_DIR)/layout.html
 
@@ -131,11 +137,11 @@ $(LAYER_SHELL_SRC): $(LAYER_SHELL_XML)
 
 luna-shell: $(SHELL_WL_DEPS) $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c \
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
-            $(UI_DIR)/luna-shell-runtime.h $(UI_DIR)/luna-shell-widgets.h \
             $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-ethernet.h \
             $(UI_DIR)/luna-bluetooth.h $(UI_DIR)/luna-sni.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
             $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \
-            $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
+            $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h \
+            $(UI_DIR)/luna-shell-widgets.css.h $(UI_DIR)/luna-shell-widgets.html.h
 	@echo "→ Building luna-shell (Luna Desktop shell, $(SHELL_WL_LABEL))"
 	# luna-shell's layout, animation and draw-list walks are hot on every KMS \
 	# frame.  Prefer runtime optimization over the size-oriented global default.
@@ -143,7 +149,7 @@ luna-shell: $(SHELL_WL_DEPS) $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol
 	# `-Os -ffast-math`, gcc keeps the last -O* / -f* of each kind, and
 	# -ffast-math left luna_render as a no-op (black desktop, live cursor).
 	# Wi-Fi backend (luna-wifi.h) and the status poller both use pthreads.
-	gcc -Wall -Wextra -DLUNA_BACKEND_X11 -include $(UI_DIR)/luna-shell-runtime.h $(SHELL_CFLAGS) \
+	gcc -Wall -Wextra -DLUNA_BACKEND_X11 $(SHELL_CFLAGS) \
 	    -O2 -fno-fast-math -fno-finite-math-only -I$(UI_DIR) \
 	    $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol.c $(LAYER_SHELL_SRC) \
 	    -o luna-shell $(SHELL_LIBS) -lX11
@@ -346,7 +352,8 @@ stop:
 clean:
 	cargo clean
 	rm -f luna-shell luna-clipboard luna-tray-notify \
-	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h
+	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h \
+	  $(UI_DIR)/luna-shell-widgets.css.h $(UI_DIR)/luna-shell-widgets.html.h
 	rm -rf $(RPMBUILD_DIR) $(RPM_DIST)
 	rm -f $(TARBALL) $(RPM_NAME)-$(RPM_VERSION)-$(RPM_RELEASE).*.rpm
 
