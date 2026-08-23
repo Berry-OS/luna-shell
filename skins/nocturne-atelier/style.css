@@ -160,3 +160,16 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
   transition: opacity 120ms ease-out;
 }
 .tray_item.tip_open .tray_tip { opacity: 1; }
+
+/* Keep the Launchpad search/header fixed while overflowing apps scroll. */
+#launchpad {
+  min-height: 0;
+  overflow: hidden;
+}
+#lp_grid {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}

@@ -946,6 +946,8 @@ input:focus-visible,
   border-right: 2px solid var(--w95-button-dark) !important;
   border-bottom: 2px solid var(--w95-button-dark) !important;
   box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight), 3px 3px 0 rgba(0,0,0,.45) !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
 }
 #launchpad::before {
   content: "Programs";
@@ -963,9 +965,10 @@ input:focus-visible,
   display: grid !important;
   grid-template-columns: repeat(4, minmax(86px, 1fr)) !important;
   gap: 6px !important;
-  flex: 1 1 auto !important;
+  flex: 1 1 0 !important;
   min-height: 0 !important;
-  overflow: auto !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
   background: #fff !important;
   border-top: 2px solid var(--w95-button-shadow) !important;
   border-left: 2px solid var(--w95-button-shadow) !important;
