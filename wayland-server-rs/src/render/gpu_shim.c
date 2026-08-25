@@ -5,12 +5,13 @@
 #include <gbm.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define LUNA_GPU_TEXTURE_CACHE 16
 #define LUNA_GPU_TEXTURE_CACHE_BYTES (64ull * 1024ull * 1024ull)
 
 struct luna_gpu_texture {
-  uint64_t dev, ino, serial, used, bytes;
+  uint64_t dev, ino, serial, modifier, used, bytes;
   uintptr_t pixels;
   uint32_t width, height, stride, offset, fourcc;
   EGLImageKHR image;
@@ -26,7 +27,7 @@ struct luna_gpu {
   EGLContext context;
   EGLSurface egl_surface;
   GLuint program, texture, vbo;
-  GLint pos, uv;
+  GLint pos, uv, rect;
   uint32_t width, height;
   PFNEGLCREATEIMAGEKHRPROC create_image;
   PFNEGLDESTROYIMAGEKHRPROC destroy_image;
@@ -36,7 +37,8 @@ struct luna_gpu {
   uint64_t texture_bytes;
 };
 struct luna_gpu_output { void *bo; uint32_t handle, stride; };
-struct luna_gpu_plane { int fd; const void *pixels; uint64_t dev,ino,serial; uint32_t width,height,stride,offset,fourcc; int32_t x,y; };
+struct luna_gpu_format { uint32_t fourcc, pad; uint64_t modifier; };
+struct luna_gpu_plane { int fd; const void *pixels; uint64_t dev,ino,serial,modifier; uint32_t width,height,stride,offset,fourcc; int32_t x,y; };
 
 static GLuint shader(GLenum kind, const char *src) {
   GLuint s = glCreateShader(kind); GLint ok = 0;
@@ -65,13 +67,14 @@ static void texture_drop(struct luna_gpu *g, struct luna_gpu_texture *t) {
 static GLuint texture_for_plane(struct luna_gpu *g,const struct luna_gpu_plane *p) {
   uint64_t dev=p->fd>=0?p->dev:0,ino=p->fd>=0?p->ino:0;
   uintptr_t pixels=p->fd<0?(uintptr_t)p->pixels:0;
-  uint64_t bytes=(uint64_t)p->width*(uint64_t)p->height*4ull;
+  uint64_t bytes=(uint64_t)p->stride*(uint64_t)p->height;
   struct luna_gpu_texture *slot=NULL,*oldest=NULL;
   for(unsigned i=0;i<LUNA_GPU_TEXTURE_CACHE;i++){
     struct luna_gpu_texture *t=&g->textures[i];
     if(t->texture && t->dmabuf==(p->fd>=0) && t->dev==dev && t->ino==ino &&
        t->pixels==pixels && t->width==p->width && t->height==p->height &&
-       t->stride==p->stride && t->offset==p->offset && t->fourcc==p->fourcc){
+       t->stride==p->stride && t->offset==p->offset && t->fourcc==p->fourcc &&
+       t->modifier==p->modifier){
       slot=t;break;
     }
     if(!t->texture){if(!slot)slot=t;continue;}
@@ -106,7 +109,8 @@ static GLuint texture_for_plane(struct luna_gpu *g,const struct luna_gpu_plane *
 
   slot->dev=dev;slot->ino=ino;slot->pixels=pixels;slot->width=p->width;
   slot->height=p->height;slot->stride=p->stride;slot->offset=p->offset;
-  slot->fourcc=p->fourcc;slot->dmabuf=p->fd>=0;slot->image=EGL_NO_IMAGE_KHR;
+  slot->fourcc=p->fourcc;slot->modifier=p->modifier;slot->dmabuf=p->fd>=0;
+  slot->image=EGL_NO_IMAGE_KHR;
   slot->bytes=bytes;
   glGenTextures(1,&slot->texture);glBindTexture(GL_TEXTURE_2D,slot->texture);
   if(!slot->texture){*slot=(struct luna_gpu_texture){0};return 0;}
@@ -116,7 +120,9 @@ static GLuint texture_for_plane(struct luna_gpu *g,const struct luna_gpu_plane *
   if(p->fd>=0){
     EGLint a[]={EGL_WIDTH,(EGLint)p->width,EGL_HEIGHT,(EGLint)p->height,
       EGL_LINUX_DRM_FOURCC_EXT,(EGLint)p->fourcc,EGL_DMA_BUF_PLANE0_FD_EXT,p->fd,
-      EGL_DMA_BUF_PLANE0_OFFSET_EXT,(EGLint)p->offset,EGL_DMA_BUF_PLANE0_PITCH_EXT,(EGLint)p->stride,EGL_NONE};
+      EGL_DMA_BUF_PLANE0_OFFSET_EXT,(EGLint)p->offset,EGL_DMA_BUF_PLANE0_PITCH_EXT,(EGLint)p->stride,
+      EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT,(EGLint)(uint32_t)p->modifier,
+      EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT,(EGLint)(uint32_t)(p->modifier>>32),EGL_NONE};
     slot->image=g->create_image(g->display,EGL_NO_CONTEXT,EGL_LINUX_DMA_BUF_EXT,NULL,a);
     if(slot->image==EGL_NO_IMAGE_KHR){texture_drop(g,slot);return 0;}
     g->image_texture(GL_TEXTURE_2D,slot->image);
@@ -165,21 +171,29 @@ void *luna_gpu_create(int fd, uint32_t w, uint32_t h) {
   g->create_image=(void*)eglGetProcAddress("eglCreateImageKHR");
   g->destroy_image=(void*)eglGetProcAddress("eglDestroyImageKHR");
   g->image_texture=(void*)eglGetProcAddress("glEGLImageTargetTexture2DOES");
-  const char *vs="attribute vec2 p;attribute vec2 t;varying vec2 v;void main(){v=t;gl_Position=vec4(p,0.,1.);}";
+  const char *vs="attribute vec2 p;attribute vec2 t;uniform vec4 r;varying vec2 v;void main(){v=t;gl_Position=vec4(mix(r.xy,r.zw,p),0.,1.);}";
   const char *fs="precision mediump float;uniform sampler2D s;varying vec2 v;void main(){gl_FragColor=texture2D(s,v);}";
   GLuint a=shader(GL_VERTEX_SHADER,vs), b=shader(GL_FRAGMENT_SHADER,fs); GLint ok=0;
   if (!a||!b) goto fail;
   g->program=glCreateProgram(); glAttachShader(g->program,a); glAttachShader(g->program,b); glLinkProgram(g->program);
   glDeleteShader(a); glDeleteShader(b); glGetProgramiv(g->program,GL_LINK_STATUS,&ok); if(!ok) goto fail;
   g->pos=glGetAttribLocation(g->program,"p"); g->uv=glGetAttribLocation(g->program,"t");
+  g->rect=glGetUniformLocation(g->program,"r");
   glGenTextures(1,&g->texture); glBindTexture(GL_TEXTURE_2D,g->texture);
   glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST); glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
   /* Allocate mutable upload storage once.  glTexImage2D/glBufferData in every
    * frame made Mesa repeatedly retire driver allocations, producing periodic
    * cleanup stalls. */
   glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,w,h,0,GL_BGRA_EXT,GL_UNSIGNED_BYTE,NULL);
+  /* Geometry never changes: place a unit quad in a static VBO and position
+   * each plane with one uniform.  The old path uploaded 64 bytes and rebuilt
+   * both attribute bindings once per visible surface, every frame. */
+  static const float q[]={0,0,0,1, 1,0,1,1, 0,1,0,0, 1,1,1,0};
   glGenBuffers(1,&g->vbo); glBindBuffer(GL_ARRAY_BUFFER,g->vbo);
-  glBufferData(GL_ARRAY_BUFFER,16*sizeof(float),NULL,GL_DYNAMIC_DRAW);
+  glBufferData(GL_ARRAY_BUFFER,sizeof(q),q,GL_STATIC_DRAW);
+  glEnableVertexAttribArray(g->pos); glEnableVertexAttribArray(g->uv);
+  glVertexAttribPointer(g->pos,2,GL_FLOAT,GL_FALSE,16,(void*)0);
+  glVertexAttribPointer(g->uv,2,GL_FLOAT,GL_FALSE,16,(void*)8);
   return g;
 fail:
   if(g->display) eglTerminate(g->display);
@@ -188,15 +202,64 @@ fail:
   free(g); return NULL;
 }
 
+/* Report only combinations importable as GL_TEXTURE_2D. Combinations marked
+ * external_only would require GL_TEXTURE_EXTERNAL_OES and a different shader,
+ * so advertising them would promise clients a path this compositor cannot
+ * actually present. */
+uint32_t luna_gpu_query_dmabuf_formats(struct luna_gpu *g,
+                                      struct luna_gpu_format *out,
+                                      uint32_t capacity) {
+  if(!g||!g->create_image||!g->image_texture)return 0;
+  const char *ext=eglQueryString(g->display,EGL_EXTENSIONS);
+  if(!ext||!strstr(ext,"EGL_EXT_image_dma_buf_import_modifiers"))return 0;
+  PFNEGLQUERYDMABUFMODIFIERSEXTPROC query=
+    (void*)eglGetProcAddress("eglQueryDmaBufModifiersEXT");
+  if(!query)return 0;
+  const EGLint formats[]={0x34325241,0x34325258}; /* AR24, XR24 */
+  uint32_t total=0;
+  for(unsigned f=0;f<sizeof(formats)/sizeof(formats[0]);f++){
+    EGLint n=0;
+    if(!query(g->display,formats[f],0,NULL,NULL,&n)||n<=0)continue;
+    EGLuint64KHR *mods=calloc((size_t)n,sizeof(*mods));
+    EGLBoolean *external=calloc((size_t)n,sizeof(*external));
+    if(!mods||!external){free(mods);free(external);continue;}
+    EGLint got=0;
+    if(query(g->display,formats[f],n,mods,external,&got)){
+      if(got>n)got=n;
+      for(EGLint i=0;i<got;i++){
+        if(external[i])continue;
+        /* AR24/XR24 normally have one memory plane, but compression modifiers
+         * may add an auxiliary metadata plane. The current ShmBuffer ABI is
+         * single-plane, so probe and advertise ordinary tiled layouts only;
+         * never promise a modifier whose params.add sequence we cannot hold. */
+        uint64_t modifier=(uint64_t)mods[i];
+        if(modifier==0x00ffffffffffffffull)continue; /* implicit/INVALID */
+        if(modifier!=0){
+          struct gbm_bo *probe=gbm_bo_create_with_modifiers(
+            g->dev,256,256,(uint32_t)formats[f],&modifier,1);
+          if(!probe)continue;
+          int planes=gbm_bo_get_plane_count(probe);
+          gbm_bo_destroy(probe);
+          if(planes!=1)continue;
+        }
+        if(out&&total<capacity){
+          out[total].fourcc=(uint32_t)formats[f];
+          out[total].pad=0;
+          out[total].modifier=modifier;
+        }
+        total++;
+      }
+    }
+    free(mods);free(external);
+  }
+  return total;
+}
+
 int luna_gpu_render(struct luna_gpu *g,const uint32_t *pixels,uint32_t w,uint32_t h,struct luna_gpu_output *out) {
   if(!g||w!=g->width||h!=g->height||g->pending) return 0;
-  static const float q[]={-1,-1,0,1, 1,-1,1,1, -1,1,0,0, 1,1,1,0};
   glViewport(0,0,w,h); glUseProgram(g->program); glBindTexture(GL_TEXTURE_2D,g->texture);
   glTexSubImage2D(GL_TEXTURE_2D,0,0,0,w,h,GL_BGRA_EXT,GL_UNSIGNED_BYTE,pixels);
-  glBindBuffer(GL_ARRAY_BUFFER,g->vbo); glBufferSubData(GL_ARRAY_BUFFER,0,sizeof(q),q);
-  glEnableVertexAttribArray(g->pos); glEnableVertexAttribArray(g->uv);
-  glVertexAttribPointer(g->pos,2,GL_FLOAT,GL_FALSE,16,(void*)0);
-  glVertexAttribPointer(g->uv,2,GL_FLOAT,GL_FALSE,16,(void*)8);
+  glDisable(GL_BLEND); glUniform4f(g->rect,-1.f,-1.f,1.f,1.f);
   glDrawArrays(GL_TRIANGLE_STRIP,0,4);
   if(!eglSwapBuffers(g->display,g->egl_surface)) return 0;
   g->pending=gbm_surface_lock_front_buffer(g->surface); if(!g->pending) return 0;
@@ -211,9 +274,7 @@ int luna_gpu_render_planes(struct luna_gpu *g,const struct luna_gpu_plane *p,uin
     if(!texture_for_plane(g,&p[i]))return 0;
     float l=2.f*p[i].x/g->width-1.f,r=2.f*(p[i].x+(int)p[i].width)/g->width-1.f;
     float t=1.f-2.f*p[i].y/g->height,b=1.f-2.f*(p[i].y+(int)p[i].height)/g->height;
-    float q[]={l,b,0,1,r,b,1,1,l,t,0,0,r,t,1,0};
-    glBindBuffer(GL_ARRAY_BUFFER,g->vbo);glBufferSubData(GL_ARRAY_BUFFER,0,sizeof(q),q);
-    glEnableVertexAttribArray(g->pos);glEnableVertexAttribArray(g->uv);glVertexAttribPointer(g->pos,2,GL_FLOAT,0,16,0);glVertexAttribPointer(g->uv,2,GL_FLOAT,0,16,(void*)8);
+    glUniform4f(g->rect,l,b,r,t);
     glDrawArrays(GL_TRIANGLE_STRIP,0,4);
   }
   if(!eglSwapBuffers(g->display,g->egl_surface)) return 0;

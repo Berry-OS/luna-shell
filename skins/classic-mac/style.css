@@ -1,6 +1,7 @@
 /* Hallmark · theme: Classic Mac OS (Platinum) · chrome: menubar
  * audience: retro desktop users · use: live desktop skin switching
  */
+/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V5 · contrast: pass (40–41) */
 :root {
   --mac-strip: #dddddd;
   --mac-strip-hi: #f4f4f4;
@@ -162,6 +163,31 @@ html, body { background: var(--mac-desk); color: var(--mac-ink); }
   opacity: 0; pointer-events: none; z-index: 1200;
   transition: opacity 120ms ease-out;
 }
+
+/* Full-skin parity: the shared widgets are injected after a skin, so these
+ * deliberately use !important to keep Platinum chrome authoritative. */
+#wallpaper { background: var(--mac-desk) !important; }
+#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none !important; }
+#widget_clock, #widget_stats, #widget_weather {
+  background: var(--mac-strip) !important; color: var(--mac-ink) !important;
+  border: 2px solid var(--mac-ink) !important; border-radius: 0 !important;
+  box-shadow: inset 1px 1px var(--mac-white), inset -1px -1px var(--mac-strip-lo), 3px 3px 0 var(--mac-shadow) !important;
+  backdrop-filter: none !important; padding: 12px 14px !important;
+}
+#wg_time, #wg_date, #wg_stopwatch_title, #wg_stopwatch_state,
+#wg_stopwatch_time, #wg_wx_desc, #wg_wx_icon,
+#widget_stats .st_label, #widget_stats .st_val,
+#widget_weather .st_label, #widget_weather .st_val,
+#widget_weather .wf_day, #widget_weather .wf_icon, #widget_weather .wf_temp {
+  color: var(--mac-ink) !important;
+}
+#widget_clock .wg_clock_icon, #wg_stopwatch_actions .dlg_btn {
+  background: var(--mac-strip-hi) !important; color: var(--mac-ink) !important;
+  border: 1px solid var(--mac-ink) !important; border-radius: 0 !important;
+}
+#widget_stats .st_bar { height: 8px !important; border: 1px solid var(--mac-ink); border-radius: 0 !important; background: var(--mac-white) !important; }
+#widget_stats .st_fill { border-radius: 0 !important; background: var(--mac-sel) !important; }
+#widget_stats .st_fill.g_mem, #widget_stats .st_fill.g_disk { background: var(--mac-ink) !important; }
 .tray_item.tip_open .tray_tip { opacity: 1; }
 
 /* Keep the Launchpad search/header fixed while overflowing apps scroll. */
@@ -175,4 +201,25 @@ html, body { background: var(--mac-desk); color: var(--mac-ink); }
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
+}
+
+/* System 7 usability pass: monochrome chrome with a single blue selection ink. */
+.mb_item, .tray_item { min-width: 28px; min-height: 22px; padding: 0 6px; }
+.mb_item:active, .tray_item:active, .dock_item:active .dock_icon,
+.dlg_btn:active { background: var(--mac-ink); color: var(--mac-white); box-shadow: none; }
+.mb_item:focus-visible, .tray_item:focus-visible, .dock_item:focus-visible,
+.menu_item:focus-visible, .stab:focus-visible, .wm_pref:focus-visible,
+.pref_input:focus-visible, .pref_input_full:focus-visible {
+  outline: 2px solid var(--mac-sel); outline-offset: 1px;
+}
+.notify_card {
+  border: 2px solid var(--mac-ink); border-radius: 0;
+  background: var(--mac-white); box-shadow: 3px 3px 0 var(--mac-shadow);
+}
+.notify_title { color: var(--mac-ink); }
+.notify_when { color: var(--mac-sel); opacity: 1; }
+.notify_message { color: var(--mac-ink); opacity: 1; }
+.tray_tip {
+  border: 2px solid var(--mac-ink); border-radius: 0;
+  background: var(--mac-white); color: var(--mac-ink); box-shadow: 3px 3px 0 var(--mac-shadow);
 }

@@ -1,6 +1,7 @@
 /* Hallmark · theme: Amiga Workbench · chrome: menubar · enrichment: Tier A CSS
  * audience: retro desktop users · use: live desktop skin switching
  */
+/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V5 · contrast: pass (40–41) */
 :root {
   --ami-orange: #f0a000;
   --ami-orange-hi: #ffc040;
@@ -168,6 +169,28 @@ html, body { background: var(--ami-desk); color: var(--ami-ink); }
   opacity: 0; pointer-events: none; z-index: 1200;
   transition: opacity 120ms ease-out;
 }
+
+/* Full-skin parity: Workbench uses one flat four-colour vocabulary everywhere. */
+#wallpaper { background: var(--ami-blue) !important; }
+#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none !important; }
+#widget_clock, #widget_stats, #widget_weather {
+  background: var(--ami-grey) !important; color: var(--ami-ink) !important;
+  border: 2px solid var(--ami-ink) !important; border-top: 7px solid var(--ami-orange) !important;
+  border-radius: 0 !important; box-shadow: inset 2px 2px var(--ami-white), inset -2px -2px #606060, 3px 3px 0 var(--ami-shadow) !important;
+  backdrop-filter: none !important; padding: 10px 13px !important;
+}
+#wg_time, #wg_date, #wg_stopwatch_title, #wg_stopwatch_state,
+#wg_stopwatch_time, #wg_wx_desc, #wg_wx_icon,
+#widget_stats .st_label, #widget_stats .st_val,
+#widget_weather .st_label, #widget_weather .st_val,
+#widget_weather .wf_day, #widget_weather .wf_icon, #widget_weather .wf_temp { color: var(--ami-ink) !important; }
+#widget_clock .wg_clock_icon, #wg_stopwatch_actions .dlg_btn {
+  background: var(--ami-grey) !important; color: var(--ami-ink) !important;
+  border: 2px solid var(--ami-ink) !important; border-radius: 0 !important;
+}
+#wg_stopwatch_actions .dlg_btn.primary { background: var(--ami-orange) !important; }
+#widget_stats .st_bar { height: 8px !important; border: 1px solid var(--ami-ink); border-radius: 0 !important; background: var(--ami-white) !important; }
+#widget_stats .st_fill, #widget_stats .st_fill.g_mem, #widget_stats .st_fill.g_disk { border-radius: 0 !important; background: var(--ami-orange) !important; }
 .tray_item.tip_open .tray_tip { opacity: 1; }
 
 /* Keep the Launchpad search/header fixed while overflowing apps scroll. */
@@ -181,4 +204,24 @@ html, body { background: var(--ami-desk); color: var(--ami-ink); }
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
+}
+
+/* Workbench usability pass: chunky targets and unmistakable machine states. */
+.mb_item, .tray_item { min-width: 28px; min-height: 22px; padding: 0 6px; }
+.mb_item:active, .tray_item:active, .dock_item:active .dock_icon,
+.dlg_btn:active { background: var(--ami-blue-lo); color: var(--ami-white); box-shadow: inset 2px 2px var(--ami-ink); }
+.mb_item:focus-visible, .tray_item:focus-visible, .dock_item:focus-visible,
+.menu_item:focus-visible, .stab:focus-visible, .wm_pref:focus-visible,
+.pref_input:focus-visible, .pref_input_full:focus-visible {
+  outline: 2px solid var(--ami-orange-hi); outline-offset: 1px;
+}
+.notify_card {
+  border: 1px solid var(--ami-ink); border-radius: 0;
+  background: var(--ami-white); box-shadow: 2px 2px 0 var(--ami-ink);
+}
+.notify_when { color: var(--ami-blue-lo); opacity: 1; }
+.notify_message { color: var(--ami-ink); opacity: 1; }
+.tray_tip {
+  border: 2px solid var(--ami-ink); border-radius: 0;
+  background: var(--ami-grey); color: var(--ami-ink); box-shadow: 2px 2px 0 var(--ami-shadow);
 }

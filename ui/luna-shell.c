@@ -23,6 +23,13 @@
  * layout.html and was the first thing dropped when this cap was 800.
  * Launchpad XDG slots add ~150 nodes on top of the chrome DOM. */
 #define LUNA_UI_MAX_ELEMENTS 2000
+/* The shell loads the base sheet, a complete skin sheet, and the shared
+ * widget sheet into one cascade.  The luna-ui default (600 expanded
+ * selectors) silently clipped the tail of that cascade; every non-default
+ * skin consequently lost the widget rules that are intentionally appended
+ * last.  Size this host for the full shipped cascade, including selector-list
+ * expansion and enough headroom for external skins. */
+#define LUNA_UI_MAX_RULES 2400
 #define LUNA_UI_IMPLEMENTATION
 /* Custom KMS / Wayland / X11 host — do not pull in luna_linux.h (GLFW). */
 #define LUNA_UI_NO_PLATFORM
@@ -4423,6 +4430,11 @@ static void center_element(int idx) {
 
 static void position_menu_near(int menu_idx, int anchor_idx, float fallback_x) {
     if (menu_idx < 0) return;
+    /* Opening handlers expose the popup before calling us.  Resolve its
+     * skin-specific auto/content height now; measuring the display:none box
+     * used a stale base-skin height and put tall bottom-edge menus mostly
+     * below the output. */
+    luna_update(g_now, 0.0);
     LunaElement* m = luna_element_at(menu_idx);
     float x = fallback_x;
     float mw = m->css_width > 1.0f ? m->css_width :
@@ -5263,7 +5275,6 @@ static void child_session_env(void) {
      * children, but let Mesa choose its matching loader/Gallium driver. */
     if (!getenv("LIBGL_ALWAYS_SOFTWARE") &&
         !(env_is_true("LUNA_CLIENT_GPU") &&
-          env_is_true("LUNA_ENABLE_DMABUF") &&
           !env_is_true("LUNA_EGL_SOFTWARE")))
         setenv("LIBGL_ALWAYS_SOFTWARE", "1", 0);
     /* llvmpipe otherwise creates close to one worker per online CPU for every
@@ -7137,7 +7148,11 @@ static void on_settings_open(LunaElement* e) {
     dismiss_popovers();
     settings_populate_ui();
     set_hidden(g_settings_idx, 0);
-    center_element(g_settings_sheet_idx >= 0 ? g_settings_sheet_idx : g_settings_idx);
+    /* Resolve the subtree now that it is visible, but keep the viewport-
+     * relative position authored by the active skin.  center_element() used
+     * to provide this eager layout as a side effect while also overwriting
+     * CSS, making the native sheet sit lower than the browser preview. */
+    luna_update(g_now, 0.0);
 }
 
 static void on_settings_close(LunaElement* e) {
@@ -7575,6 +7590,12 @@ static void confirm_open(int action) {
         break;
     }
     set_hidden(g_confirm_idx, 0);
+    /* The Wayland session presents this subtree through a compact layer
+     * surface.  Resolve the newly-visible box before centring it so
+     * wl_surfs_update() sees the real dialog geometry on the same frame.
+     * Without this pass it can reuse the display:none layout (0/stale size),
+     * leaving the confirmation surface unmapped or outside its input box. */
+    luna_update(g_now, 0.0);
     center_element(g_confirm_box_idx >= 0 ? g_confirm_box_idx : g_confirm_idx);
 }
 
@@ -7588,6 +7609,20 @@ static void on_confirm_cancel(LunaElement* e) {
     set_hidden(g_confirm_idx, 1);
 }
 
+static void request_session_logout(void) {
+    const char* text = getenv("LUNA_SESSION_PID");
+    if (!text || !*text) return;
+
+    char* end = NULL;
+    errno = 0;
+    long value = strtol(text, &end, 10);
+    /* Only signal our actual parent.  This both rejects stale/injected values
+     * and keeps a standalone luna-shell from affecting an unrelated process. */
+    if (errno || !end || *end || value <= 1 || value > INT_MAX ||
+        (pid_t)value != getppid()) return;
+    (void)kill((pid_t)value, SIGUSR1);
+}
+
 static void on_confirm_ok(LunaElement* e) {
     (void)e;
     int action = g_pending_action;
@@ -7598,7 +7633,13 @@ static void on_confirm_ok(LunaElement* e) {
     switch (action) {
     case ACT_SHUTDOWN: spawn_command("systemctl poweroff"); break;
     case ACT_RESTART:  spawn_command("systemctl reboot");  break;
-    case ACT_LOGOUT:   g_should_close = 1; break;
+    /* Ask luna-session to stop the compositor and every session helper.  It
+     * exits successfully so the display manager regains control without a
+     * systemd Restart=on-failure loop.  Direct exit remains the standalone
+     * fallback when no supervisor is present. */
+    case ACT_LOGOUT:
+        request_session_logout();
+        exit(EXIT_SUCCESS);
     }
 }
 
@@ -8650,6 +8691,32 @@ static void launchpad_scroll_page(int dir) {
     luna_mark_layout_dirty();
 }
 
+/* Launchpad is rendered as its own full-output layer surface.  Wheel events
+ * received on that surface should scroll the application viewport even when
+ * the pointer is over the search field, a gap between tiles, or the footer.
+ * Routing solely through luna_scroll() makes the result depend on the current
+ * document hit-test and can therefore miss #lp_grid altogether. */
+static void shell_scroll(double xoff, double yoff) {
+    if (is_shown(g_launchpad_idx) && g_lp_grid_idx >= 0 && fabs(yoff) > 0.001) {
+        LunaElement* grid = luna_element_at(g_lp_grid_idx);
+        if (grid) {
+            float inner_h = grid->h - grid->pad_t - grid->pad_b -
+                            grid->border_width * 2.0f;
+            if (inner_h < 0.0f) inner_h = 0.0f;
+            float max_s = grid->scroll_content_h - inner_h;
+            if (max_s < 0.0f) max_s = 0.0f;
+            float next = grid->scroll_dest_top - (float)yoff * 18.0f;
+            if (next < 0.0f) next = 0.0f;
+            if (next > max_s) next = max_s;
+            grid->scroll_top = next;
+            grid->scroll_dest_top = next;
+            luna_mark_layout_dirty();
+        }
+        if (fabs(xoff) <= 0.001) return;
+    }
+    luna_scroll(xoff, yoff);
+}
+
 /* ── System status snapshots (sampling lives in luna-monitor.h) ── */
 typedef LunaMonitorSnapshot ShellStatusSnapshot;
 #define SHELL_ASYNC_STATE_MAX LUNA_MONITOR_STATE_MAX
@@ -8964,8 +9031,8 @@ static void win_menu_open(uint64_t wid, int anchor_idx, const char* title) {
     win_menu_set_maximize_label(w);
     int t = luna_get_element_by_id("win_menu_title");
     if (t >= 0) luna_set_text(t, title && title[0] ? title : "Window");
-    position_menu_near(g_win_menu_idx, anchor_idx, 200.0f);
     set_hidden(g_win_menu_idx, 0);
+    position_menu_near(g_win_menu_idx, anchor_idx, 200.0f);
 }
 
 static void on_win_menu_action(LunaElement* e) {
@@ -9217,10 +9284,10 @@ static void on_clipboard_menu(LunaElement* e) {
     dismiss_win_menu();
     if (is_shown(g_clip_menu_idx)) { dismiss_clip_menu(); return; }
     clip_populate_menu();
+    set_hidden(g_clip_menu_idx, 0);
     position_menu_near(g_clip_menu_idx,
                        menu_anchor_from(e, g_mb_clip_idx),
                        luna_window_width - 300.0f);
-    set_hidden(g_clip_menu_idx, 0);
 }
 
 static void on_clip_select(LunaElement* e) {
@@ -10074,20 +10141,21 @@ typedef struct {
     void (*terminate)(void);
 } LunaBackend;
 
-/* llvmpipe / softpipe finish before handing wl_shm buffers to the compositor.
- * Hardware GL can pipeline with glFlush(); glFinish() on every surface was a
- * regular render-thread hitch on Berry-class GPUs. */
+/* Mesa's threaded software front-end can return before its wl_shm pixels are
+ * complete, so keep the old finish workaround only when that front-end is
+ * explicitly active.  LUNA_EGL_SOFTWARE disables mesa_glthread during setup;
+ * in that normal path (and on hardware), eglSwapBuffers provides the required
+ * flush and an extra glFinish/glFlush only serializes every layer. */
 static void shell_gl_sync_before_swap(void) {
     static int needs_finish = -1;
     if (needs_finish < 0) {
         const char* r = (const char*)glGetString(GL_RENDERER);
-        needs_finish = (r && (strstr(r, "llvmpipe") || strstr(r, "softpipe") ||
-                              strstr(r, "SwiftShader"))) ? 1 : 0;
+        int software = r && (strstr(r, "llvmpipe") || strstr(r, "softpipe") ||
+                             strstr(r, "SwiftShader"));
+        needs_finish = software && env_is_true("mesa_glthread");
     }
     if (needs_finish)
         glFinish();
-    else
-        glFlush();
 }
 
 static const LunaBackend* g_backend = NULL;
@@ -10890,7 +10958,7 @@ static void kms_process_input(void) {
             if (libinput_event_pointer_has_axis(p, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL))
                 xv = libinput_event_pointer_get_axis_value(p, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
             shell_note_user_activity();
-            luna_scroll(-xv / 10.0, -yv / 10.0);
+            shell_scroll(-xv / 10.0, -yv / 10.0);
             break;
         }
         case LIBINPUT_EVENT_KEYBOARD_KEY: {
@@ -11504,11 +11572,19 @@ static int wl_native_dialog_drag_begin(void) {
     LunaElement* box = luna_element_at(s->input_root_idx);
     if (!box) return 0;
     const char* drag_id = wl_compact_drag_id(s);
-    int hit_drag = wl_point_in_id(drag_id, g_wl.mouse_x, g_wl.mouse_y);
+    int drag_idx = drag_id ? luna_get_element_by_id(drag_id) : -1;
+    int hit = hit_test_at(g_wl.mouse_x, g_wl.mouse_y);
+    /* Use the painted hit target, as the other dialog controls do.  Testing
+     * only the drag div's geometry lets an oversized/late-layout drag box
+     * steal presses from buttons layered above it (confirmation alerts were
+     * especially prone to this while their compact surface was settling). */
+    int hit_drag = hit_inside(hit, drag_idx);
     if (!hit_drag) {
         /* Some skins do not size the dedicated drag div.  Keep the top 52px
-         * of the dialog draggable, while traffic-light controls remain live. */
+         * of the dialog draggable, but only when the actual hit is not a
+         * descendant control layered over that fallback titlebar. */
         hit_drag =
+            (hit == s->input_root_idx || hit == drag_idx) &&
             g_wl.mouse_x >= box->x && g_wl.mouse_x <= box->x + box->w &&
             g_wl.mouse_y >= box->y && g_wl.mouse_y <= box->y + 52.0f;
     }
@@ -11837,8 +11913,8 @@ static void wlp_axis(void* d, struct wl_pointer* p, uint32_t t, uint32_t axis, w
     (void)d; (void)p; (void)t;
     double v = wl_fixed_to_double(value) / 10.0;
     shell_note_user_activity();
-    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) luna_scroll(0, -v);
-    else luna_scroll(-v, 0);
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) shell_scroll(0, -v);
+    else shell_scroll(-v, 0);
 }
 /* wl_pointer v5+ events.  luna-compositor (and every modern compositor) sends
  * a frame after every motion/button/axis group.  We bind wl_seat at version 5,
@@ -12140,11 +12216,8 @@ static EGLBoolean surf_swap(LunaSurface* s) {
     if (!s->full_damage && !has_dmg)
         return EGL_TRUE;   /* identical frame — skip the commit entirely */
 
-    /* eglSwapInterval is per-display.  A non-zero interval here waits for the
-     * compositor's vblank while the compositor is already paced by KMS page
-     * flips — the two independent clocks miss each other and show up as a
-     * regular ~30 Hz hitch on real hardware (QEMU often hides it). */
-    eglSwapInterval(g_wl.dpy, 0);
+    /* The interval is set once when each EGL surface is created.  Re-applying
+     * it here used to enter the driver on every layer of every frame. */
 
     if (s->full_damage || !g_egl_swap_damage) {
         s->full_damage = 0;
@@ -12209,7 +12282,7 @@ static int wl_check_error(const char* where) {
         if (iface && !strncmp(iface->name, "zwp_linux_", 10))
             fprintf(stderr,
                     "[luna-shell/wl] the compositor could not import our GPU buffer.\n"
-                    "  Leave LUNA_ENABLE_DMABUF unset (default) so the compositor uses wl_shm.\n");
+                    "  Set LUNA_DISABLE_DMABUF=1 to force the compositor to use wl_shm.\n");
     } else {
         fprintf(stderr, "[luna-shell/wl] Wayland connection lost during %s: %s\n",
                 where, strerror(err));
@@ -13385,9 +13458,9 @@ static void x11_process_events(void) {
             shell_note_user_activity();
             /* Buttons 4/5 are scroll wheel */
             if (ev.xbutton.button == Button4) {
-                if (action == LUNA_PRESS) luna_scroll(0,  1.0);
+                if (action == LUNA_PRESS) shell_scroll(0,  1.0);
             } else if (ev.xbutton.button == Button5) {
-                if (action == LUNA_PRESS) luna_scroll(0, -1.0);
+                if (action == LUNA_PRESS) shell_scroll(0, -1.0);
             } else {
                 int btn;
                 switch (ev.xbutton.button) {

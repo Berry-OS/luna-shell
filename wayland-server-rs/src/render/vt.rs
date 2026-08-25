@@ -8,9 +8,6 @@ const VT_ACTIVATE: libc::c_ulong = 0x5606;
 const VT_PROCESS: u8 = 1;
 const VT_AUTO: u8 = 0;
 const VT_ACKACQ: libc::c_int = 2;
-const KDSETMODE: libc::c_ulong = 0x4b3a;
-const KDGETMODE: libc::c_ulong = 0x4b3b;
-const KD_GRAPHICS: libc::c_int = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -25,7 +22,6 @@ struct VtMode {
 pub struct VtSession {
   fd: RawFd,
   saved_mode: VtMode,
-  saved_kd_mode: libc::c_int,
   restored: bool,
 }
 
@@ -44,13 +40,11 @@ impl VtSession {
     // therefore rejects the normal/default path unconditionally.  VT_GETMODE
     // is the authoritative test and returns ENOTTY for PTYs.
     let mut saved_mode = VtMode::default();
-    let mut saved_kd_mode = 0;
-    if unsafe { libc::ioctl(fd, VT_GETMODE, &mut saved_mode) } != 0 || unsafe { libc::ioctl(fd, KDGETMODE, &mut saved_kd_mode) } != 0 {
+    if unsafe { libc::ioctl(fd, VT_GETMODE, &mut saved_mode) } != 0 {
       let error = std::io::Error::last_os_error();
       unsafe { libc::close(fd) };
       return Err(error);
     }
-
     let process_mode = VtMode {
       mode: VT_PROCESS,
       waitv: 0,
@@ -58,20 +52,14 @@ impl VtSession {
       acqsig: libc::SIGUSR2 as i16,
       frsig: 0,
     };
-    if unsafe { libc::ioctl(fd, VT_SETMODE, &process_mode) } != 0 || unsafe { libc::ioctl(fd, KDSETMODE, KD_GRAPHICS) } != 0 {
+    if unsafe { libc::ioctl(fd, VT_SETMODE, &process_mode) } != 0 {
       let error = std::io::Error::last_os_error();
-      unsafe {
-        libc::ioctl(fd, VT_SETMODE, &saved_mode);
-        libc::ioctl(fd, KDSETMODE, saved_kd_mode);
-        libc::close(fd);
-      }
+      unsafe { libc::close(fd) };
       return Err(error);
     }
-
     Ok(Self {
       fd,
       saved_mode,
-      saved_kd_mode,
       restored: false,
     })
   }
@@ -95,7 +83,6 @@ impl VtSession {
       return;
     }
     unsafe {
-      libc::ioctl(self.fd, KDSETMODE, self.saved_kd_mode);
       let mut auto = self.saved_mode;
       auto.mode = VT_AUTO;
       auto.relsig = 0;

@@ -187,6 +187,7 @@ struct ModeCrtcPageFlip {
 const DRM_MODE_CONNECTED: u32 = 1;
 const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
 const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
+const DRM_MODE_FB_MODIFIERS: u32 = 1 << 1;
 
 /// Allow two nominal refresh periods for the completion event.  If the event
 /// is still missing after that, `poll_presentation` verifies the CRTC's current
@@ -312,6 +313,7 @@ struct ImportKey {
   stride: u32,
   offset: u32,
   format: u32,
+  modifier: u64,
 }
 
 struct ImportedScanout {
@@ -763,15 +765,20 @@ impl Backend for DriBackend {
     true
   }
 
-  fn present_dmabufs(&mut self, surfaces: &[(i32, i32, ShmBuffer)], bitmap: Option<super::GpuBitmap<'_>>) -> bool {
+  fn present_dmabufs(
+    &mut self,
+    surfaces: &[(i32, i32, ShmBuffer)],
+    extra_surface: Option<(i32, i32, &ShmBuffer)>,
+    bitmap: Option<super::GpuBitmap<'_>>,
+  ) -> bool {
     if !self.use_page_flip { return false; }
     #[cfg(feature = "gpu")]
     {
-      let Some(output) = self.gpu.as_mut().and_then(|g| g.render_dmabufs(surfaces, bitmap)) else { return false };
+      let Some(output) = self.gpu.as_mut().and_then(|g| g.render_dmabufs(surfaces, extra_surface, bitmap)) else { return false };
       return self.commit_gpu_output(output.1, output.2);
     }
     #[cfg(not(feature = "gpu"))]
-    { let _ = (surfaces, bitmap); false }
+    { let _ = (surfaces, extra_surface, bitmap); false }
   }
 
   fn can_gpu_compose(&self) -> bool {
@@ -782,6 +789,17 @@ impl Backend for DriBackend {
     #[cfg(not(feature = "gpu"))]
     {
       false
+    }
+  }
+
+  fn dmabuf_formats(&self) -> &[(u32, u64)] {
+    #[cfg(feature = "gpu")]
+    {
+      self.gpu.as_ref().map(|g| g.dmabuf_formats()).unwrap_or(&[])
+    }
+    #[cfg(not(feature = "gpu"))]
+    {
+      &[]
     }
   }
 
@@ -1254,6 +1272,7 @@ fn import_key(fd: RawFd, buf: &ShmBuffer) -> Option<ImportKey> {
     stride: buf.stride.try_into().ok()?,
     offset: buf.offset.try_into().ok()?,
     format: buf.format,
+    modifier: buf.dmabuf_modifier()?,
   })
 }
 
@@ -1277,6 +1296,8 @@ unsafe fn import_scanout(card_fd: RawFd, dma_fd: RawFd, buf: &ShmBuffer, key: Im
   fb.handles[0] = prime.handle;
   fb.pitches[0] = key.stride;
   fb.offsets[0] = key.offset;
+  fb.flags = DRM_MODE_FB_MODIFIERS;
+  fb.modifier[0] = key.modifier;
   if ioctl(card_fd, iowr::<ModeFbCmd2>(0xB8), &mut fb) != 0 {
     close_gem(card_fd, prime.handle);
     return None;

@@ -206,6 +206,9 @@ impl Framebuffer {
 
     /// Blit SHM/dmabuf with clipping; dmabuf triggers DMA_BUF_IOCTL_SYNC around CPU reads.
     pub fn blit_shm(&mut self, buf: &ShmBuffer, dx: i32, dy: i32) {
+        if !buf.is_cpu_linear() {
+            return;
+        }
         // Intersect the destination rect with the active clip up front, so a
         // surface entirely outside the damaged area costs nothing at all — not
         // even the dma-buf CPU-access ioctls.
@@ -449,7 +452,12 @@ pub trait Backend {
 
     /// Composite ordered dma-buf surfaces on the GPU and scan out the result.
     #[cfg(not(target_arch = "wasm32"))]
-    fn present_dmabufs(&mut self, _surfaces: &[(i32, i32, ShmBuffer)], _bitmap: Option<GpuBitmap<'_>>) -> bool {
+    fn present_dmabufs(
+        &mut self,
+        _surfaces: &[(i32, i32, ShmBuffer)],
+        _extra_surface: Option<(i32, i32, &ShmBuffer)>,
+        _bitmap: Option<GpuBitmap<'_>>,
+    ) -> bool {
         false
     }
 
@@ -460,6 +468,12 @@ pub trait Backend {
     #[cfg(not(target_arch = "wasm32"))]
     fn can_gpu_compose(&self) -> bool {
         false
+    }
+
+    /// Format/modifier pairs this backend can import as ordinary 2D textures.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dmabuf_formats(&self) -> &[(u32, u64)] {
+        &[]
     }
     /// Take input channel once (WebGL backend): (receiver, eventfd for epoll wakeup).
     #[cfg(not(target_arch = "wasm32"))]

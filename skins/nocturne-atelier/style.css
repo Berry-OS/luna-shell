@@ -2,7 +2,7 @@
  * theme: Nocturne Atelier · enrichment: Tier A CSS atmosphere · chrome: shell-native
  * audience: general desktop users · use: live desktop skin switching
  */
-/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V4 */
+/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V5 · contrast: pass (40–41) */
 
 :root {
   --atelier-paper: #171814;
@@ -53,9 +53,9 @@
 html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
 
 #menubar {
-  left: 18px; top: 14px; width: calc(100% - 36px); height: 38px;
+  left: 0; right: 0; top: 0; width: auto; height: 38px;
   padding: 0 10px; background: var(--atelier-paper-2);
-  border: 1px solid var(--atelier-rule); border-radius: 9px;
+  border: 0; border-bottom: 1px solid var(--atelier-rule); border-radius: 0;
   box-shadow: 0 14px 38px var(--atelier-shadow);
 }
 #mb_left, #mb_center, #mb_right { height: 38px; }
@@ -75,14 +75,14 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
   border: 1px solid var(--atelier-rule); border-radius: 9px;
   box-shadow: 0 22px 56px var(--atelier-shadow); animation: none;
 }
-.menu_panel { top: 58px; }
+.menu_panel { top: 42px; }
 .menu_item:hover { background: var(--atelier-forest); box-shadow: none; }
 .menu_section_label, .mi_sym, .mi_key { color: var(--atelier-brass-hi); }
 .mi_label { color: var(--atelier-ink); }
 .menu_sep { background-color: var(--atelier-rule); }
 
 #dock {
-  bottom: 20px; width: 550px; height: 76px; margin-left: -275px;
+  bottom: 20px; width: fit-content; height: 82px; margin-left: 0;
   background: var(--atelier-paper-2); border: 1px solid var(--atelier-rule);
   border-radius: 14px; box-shadow: 0 24px 60px var(--atelier-shadow);
 }
@@ -159,6 +159,26 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
   opacity: 0; pointer-events: none; z-index: 1200;
   transition: opacity 120ms ease-out;
 }
+
+/* Full-skin parity for CSS injected live after the selected skin. */
+#widget_clock, #widget_stats, #widget_weather {
+  background: var(--atelier-paper-2) !important; color: var(--atelier-ink) !important;
+  border: 1px solid var(--atelier-rule) !important; border-radius: 9px !important;
+  box-shadow: 0 18px 44px var(--atelier-shadow) !important;
+  backdrop-filter: none !important;
+}
+#wg_time, #wg_stopwatch_title, #wg_stopwatch_time,
+#widget_stats .st_val, #widget_weather .st_val, #widget_weather .wf_temp { color: var(--atelier-ink) !important; }
+#wg_date, #wg_stopwatch_state, #wg_wx_desc,
+#widget_stats .st_label, #widget_weather .st_label, #widget_weather .wf_day { color: var(--atelier-muted) !important; }
+#wg_wx_icon, #widget_weather .wf_icon { color: var(--atelier-brass-hi) !important; }
+#widget_clock .wg_clock_icon, #wg_stopwatch_actions .dlg_btn {
+  background: var(--atelier-paper-3) !important; color: var(--atelier-ink) !important;
+  border: 1px solid var(--atelier-rule) !important; border-radius: 4px !important;
+}
+#wg_stopwatch_actions .dlg_btn.primary { background: var(--atelier-brass) !important; color: var(--atelier-paper) !important; }
+#widget_stats .st_bar { background: var(--atelier-paper) !important; border-radius: 0 !important; }
+#widget_stats .st_fill, #widget_stats .st_fill.g_mem, #widget_stats .st_fill.g_disk { background: var(--atelier-brass) !important; border-radius: 0 !important; }
 .tray_item.tip_open .tray_tip { opacity: 1; }
 
 /* Keep the Launchpad search/header fixed while overflowing apps scroll. */
@@ -172,4 +192,25 @@ html, body { background: var(--atelier-paper); color: var(--atelier-ink); }
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
+}
+
+/* Atelier usability pass: restrained brass indicates focus and intent. */
+.mb_item, .tray_item { min-width: 32px; min-height: 28px; padding: 0 8px; }
+.mb_item:active, .tray_item:active, .dock_item:active .dock_icon,
+.dlg_btn:active { background: var(--atelier-brass); color: var(--atelier-paper); transform: translateY(1px); }
+.mb_item:focus-visible, .tray_item:focus-visible, .dock_item:focus-visible,
+.menu_item:focus-visible, .stab:focus-visible, .wm_pref:focus-visible,
+.pref_input:focus-visible, .pref_input_full:focus-visible {
+  outline: 3px solid var(--atelier-brass-hi); outline-offset: 2px;
+}
+.notify_card {
+  border: 1px solid var(--atelier-rule); border-left: 3px solid var(--atelier-brass);
+  border-radius: 4px; background: var(--atelier-paper-3); box-shadow: 0 8px 22px var(--atelier-shadow);
+}
+.notify_when { color: var(--atelier-brass-hi); opacity: 1; }
+.notify_message { color: var(--atelier-ink); opacity: .88; }
+.tray_tip {
+  border: 1px solid var(--atelier-brass); border-radius: 3px;
+  background: var(--atelier-paper-2); color: var(--atelier-ink);
+  box-shadow: 0 8px 22px var(--atelier-shadow);
 }

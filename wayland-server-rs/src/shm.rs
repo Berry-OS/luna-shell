@@ -44,18 +44,22 @@ pub struct ShmPool {
 
 impl ShmPool {
     pub fn map(fd: RawFd, size: usize) -> Option<Rc<ShmPool>> {
-        Self::map_inner(fd, size, false)
+        Self::map_inner(fd, size, false, true)
     }
 
-    pub fn map_dmabuf(fd: RawFd, size: usize) -> Option<Rc<ShmPool>> {
-        Self::map_inner(fd, size, true)
+    pub fn map_dmabuf(fd: RawFd, size: usize, cpu_linear: bool) -> Option<Rc<ShmPool>> {
+        Self::map_inner(fd, size, true, cpu_linear)
     }
 
-    fn map_inner(fd: RawFd, size: usize, is_dmabuf: bool) -> Option<Rc<ShmPool>> {
+    fn map_inner(fd: RawFd, size: usize, is_dmabuf: bool, cpu_linear: bool) -> Option<Rc<ShmPool>> {
         if size == 0 {
             return None;
         }
-        let mapped = unsafe { mmap(std::ptr::null_mut(), size, PROT_READ, MAP_SHARED, fd, 0) };
+        let mapped = if !is_dmabuf || cpu_linear {
+            unsafe { mmap(std::ptr::null_mut(), size, PROT_READ, MAP_SHARED, fd, 0) }
+        } else {
+            MAP_FAILED
+        };
         let ptr = if mapped == MAP_FAILED {
             if !is_dmabuf {
                 unsafe { libc::close(fd) };
@@ -154,6 +158,8 @@ pub struct ShmBuffer {
     pub height: i32,
     pub stride: i32,
     pub format: u32,
+    /// DRM format modifier for dma-buf storage. wl_shm is always linear.
+    pub modifier: u64,
     /// Incremented whenever this wl_buffer is attached in a new commit. GPU
     /// composition uses it to skip uploading unchanged SHM storage.
     pub content_serial: Rc<Cell<u64>>,
@@ -162,6 +168,14 @@ pub struct ShmBuffer {
 impl ShmBuffer {
     pub fn dmabuf_fd(&self) -> Option<RawFd> {
         self.pool.dmabuf_fd()
+    }
+
+    pub fn dmabuf_modifier(&self) -> Option<u64> {
+        self.pool.dmabuf_fd().map(|_| self.modifier)
+    }
+
+    pub fn is_cpu_linear(&self) -> bool {
+        !self.pool.is_dmabuf || self.modifier == 0
     }
 
     pub fn storage_id(&self) -> (u64, u64) {
@@ -191,6 +205,11 @@ impl ShmBuffer {
 
     #[inline]
     pub fn pixel(&self, x: i32, y: i32) -> Option<u32> {
+        // A tiled/compressed dma-buf cannot be interpreted as linear CPU rows
+        // even when its fd happens to be mmap-able.
+        if self.pool.is_dmabuf && self.modifier != 0 {
+            return None;
+        }
         if x < 0 || y < 0 || x >= self.width || y >= self.height {
             return None;
         }

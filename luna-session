@@ -38,6 +38,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+# A logout is a successful end of the desktop session, not a crash.  Keep it
+# distinct from TERM so systemd's Restart=on-failure does not start Luna again
+# instead of returning control to the display manager.
+trap 'exit 0' USR1
 
 # Runtime directory ---------------------------------------------------------
 if [[ -z ${XDG_RUNTIME_DIR:-} ]]; then
@@ -138,7 +142,17 @@ export LUNA_BACKEND="$BACKEND" LUNA_OUTPUT_DPI="${LUNA_OUTPUT_DPI:-96}"
 export LUNA_MONITOR_LIVE_NOTIFY="${LUNA_MONITOR_LIVE_NOTIFY:-0}"
 
 renderer="${LUNA_CLIENT_RENDERER:-auto}"
-[[ $renderer != auto ]] || { [[ $BACKEND == dri ]] && renderer=gpu || renderer=software; }
+if [[ $renderer == auto ]]; then
+    renderer=software
+    if [[ $BACKEND == dri ]]; then
+        for render_node in /dev/dri/renderD*; do
+            [[ -c $render_node && -r $render_node && -w $render_node ]] || continue
+            renderer=gpu
+            break
+        done
+        unset render_node
+    fi
+fi
 export LUNA_CLIENT_RENDERER="$renderer"
 case "$renderer" in
     gpu)
@@ -217,11 +231,15 @@ export PATH="$BIN:$ROOT:$PATH"
 
 # Shell and optional helpers -----------------------------------------------
 printf '→ shell: %s\n' "$SHELL_BIN"
-if [[ $BACKEND == dri ]]; then
-    env -u LIBGL_ALWAYS_SOFTWARE -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER \
+# Let the shell explicitly ask its supervisor to tear down the whole process
+# group.  Merely noticing that luna-shell disappeared is vulnerable to races
+# while optional helpers are still being started.
+export LUNA_SESSION_PID=$$
+if [[ $renderer == gpu ]]; then
+    env -u LUNA_EGL_SOFTWARE -u LIBGL_ALWAYS_SOFTWARE -u MESA_LOADER_DRIVER_OVERRIDE -u GALLIUM_DRIVER \
         LUNA_NO_HELPERS=1 "$SHELL_BIN" --desktop &
 else
-    LUNA_NO_HELPERS=1 "$SHELL_BIN" --desktop &
+    LUNA_EGL_SOFTWARE=1 LUNA_NO_HELPERS=1 "$SHELL_BIN" --desktop &
 fi
 SHELL_PID=$!; PIDS+=("$SHELL_PID")
 

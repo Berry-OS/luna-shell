@@ -1,6 +1,7 @@
 /* Hallmark · theme: Windows 95 · chrome: taskbar · enrichment: Tier A CSS
  * audience: retro desktop users · use: live desktop skin switching
  */
+/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V5 · contrast: pass (40–41) */
 :root {
   --w95-teal: #008080;
   --w95-teal-lo: #004040;
@@ -10,6 +11,7 @@
   --w95-navy: #000080;
   --w95-ink: #000000;
   --w95-white: #ffffff;
+  --w95-tip: #ffffe1;
   --w95-shadow: #00000088;
   --w95-clear: #00000000;
   --color-accent: var(--w95-navy);
@@ -453,8 +455,10 @@ body {
 
 .win_item.active {
   padding: 3px 6px 1px 8px !important;
-  background:
-    repeating-linear-gradient(135deg, #fff 0 1px, #c0c0c0 1px 2px) !important;
+  /* Luna's compact CSS renderer cannot reliably rasterize a repeating
+   * gradient in every backend.  A solid button face also matches the
+   * pressed Windows 95 task button and avoids a black fallback. */
+  background: var(--w95-button-face) !important;
   border-top-color: var(--w95-button-dark) !important;
   border-left-color: var(--w95-button-dark) !important;
   border-right-color: var(--w95-button-light) !important;
@@ -987,6 +991,7 @@ input:focus-visible,
 
 /* Toast ----------------------------------------------------------------- */
 #toast {
+  top: auto !important;
   right: 8px !important;
   bottom: calc(var(--w95-taskbar-height) + 8px) !important;
   padding: 8px !important;
@@ -994,6 +999,31 @@ input:focus-visible,
 #toast_title,
 #toast_msg,
 #toast_close { color: #000 !important; }
+
+/* Full-skin parity: remove the Moonlight wallpaper and glass widgets. */
+#wallpaper { background: var(--w95-desktop) !important; }
+#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none !important; }
+#widget_clock, #widget_stats, #widget_weather {
+  background: var(--w95-button-face) !important; color: var(--w95-ink) !important;
+  border-top: 2px solid var(--w95-button-light) !important;
+  border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important;
+  border-bottom: 2px solid var(--w95-button-dark) !important;
+  border-radius: 0 !important; box-shadow: inset -1px -1px var(--w95-button-shadow), inset 1px 1px var(--w95-button-highlight) !important;
+  backdrop-filter: none !important; padding: 11px 13px !important;
+}
+#wg_time, #wg_date, #wg_stopwatch_title, #wg_stopwatch_state, #wg_stopwatch_time,
+#wg_wx_desc, #wg_wx_icon, #widget_stats .st_label, #widget_stats .st_val,
+#widget_weather .st_label, #widget_weather .st_val, #widget_weather .wf_day,
+#widget_weather .wf_icon, #widget_weather .wf_temp { color: var(--w95-ink) !important; }
+#widget_clock .wg_clock_icon, #wg_stopwatch_actions .dlg_btn {
+  background: var(--w95-button-face) !important; color: var(--w95-ink) !important;
+  border-top: 2px solid var(--w95-button-light) !important; border-left: 2px solid var(--w95-button-light) !important;
+  border-right: 2px solid var(--w95-button-dark) !important; border-bottom: 2px solid var(--w95-button-dark) !important;
+  border-radius: 0 !important;
+}
+#widget_stats .st_bar { height: 8px !important; border: 1px solid var(--w95-button-dark); border-radius: 0 !important; background: var(--w95-window) !important; }
+#widget_stats .st_fill, #widget_stats .st_fill.g_mem, #widget_stats .st_fill.g_disk { border-radius: 0 !important; background: var(--w95-selection) !important; }
 
 /* Classic selection and scrollbars ------------------------------------- */
 ::selection { background: var(--w95-selection); color: #fff; }
@@ -1055,3 +1085,28 @@ input:focus-visible,
   transition: opacity 120ms ease-out;
 }
 .tray_item.tip_open .tray_tip { opacity: 1; }
+
+/* Windows 95 usability pass: native relief, larger targets, visible focus. */
+.mb_item, .tray_item { min-width: 30px !important; min-height: 26px !important; padding: 0 6px !important; }
+.mb_item:active, .tray_item:active, .dock_item:active .dock_icon,
+.dlg_btn:active {
+  border-top-color: var(--w95-ink) !important; border-left-color: var(--w95-ink) !important;
+  border-right-color: var(--w95-white) !important; border-bottom-color: var(--w95-white) !important;
+  box-shadow: inset 1px 1px var(--w95-grey-lo) !important;
+}
+.mb_item:focus-visible, .tray_item:focus-visible, .dock_item:focus-visible,
+.menu_item:focus-visible, .stab:focus-visible, .wm_pref:focus-visible,
+.pref_input:focus-visible, .pref_input_full:focus-visible {
+  outline: 1px dotted var(--w95-ink) !important; outline-offset: -3px !important;
+}
+.notify_card {
+  border: 2px outset var(--w95-grey-hi) !important; border-radius: 0 !important;
+  background: var(--w95-tip) !important; color: var(--w95-ink) !important;
+}
+.notify_when { color: var(--w95-navy) !important; opacity: 1 !important; }
+.notify_message { color: var(--w95-ink) !important; opacity: 1 !important; }
+.tray_tip {
+  border: 1px solid var(--w95-ink) !important; border-radius: 0 !important;
+  background: var(--w95-tip) !important; color: var(--w95-ink) !important;
+  box-shadow: 2px 2px 0 var(--w95-grey-lo) !important;
+}

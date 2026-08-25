@@ -224,6 +224,7 @@ pub struct Server {
   dmabuf_format_table: RawFd,
   dmabuf_format_table_size: usize,
   dmabuf_main_device: u64,
+  dmabuf_formats: Vec<(u32, u64)>,
 
   input_rx: Option<mpsc::Receiver<InputEvent>>,
   input_wake_fd: RawFd,
@@ -406,8 +407,17 @@ impl Server {
     }
     let signal_fd = create_signal_fd()?;
 
-    let (table_fd, table_size) = create_format_table();
-    let main_device = detect_drm_device(backend.drm_render_device()).unwrap_or(0);
+    let dmabuf_formats = backend.dmabuf_formats().to_vec();
+    let main_device = if dmabuf_formats.is_empty() {
+      0
+    } else {
+      detect_drm_device(backend.drm_render_device()).unwrap_or(0)
+    };
+    let (table_fd, table_size) = if main_device != 0 {
+      create_format_table(&dmabuf_formats)
+    } else {
+      (-1, 0)
+    };
 
     let mut server = Server {
       listener,
@@ -437,6 +447,7 @@ impl Server {
       dmabuf_format_table: table_fd,
       dmabuf_format_table_size: table_size,
       dmabuf_main_device: main_device,
+      dmabuf_formats,
 
       input_rx: None,
       input_wake_fd: -1,
@@ -1038,9 +1049,12 @@ impl Server {
       "zwp_linux_dmabuf_v1" => {
         // Pre-v4 clients learn formats via format/modifier events; v4+ uses get_default_feedback.
         if version < 4 {
-          for &fmt in &[DRM_FORMAT_ARGB8888, DRM_FORMAT_XRGB8888] {
-            client.send(id, 0, &[Arg::Uint(fmt)]);
-            let m = DRM_FORMAT_MOD_LINEAR;
+          let mut last_format = None;
+          for &(fmt, m) in &self.dmabuf_formats {
+            if last_format != Some(fmt) {
+              client.send(id, 0, &[Arg::Uint(fmt)]);
+              last_format = Some(fmt);
+            }
             client.send(
               id,
               1, // modifier(format, mod_hi, mod_lo)
@@ -1264,6 +1278,7 @@ impl Server {
             height: h,
             stride,
             format,
+            modifier: DRM_FORMAT_MOD_LINEAR,
             content_serial: std::rc::Rc::new(std::cell::Cell::new(0)),
           };
           client.objects.insert(nid, Object::new(&protocol::WL_BUFFER, 1, Role::Buffer(buf)));
@@ -7816,7 +7831,9 @@ impl Server {
     client.send(id, 2, &[Arg::Array(dev.clone())]);
 
     client.send(id, 4, &[Arg::Array(dev)]); // tranche_target_device
-    let indices: Vec<u8> = [0u16, 1u16].iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let indices: Vec<u8> = (0..self.dmabuf_formats.len().min(u16::MAX as usize + 1))
+      .flat_map(|v| (v as u16).to_ne_bytes())
+      .collect();
     client.send(id, 5, &[Arg::Array(indices)]); // tranche_formats
     client.send(id, 6, &[Arg::Uint(0)]);
     client.send(id, 3, &[]); // tranche_done
@@ -7901,14 +7918,23 @@ impl Server {
       DRM_FORMAT_XRGB8888 => Some(FORMAT_XRGB8888),
       _ => None,
     };
+    let modifier = planes.first().map(|p| p.modifier).unwrap_or(DRM_FORMAT_MOD_LINEAR);
     let reject = if planes.len() != 1 {
       Some(format!("{} planes (only single-plane is supported)", planes.len()))
     } else if w <= 0 || h <= 0 {
       Some(format!("bad size {}x{}", w, h))
-    } else if planes[0].modifier != DRM_FORMAT_MOD_LINEAR {
-      Some(format!("modifier {:#018x} (only DRM_FORMAT_MOD_LINEAR is supported)", planes[0].modifier))
+    } else if planes[0].fd < 0
+      || planes[0].plane_idx != 0
+      || planes[0].stride == 0
+      || planes[0].stride > i32::MAX as u32
+    {
+      Some(format!("invalid plane 0 (fd={}, index={}, stride={})", planes[0].fd, planes[0].plane_idx, planes[0].stride))
+    } else if (planes[0].stride as u64) < (w as u64) * 4 {
+      Some(format!("stride {} is smaller than width {} * 4", planes[0].stride, w))
     } else if internal.is_none() {
       Some(format!("fourcc {:#010x} (only ARGB8888/XRGB8888 are supported)", format))
+    } else if !self.dmabuf_formats.contains(&(format, modifier)) {
+      Some(format!("unsupported fourcc/modifier pair {:#010x}/{:#018x}", format, modifier))
     } else {
       None
     };
@@ -7926,9 +7952,16 @@ impl Server {
     }
 
     let pl = &planes[0];
-    let size = pl.offset as usize + pl.stride as usize * h as usize;
+    let Some(size) = (pl.stride as usize)
+      .checked_mul(h as usize)
+      .and_then(|bytes| (pl.offset as usize).checked_add(bytes))
+    else {
+      eprintln!("[luna-compositor] dmabuf import rejected: plane size overflow");
+      unsafe { libc::close(pl.fd) };
+      return None;
+    };
     // map_dmabuf takes fd ownership; pool uses DMA_BUF_IOCTL_SYNC on CPU reads.
-    let pool = match ShmPool::map_dmabuf(pl.fd, size) {
+    let pool = match ShmPool::map_dmabuf(pl.fd, size, modifier == DRM_FORMAT_MOD_LINEAR) {
       Some(pool) => pool,
       None => {
         // The client's GPU allocated a buffer this compositor cannot read from
@@ -7936,7 +7969,7 @@ impl Server {
         // Software compositing has no way forward, so point at the way out.
         eprintln!(
           "[luna-compositor] dmabuf mmap failed ({}x{}, stride={}); \
-           leave LUNA_ENABLE_DMABUF unset (default) to force wl_shm",
+           set LUNA_DISABLE_DMABUF=1 to force wl_shm",
           w, h, pl.stride
         );
         return None;
@@ -7949,6 +7982,7 @@ impl Server {
       height: h,
       stride: pl.stride as i32,
       format: internal.unwrap(),
+      modifier,
       content_serial: std::rc::Rc::new(std::cell::Cell::new(0)),
     })
   }
@@ -8231,7 +8265,7 @@ impl Server {
       WmGrab::None => self.hit_resize_edge(px, py).map(|v| v.2),
       WmGrab::Move { .. } => None,
     };
-    let mut surfaces = self.retained_gpu_surfaces.clone();
+    let mut extra_surface = None;
     let mut gpu_cursor_bitmap = None;
     let mut gpu_cursor_pos = (0, 0, 0, 0);
     if resize_edges.is_none() {
@@ -8240,12 +8274,12 @@ impl Server {
         .flatten()
         .and_then(|c| c.objects.get(&self.cursor_surface_id))
         .and_then(|o| match &o.role {
-          Role::Surface(s) => s.current_buffer.clone(),
+          Role::Surface(s) => s.current_buffer.as_ref(),
           _ => None,
         });
       match cursor {
         Some(buf) if buf.dmabuf_fd().is_some() || buf.stride == buf.width * 4 => {
-          surfaces.push((px - self.cursor_hot_x, py - self.cursor_hot_y, buf));
+          extra_surface = Some((px - self.cursor_hot_x, py - self.cursor_hot_y, buf));
         }
         _ => {
           let (cw, ch, hx, hy, pixels) = crate::cursor_aero::gpu_bitmap(None);
@@ -8265,7 +8299,7 @@ impl Server {
       height: gpu_cursor_pos.3,
       pixels,
     });
-    if self.backend.present_dmabufs(&surfaces, bitmap) {
+    if self.backend.present_dmabufs(&self.retained_gpu_surfaces, extra_surface, bitmap) {
       true
     } else {
       // Retained handles went stale — drop them so the next full composite
@@ -8470,6 +8504,7 @@ impl Server {
     let mut gpu_surfaces = std::mem::take(&mut self.compose_gpu_surfaces);
     gpu_surfaces.clear();
     let mut gpu_allowed = self.backend.can_gpu_compose();
+    let mut gpu_cursor_surface = None;
     let mut gpu_cursor_bitmap = None;
     let mut gpu_cursor_pos = (0, 0, 0, 0);
     if gpu_allowed {
@@ -8500,19 +8535,23 @@ impl Server {
           WmGrab::Move { .. } => None,
         };
         if resize_edges.is_none() {
-          let cursor = (self.cursor_surface_id != 0 && self.cursor_client_fd >= 0)
+          let cursor_compatible = (self.cursor_surface_id != 0 && self.cursor_client_fd >= 0)
             .then(|| self.clients.get(&self.cursor_client_fd))
             .flatten()
             .and_then(|c| c.objects.get(&self.cursor_surface_id))
-            .and_then(|o| match &o.role { Role::Surface(s) => s.current_buffer.clone(), _ => None });
-          match cursor {
-            Some(buf) if buf.dmabuf_fd().is_some() || buf.stride == buf.width * 4 => {
-              gpu_surfaces.push((px - self.cursor_hot_x, py - self.cursor_hot_y, buf));
-            }
-            _ => {
+            .and_then(|o| match &o.role { Role::Surface(s) => s.current_buffer.as_ref(), _ => None })
+            .map(|buf| buf.dmabuf_fd().is_some() || buf.stride == buf.width * 4)
+            .unwrap_or(false);
+          if cursor_compatible {
+            gpu_cursor_surface = Some((
+              self.cursor_client_fd,
+              self.cursor_surface_id,
+              px - self.cursor_hot_x,
+              py - self.cursor_hot_y,
+            ));
+          } else {
               let (cw,ch,hx,hy,pixels)=crate::cursor_aero::gpu_bitmap(None);
               gpu_cursor_pos=(px-hx,py-hy,cw,ch); gpu_cursor_bitmap=Some(pixels);
-            }
           }
         } else {
           let (cw,ch,hx,hy,pixels)=crate::cursor_aero::gpu_bitmap(resize_edges);
@@ -8523,27 +8562,19 @@ impl Server {
     let bitmap = gpu_cursor_bitmap.as_ref().map(|pixels| crate::render::GpuBitmap {
       x:gpu_cursor_pos.0,y:gpu_cursor_pos.1,width:gpu_cursor_pos.2,height:gpu_cursor_pos.3,pixels,
     });
-    // Keep a cursor-free plane list so animated set_cursor commits can
-    // re-present without collecting every window again.
-    let retained_scene = if gpu_allowed && !direct_scanout && !gpu_surfaces.is_empty() {
-      let cursor_planes = match (&bitmap, gpu_surfaces.last()) {
-        (Some(_), _) => 0usize, // cursor is the separate bitmap, not a plane
-        (None, Some((_, _, buf)))
-          if buf.width > 0
-            && buf.height > 0
-            && buf.width <= 128
-            && buf.height <= 128 =>
-        {
-          1
-        }
-        _ => 0,
-      };
-      Some(gpu_surfaces[..gpu_surfaces.len().saturating_sub(cursor_planes)].to_vec())
-    } else {
-      None
-    };
+    // The optional cursor is borrowed separately, keeping gpu_surfaces as a
+    // cursor-free retained scene without cloning every Rc-backed buffer.
+    let extra_surface = gpu_cursor_surface.and_then(|(fd, sid, x, y)| {
+      self.clients
+        .get(&fd)
+        .and_then(|c| c.objects.get(&sid))
+        .and_then(|o| match &o.role {
+          Role::Surface(s) => s.current_buffer.as_ref().map(|b| (x, y, b)),
+          _ => None,
+        })
+    });
     let gpu_scanout = gpu_allowed && !direct_scanout && !gpu_surfaces.is_empty()
-      && self.backend.present_dmabufs(&gpu_surfaces, bitmap);
+      && self.backend.present_dmabufs(&gpu_surfaces, extra_surface, bitmap);
 
     if !direct_scanout && !gpu_scanout {
       // Anything under a screen-filling opaque window can never be seen.
@@ -8806,8 +8837,10 @@ impl Server {
     self.last_present_software = !direct_scanout && !gpu_scanout;
     if self.last_present_software {
       self.retained_gpu_surfaces.clear();
-    } else if let Some(scene) = retained_scene.filter(|_| gpu_scanout) {
-      self.retained_gpu_surfaces = scene;
+    } else if gpu_scanout {
+      // Move the just-presented scene into retained storage and get the old
+      // allocation back as next frame's scratch.  No per-frame Vec/Rc GC.
+      std::mem::swap(&mut self.retained_gpu_surfaces, &mut gpu_surfaces);
     } else {
       self.retained_gpu_surfaces.clear();
     }
@@ -10852,10 +10885,9 @@ fn role_for(iface: &str) -> Role {
 fn now_ms() -> u32 { monotonic_millis() }
 
 /// format_table layout: { u32 format; u32 pad; u64 modifier }[]
-fn create_format_table() -> (RawFd, usize) {
-  let entries: [(u32, u64); 2] = [(DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR), (DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR)];
+fn create_format_table(entries: &[(u32, u64)]) -> (RawFd, usize) {
   let mut data = Vec::with_capacity(entries.len() * 16);
-  for (fmt, modi) in entries {
+  for &(fmt, modi) in entries {
     data.extend_from_slice(&fmt.to_ne_bytes());
     data.extend_from_slice(&0u32.to_ne_bytes());
     data.extend_from_slice(&modi.to_ne_bytes());
@@ -10874,6 +10906,10 @@ fn create_format_table() -> (RawFd, usize) {
     }
     off += n as usize;
   }
+  if off != data.len() {
+    unsafe { libc::close(fd) };
+    return (-1, 0);
+  }
   // Seal memfd read-only for client mmap.
   unsafe { libc::fcntl(fd, libc::F_ADD_SEALS, libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL) };
   (fd, data.len())
@@ -10881,18 +10917,15 @@ fn create_format_table() -> (RawFd, usize) {
 
 /// Pick the `dev_t` advertised as `zwp_linux_dmabuf_v1.main_device`.
 ///
-/// Dmabuf is **off by default**.  This compositor CPU-mmaps client buffers and
-/// only accepts LINEAR AR24/XR24; Mesa OpenGL clients (luna-shell) allocate
-/// tiled GPU buffers, and advertising dmabuf then sends them down a path that
-/// ends in `dri2_query_image(NULL)` — a segfault inside libgallium on the first
-/// `eglSwapBuffers()`.  `wl_shm` is the supported path for GL clients.
+/// Dmabuf is advertised only after the GPU composer queried its EGL-importable
+/// format/modifier pairs. This includes tiled/compressed layouts when the
+/// driver can sample them, while unsupported layouts never reach clients.
 ///
 /// Order of preference when dmabuf is enabled:
 ///  1. `LUNA_DISABLE_DMABUF=1` — hard opt-out (wins over ENABLE).
-///  2. Otherwise require `LUNA_ENABLE_DMABUF=1` (GTK linear allocators).
-///  3. `LUNA_DRM_DEVICE=/dev/dri/renderD129` — explicit override.
-///  4. The render node of the card the backend actually drives.
-///  5. The first *render* node that can be opened.
+///  2. `LUNA_DRM_DEVICE=/dev/dri/renderD129` — explicit override.
+///  3. The render node of the card the backend actually drives.
+///  4. The first *render* node that can be opened.
 ///
 /// Only render nodes are ever reported.  The previous version fell back to
 /// `/dev/dri/card0`, i.e. a primary node on a fixed, possibly wrong GPU; Mesa
@@ -10903,13 +10936,6 @@ fn detect_drm_device(backend_dev: Option<u64>) -> Option<u64> {
     eprintln!("[luna-compositor] LUNA_DISABLE_DMABUF set; dmabuf disabled");
     return None;
   }
-  if !env_flag("LUNA_ENABLE_DMABUF") {
-    eprintln!(
-      "[luna-compositor] dmabuf disabled (default); set LUNA_ENABLE_DMABUF=1 to enable"
-    );
-    return None;
-  }
-
   if let Ok(path) = std::env::var("LUNA_DRM_DEVICE") {
     match probe_render_node(&path) {
       Some(dev) => {
@@ -11075,9 +11101,19 @@ mod tests {
 
   #[test]
   fn format_table_can_be_transferred_repeatedly() {
-    let (fd, size) = create_format_table();
+    const TILED: u64 = 0x0100_0000_0000_0002;
+    let formats = [
+      (DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR),
+      (DRM_FORMAT_ARGB8888, TILED),
+      (DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR),
+    ];
+    let (fd, size) = create_format_table(&formats);
     assert!(fd >= 0);
-    assert_eq!(size, 32);
+    assert_eq!(size, 48);
+    let mut bytes = [0u8; 48];
+    assert_eq!(unsafe { libc::pread(fd, bytes.as_mut_ptr().cast(), bytes.len(), 0) }, 48);
+    assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), DRM_FORMAT_ARGB8888);
+    assert_eq!(u64::from_ne_bytes(bytes[24..32].try_into().unwrap()), TILED);
 
     let first = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     let second = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };

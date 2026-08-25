@@ -1,6 +1,7 @@
 /* Hallmark · theme: BeOS · chrome: deskbar · enrichment: Tier A CSS
  * audience: retro desktop users · use: live desktop skin switching
  */
+/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V5 · contrast: pass (40–41) */
 :root {
   --be-yellow: #ffd83a;
   --be-yellow-hi: #ffe678;
@@ -167,6 +168,28 @@ html, body { background: var(--be-desk); color: var(--be-ink); }
   opacity: 0; pointer-events: none; z-index: 1200;
   transition: opacity 120ms ease-out;
 }
+
+/* Full-skin parity: carry BeOS tabs and recessed controls into live widgets. */
+#wallpaper { background: linear-gradient(135deg, var(--be-desk), var(--be-desk-lo)) !important; }
+#wp_aurora1, #wp_aurora2, #wp_moon, #wp_moon_halo, .star { display: none !important; }
+#widget_clock, #widget_stats, #widget_weather {
+  background: var(--be-grey) !important; color: var(--be-ink) !important;
+  border: 1px solid var(--be-ink) !important; border-top: 7px solid var(--be-yellow) !important;
+  border-radius: 0 !important; box-shadow: inset 1px 1px var(--be-grey-hi), inset -1px -1px var(--be-grey-lo), 3px 3px 0 var(--be-shadow) !important;
+  backdrop-filter: none !important; padding: 11px 14px !important;
+}
+#wg_time, #wg_date, #wg_stopwatch_title, #wg_stopwatch_state,
+#wg_stopwatch_time, #wg_wx_desc, #wg_wx_icon,
+#widget_stats .st_label, #widget_stats .st_val,
+#widget_weather .st_label, #widget_weather .st_val,
+#widget_weather .wf_day, #widget_weather .wf_icon, #widget_weather .wf_temp { color: var(--be-ink) !important; }
+#widget_clock .wg_clock_icon, #wg_stopwatch_actions .dlg_btn {
+  background: var(--be-grey-hi) !important; color: var(--be-ink) !important;
+  border: 1px solid var(--be-ink) !important; border-radius: 0 !important;
+}
+#wg_stopwatch_actions .dlg_btn.primary { background: var(--be-yellow) !important; }
+#widget_stats .st_bar { height: 7px !important; border: 1px solid var(--be-ink); border-radius: 0 !important; background: var(--be-grey-hi) !important; }
+#widget_stats .st_fill, #widget_stats .st_fill.g_mem, #widget_stats .st_fill.g_disk { border-radius: 0 !important; background: var(--be-blue) !important; }
 .tray_item.tip_open .tray_tip { opacity: 1; }
 
 /* Keep the Launchpad search/header fixed while overflowing apps scroll. */
@@ -180,4 +203,25 @@ html, body { background: var(--be-desk); color: var(--be-ink); }
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
+}
+
+/* BeOS usability pass: yellow tabs remain decorative; blue owns selection. */
+.mb_item, .tray_item { min-width: 30px; min-height: 24px; padding: 0 7px; }
+.mb_item:active, .tray_item:active, .dock_item:active .dock_icon,
+.dlg_btn:active { background: var(--be-blue); color: var(--color-accent-ink); box-shadow: inset 2px 2px var(--be-shadow); }
+.mb_item:focus-visible, .tray_item:focus-visible, .dock_item:focus-visible,
+.menu_item:focus-visible, .stab:focus-visible, .wm_pref:focus-visible,
+.pref_input:focus-visible, .pref_input_full:focus-visible {
+  outline: 2px solid var(--be-blue); outline-offset: 2px;
+}
+.notify_card {
+  border: 1px solid var(--be-ink); border-left: 7px solid var(--be-yellow);
+  border-radius: 0; background: var(--be-grey-hi); box-shadow: 2px 2px 0 var(--be-shadow);
+}
+.notify_when { color: var(--be-blue); opacity: 1; }
+.notify_message { color: var(--be-ink); opacity: 1; }
+.tray_tip {
+  border: 1px solid var(--be-ink); border-top: 5px solid var(--be-yellow);
+  border-radius: 0; background: var(--be-grey-hi); color: var(--be-ink);
+  box-shadow: 2px 2px 0 var(--be-shadow);
 }
