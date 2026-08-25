@@ -3067,6 +3067,8 @@ static void wifi_consume_snapshot(void) {
     g_wifi_service_available = snapshot.available;
     g_wifi_busy = snapshot.busy;
     snprintf(g_wifi_error, sizeof(g_wifi_error), "%s", snapshot.error);
+    if (!snapshot.busy && snapshot.error[0])
+        toast_show("Wi-Fi error", snapshot.error, 6.0);
     if (is_shown(g_wifi_menu_idx)) network_update_ui();
 }
 
@@ -3252,7 +3254,9 @@ static int net_iface_is_wireless(const char* name) {
     struct stat st;
     if (!name || !*name) return 0;
     snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", name);
-    return stat(path, &st) == 0;
+    if (stat(path, &st) == 0) return 1;
+    snprintf(path, sizeof(path), "/sys/class/net/%s/phy80211", name);
+    return lstat(path, &st) == 0;
 }
 
 static int net_iface_is_up(const char* name) {
@@ -6383,7 +6387,10 @@ static void on_wifi_network(LunaElement* e) {
         luna_set_text(label, text);
     }
     int pass = luna_get_element_by_id("wifi_password");
-    if (pass >= 0) luna_set_value(pass, "");
+    if (pass >= 0) {
+        luna_set_value(pass, "");
+        luna_focus_element(pass);
+    }
     set_hidden(luna_get_element_by_id("wifi_credentials"), 0);
     luna_mark_layout_dirty();
 }
@@ -9476,7 +9483,13 @@ static void update_async_status(void) {
 
         snprintf(g_cached_net, sizeof(g_cached_net), "%s", fresh.network);
         idx = g_mb_wifi_idx;
-        const char* net_icon = (!strcmp(fresh.network, "Ethernet")) ? "\uf6ff" : "\uf1eb";
+        const char* net_icon;
+        if (!strcmp(fresh.network, "Wi-Fi"))
+            net_icon = "\uf1eb"; /* Wi-Fi */
+        else if (!strcmp(fresh.network, "Ethernet"))
+            net_icon = "\uf6ff"; /* wired network */
+        else
+            net_icon = "\uf127"; /* disconnected / offline */
         if (g_mb_wifi_icon_idx >= 0 &&
             text_would_change(g_mb_wifi_icon_idx, net_icon)) {
             luna_set_text_paint_only(g_mb_wifi_icon_idx, net_icon);
@@ -10402,6 +10415,12 @@ static void dispatch_key(int key, int scancode, int action, int mods) {
             weather_do_search();
             return;
         }
+        if (is_shown(g_wifi_menu_idx) &&
+            luna_focused_element() == luna_get_element_by_id("wifi_password") &&
+            (key == LUNA_KEY_ENTER || key == LUNA_KEY_KP_ENTER)) {
+            on_wifi_connect(NULL);
+            return;
+        }
         /* Confirmation alerts expose a conventional default action.  This is
          * handled by the shell rather than relying on whichever button happened
          * to retain focus on the menubar surface that opened the dialog. */
@@ -10911,6 +10930,22 @@ static void kms_process_input(void) {
     struct libinput_event* ev;
     while ((ev = libinput_get_event(g_kms.li))) {
         switch (libinput_event_get_type(ev)) {
+        case LIBINPUT_EVENT_DEVICE_ADDED: {
+            struct libinput_device* device = libinput_event_get_device(ev);
+            fprintf(stderr, "[luna-shell/kms] input added: %s%s%s%s%s\n",
+                    libinput_device_get_name(device),
+                    libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_KEYBOARD) ? " keyboard" : "",
+                    libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_POINTER)  ? " pointer" : "",
+                    libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_TOUCH)    ? " touch" : "",
+                    libinput_device_has_capability(device, LIBINPUT_DEVICE_CAP_TABLET_TOOL) ? " tablet" : "");
+            break;
+        }
+        case LIBINPUT_EVENT_DEVICE_REMOVED: {
+            struct libinput_device* device = libinput_event_get_device(ev);
+            fprintf(stderr, "[luna-shell/kms] input removed: %s\n",
+                    libinput_device_get_name(device));
+            break;
+        }
         case LIBINPUT_EVENT_POINTER_MOTION: {
             struct libinput_event_pointer* p = libinput_event_get_pointer_event(ev);
             g_kms.mouse_x += libinput_event_pointer_get_dx(p);
@@ -10959,6 +10994,64 @@ static void kms_process_input(void) {
                 xv = libinput_event_pointer_get_axis_value(p, LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL);
             shell_note_user_activity();
             shell_scroll(-xv / 10.0, -yv / 10.0);
+            break;
+        }
+        case LIBINPUT_EVENT_TOUCH_DOWN:
+        case LIBINPUT_EVENT_TOUCH_MOTION:
+        case LIBINPUT_EVENT_TOUCH_UP:
+        case LIBINPUT_EVENT_TOUCH_CANCEL: {
+            struct libinput_event_touch* t = libinput_event_get_touch_event(ev);
+            struct libinput_device* device = libinput_event_get_device(ev);
+            int type = libinput_event_get_type(ev);
+            int slot = libinput_event_touch_get_seat_slot(t);
+            LunaTouchEvent touch;
+            memset(&touch, 0, sizeof(touch));
+            /* A seat slot can be reused after UP.  Pairing it with the device
+             * keeps simultaneous contacts from different touch devices apart. */
+            touch.id = (int64_t)(((uint64_t)(uintptr_t)device << 8) ^
+                                 (uint32_t)(slot < 0 ? 0 : slot));
+            touch.phase = type == LIBINPUT_EVENT_TOUCH_DOWN   ? LUNA_TOUCH_DOWN :
+                          type == LIBINPUT_EVENT_TOUCH_MOTION ? LUNA_TOUCH_MOVE :
+                          type == LIBINPUT_EVENT_TOUCH_UP     ? LUNA_TOUCH_UP : LUNA_TOUCH_CANCEL;
+            touch.tool = LUNA_TOUCH_TOOL_FINGER;
+            touch.x = libinput_event_touch_get_x_transformed(t, g_kms.width);
+            touch.y = libinput_event_touch_get_y_transformed(t, g_kms.height);
+            touch.pressure = (touch.phase == LUNA_TOUCH_UP ||
+                              touch.phase == LUNA_TOUCH_CANCEL) ? 0.0f : 1.0f;
+            /* Keep the pointer position coherent with the primary-touch mouse
+             * emulation in luna_touch(), but do not expose the hardware cursor. */
+            g_kms.mouse_x = touch.x;
+            g_kms.mouse_y = touch.y;
+            shell_note_user_activity();
+            luna_touch(&touch);
+            g_frame_dirty = 1;
+            break;
+        }
+        case LIBINPUT_EVENT_TABLET_TOOL_TIP:
+        case LIBINPUT_EVENT_TABLET_TOOL_AXIS: {
+            struct libinput_event_tablet_tool* t = libinput_event_get_tablet_tool_event(ev);
+            struct libinput_tablet_tool* tool = libinput_event_tablet_tool_get_tool(t);
+            enum libinput_tablet_tool_type tool_type = libinput_tablet_tool_get_type(tool);
+            int type = libinput_event_get_type(ev);
+            LunaTouchEvent touch;
+            memset(&touch, 0, sizeof(touch));
+            touch.id = (int64_t)(uintptr_t)tool;
+            touch.phase = type == LIBINPUT_EVENT_TABLET_TOOL_AXIS ? LUNA_TOUCH_MOVE :
+                (libinput_event_tablet_tool_get_tip_state(t) == LIBINPUT_TABLET_TOOL_TIP_DOWN
+                     ? LUNA_TOUCH_DOWN : LUNA_TOUCH_UP);
+            touch.tool = tool_type == LIBINPUT_TABLET_TOOL_TYPE_ERASER
+                             ? LUNA_TOUCH_TOOL_ERASER : LUNA_TOUCH_TOOL_STYLUS;
+            touch.x = libinput_event_tablet_tool_get_x_transformed(t, g_kms.width);
+            touch.y = libinput_event_tablet_tool_get_y_transformed(t, g_kms.height);
+            touch.pressure = touch.phase == LUNA_TOUCH_UP ? 0.0f :
+                             (float)libinput_event_tablet_tool_get_pressure(t);
+            touch.tilt_x = (float)libinput_event_tablet_tool_get_tilt_x(t);
+            touch.tilt_y = (float)libinput_event_tablet_tool_get_tilt_y(t);
+            g_kms.mouse_x = touch.x;
+            g_kms.mouse_y = touch.y;
+            shell_note_user_activity();
+            luna_touch(&touch);
+            g_frame_dirty = 1;
             break;
         }
         case LIBINPUT_EVENT_KEYBOARD_KEY: {
@@ -11317,7 +11410,7 @@ static LunaSurface g_surfs[] = {
     /* wifi_menu / bt_menu: full-output overlays so position_menu_near works on Wayland */
     { .name="wifi_menu",    .root_id="wifi_menu",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
-      .is_overlay=1 },
+      .is_overlay=1, .is_kbd=1 },
     { .name="bt_menu",      .root_id="bt_menu",
       .layer=ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, .anchor=ZWLR_ANCHOR_ALL,
       .is_overlay=1 },

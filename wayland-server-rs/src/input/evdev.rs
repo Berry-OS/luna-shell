@@ -12,13 +12,24 @@ use std::time::{Duration, Instant};
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
+const EV_ABS: u16 = 0x03;
 const EV_LED: u16 = 0x11;
 const SYN_REPORT: u16 = 0x00;
+const SYN_DROPPED: u16 = 0x03;
 const REL_X: u16 = 0x00;
 const REL_Y: u16 = 0x01;
 const REL_HWHEEL: u16 = 0x06;
 const REL_WHEEL: u16 = 0x08;
+const ABS_X: u16 = 0x00;
+const ABS_Y: u16 = 0x01;
+const ABS_MT_SLOT: u16 = 0x2f;
+const ABS_MT_POSITION_X: u16 = 0x35;
+const ABS_MT_POSITION_Y: u16 = 0x36;
+const ABS_MT_TRACKING_ID: u16 = 0x39;
 const BTN_LEFT: u16 = 0x110;
+const BTN_TASK: u16 = 0x117;
+const BTN_TOUCH: u16 = 0x14a;
+const INPUT_PROP_DIRECT: usize = 0x01;
 const KEY_LEFTCTRL: u16 = 29;
 const KEY_RIGHTCTRL: u16 = 97;
 const KEY_LEFTALT: u16 = 56;
@@ -41,10 +52,49 @@ struct Device {
   fd: RawFd,
   keyboard: bool,
   pointer: bool,
+  abs_x: Option<AbsAxis>,
+  abs_y: Option<AbsAxis>,
+  mt_axes: bool,
+  direct: bool,
+  touch_down: bool,
+  touch_button_down: bool,
+  touch_button_pending: Option<bool>,
+  abs_dirty: bool,
+  mt_slot: i32,
+  last_touch: Option<(i32, i32)>,
   // LED output must not change the access mode of the input stream.  Some
   // evdev drivers stop delivering pointer events when their event node is
   // opened O_RDWR, so keep a separate optional descriptor for LED writes.
   led_fd: RawFd,
+}
+
+#[derive(Clone, Copy)]
+struct AbsAxis {
+  min: i32,
+  max: i32,
+  value: i32,
+}
+
+impl AbsAxis {
+  fn normalized(self) -> f32 {
+    let span = self.max.saturating_sub(self.min);
+    if span <= 0 {
+      0.0
+    } else {
+      (self.value.saturating_sub(self.min) as f32 / span as f32).clamp(0.0, 1.0)
+    }
+  }
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct InputAbsInfo {
+  value: i32,
+  minimum: i32,
+  maximum: i32,
+  fuzz: i32,
+  flat: i32,
+  resolution: i32,
 }
 
 pub struct EvdevInput {
@@ -85,10 +135,7 @@ impl EvdevInput {
     let (tx, rx) = mpsc::channel();
     let requested = Arc::new(AtomicU8::new(1));
     let applied = Arc::new(AtomicU8::new(1));
-    let initial_leds = if std::env::var("LUNA_NUMLOCK")
-      .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off"))
-      .unwrap_or(true)
-    { 1 } else { 0 };
+    let initial_leds = if std::env::var("LUNA_NUMLOCK").map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off")).unwrap_or(true) { 1 } else { 0 };
     let leds = Arc::new(AtomicU8::new(initial_leds));
     let thread_requested = Arc::clone(&requested);
     let thread_applied = Arc::clone(&applied);
@@ -207,7 +254,7 @@ fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested:
 
     let mut dead = HashSet::new();
     for poll in polls.iter().skip(1).filter(|p| p.revents != 0) {
-      let Some((path, dev)) = devices.iter().find(|(_, d)| d.fd == poll.fd) else { continue };
+      let Some((path, dev)) = devices.iter_mut().find(|(_, d)| d.fd == poll.fd) else { continue };
       if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
         dead.insert(path.clone());
         continue;
@@ -250,19 +297,38 @@ fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested:
       for raw in &events[..bytes as usize / size_of::<InputEventRaw>()] {
         if raw.type_ == EV_SYN && raw.code == SYN_REPORT {
           flush_motion(&mut acc_dx, &mut acc_dy);
+          if dev.abs_dirty {
+            flush_absolute(dev, &tx, wake_fd);
+            dev.abs_dirty = false;
+          }
+          flush_touch_button(dev, &tx, wake_fd);
+        } else if raw.type_ == EV_SYN && raw.code == SYN_DROPPED {
+          // The kernel discarded part of a report.  Never combine coordinates
+          // from opposite sides of the gap: that creates the characteristic
+          // full-screen cursor jump on busy USB/I2C touch devices.
+          acc_dx = 0.0;
+          acc_dy = 0.0;
+          dev.abs_dirty = false;
+          dev.last_touch = None;
+          dev.touch_down = false;
+          dev.touch_button_pending = dev.touch_button_down.then_some(false);
         } else if dev.keyboard && raw.type_ == EV_KEY && raw.code < BTN_LEFT {
           handle_key(raw.code, raw.value, &mut pressed, &mut consumed_fn, &tx, wake_fd);
         } else if dev.pointer && raw.type_ == EV_KEY && raw.code >= BTN_LEFT {
           // A button edge must not overtake the motion that preceded it.
           flush_motion(&mut acc_dx, &mut acc_dy);
-          emit(
-            &tx,
-            wake_fd,
-            InputEvent::PointerButton {
-              button: raw.code as u32,
-              pressed: raw.value != 0,
-            },
-          );
+          if raw.code == BTN_TOUCH {
+            set_touch_state(dev, raw.value != 0);
+          } else if raw.code <= BTN_TASK {
+            emit(
+              &tx,
+              wake_fd,
+              InputEvent::PointerButton {
+                button: raw.code as u32,
+                pressed: raw.value != 0,
+              },
+            );
+          }
         } else if dev.pointer && raw.type_ == EV_REL {
           match raw.code {
             REL_X => acc_dx += raw.value as f32,
@@ -291,9 +357,45 @@ fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested:
             }
             _ => {}
           }
+        } else if dev.pointer && raw.type_ == EV_ABS {
+          match raw.code {
+            ABS_X if !dev.mt_axes => {
+              if let Some(axis) = dev.abs_x.as_mut() {
+                axis.value = raw.value;
+                dev.abs_dirty = true;
+              }
+            }
+            ABS_Y if !dev.mt_axes => {
+              if let Some(axis) = dev.abs_y.as_mut() {
+                axis.value = raw.value;
+                dev.abs_dirty = true;
+              }
+            }
+            ABS_MT_SLOT => dev.mt_slot = raw.value,
+            ABS_MT_TRACKING_ID if dev.mt_slot == 0 => {
+              set_touch_state(dev, raw.value >= 0);
+            }
+            ABS_MT_POSITION_X if dev.mt_slot == 0 => {
+              if let Some(axis) = dev.abs_x.as_mut() {
+                axis.value = raw.value;
+                dev.abs_dirty = true;
+              }
+            }
+            ABS_MT_POSITION_Y if dev.mt_slot == 0 => {
+              if let Some(axis) = dev.abs_y.as_mut() {
+                axis.value = raw.value;
+                dev.abs_dirty = true;
+              }
+            }
+            _ => {}
+          }
         }
       }
       flush_motion(&mut acc_dx, &mut acc_dy);
+      // Unlike relative deltas, an absolute report must never be flushed at a
+      // read boundary. read(2) may split one evdev report after X but before Y;
+      // publishing that half-report combines a new X with the previous Y and
+      // visibly teleports the cursor. Linux evdev reports always end in SYN.
     }
     if !dead.is_empty() {
       for path in dead {
@@ -411,7 +513,17 @@ fn rescan(devices: &mut HashMap<String, Device>, active: bool, leds: u8) {
       continue;
     }
     let keyboard = has_bit(fd, EV_KEY as u32, 30) && has_bit(fd, EV_KEY as u32, 28);
-    let pointer = (has_bit(fd, EV_REL as u32, REL_X as usize) && has_bit(fd, EV_REL as u32, REL_Y as usize)) || has_bit(fd, EV_KEY as u32, BTN_LEFT as usize);
+    // Never mix legacy ABS_X/Y samples with MT ranges.  Several hybrid HID
+    // devices (notably Surface touch and type covers) expose both with
+    // different min/max values; interpreting MT coordinates in the legacy
+    // range makes the cursor jump across the output.
+    let mt_x = abs_axis(fd, ABS_MT_POSITION_X);
+    let mt_y = abs_axis(fd, ABS_MT_POSITION_Y);
+    let mt_axes = mt_x.is_some() && mt_y.is_some();
+    let abs_x = if mt_axes { mt_x } else { abs_axis(fd, ABS_X) };
+    let abs_y = if mt_axes { mt_y } else { abs_axis(fd, ABS_Y) };
+    let direct = has_prop(fd, INPUT_PROP_DIRECT);
+    let pointer = (has_bit(fd, EV_REL as u32, REL_X as usize) && has_bit(fd, EV_REL as u32, REL_Y as usize)) || (abs_x.is_some() && abs_y.is_some()) || has_bit(fd, EV_KEY as u32, BTN_LEFT as usize);
     if !keyboard && !pointer {
       unsafe { libc::close(fd) };
       continue;
@@ -422,12 +534,8 @@ fn rescan(devices: &mut HashMap<String, Device>, active: bool, leds: u8) {
       unsafe { libc::close(fd) };
       continue;
     }
-    eprintln!("[luna-compositor] input: {} keyboard={} pointer={}", path, keyboard, pointer);
-    let led_fd = if keyboard {
-      unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) }
-    } else {
-      -1
-    };
+    eprintln!("[luna-compositor] input: {} keyboard={} pointer={} absolute={} direct={}", path, keyboard, pointer, abs_x.is_some() && abs_y.is_some(), direct);
+    let led_fd = if keyboard { unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) } } else { -1 };
     if led_fd >= 0 {
       write_leds(led_fd, leds);
     }
@@ -437,6 +545,19 @@ fn rescan(devices: &mut HashMap<String, Device>, active: bool, leds: u8) {
         fd,
         keyboard,
         pointer,
+        abs_x,
+        abs_y,
+        mt_axes,
+        direct,
+        // Devices without BTN_TOUCH (old single-touch tablets) are active
+        // whenever they report coordinates. MT devices override this through
+        // ABS_MT_TRACKING_ID before their first position report.
+        touch_down: !mt_axes && !has_bit(fd, EV_KEY as u32, BTN_TOUCH as usize),
+        touch_button_down: false,
+        touch_button_pending: None,
+        abs_dirty: false,
+        mt_slot: 0,
+        last_touch: None,
         led_fd,
       },
     );
@@ -450,12 +571,35 @@ fn set_devices_leds(devices: &HashMap<String, Device>, leds: u8) {
 }
 
 fn write_leds(fd: RawFd, leds: u8) {
-  let zero = libc::timeval { tv_sec: 0, tv_usec: 0 };
+  let zero = libc::timeval {
+    tv_sec: 0,
+    tv_usec: 0,
+  };
   let events = [
-    InputEventRaw { time: zero, type_: EV_LED, code: LED_NUML, value: (leds & 1 != 0) as i32 },
-    InputEventRaw { time: zero, type_: EV_LED, code: LED_CAPSL, value: (leds & 2 != 0) as i32 },
-    InputEventRaw { time: zero, type_: EV_LED, code: LED_SCROLLL, value: (leds & 4 != 0) as i32 },
-    InputEventRaw { time: zero, type_: EV_SYN, code: SYN_REPORT, value: 0 },
+    InputEventRaw {
+      time: zero,
+      type_: EV_LED,
+      code: LED_NUML,
+      value: (leds & 1 != 0) as i32,
+    },
+    InputEventRaw {
+      time: zero,
+      type_: EV_LED,
+      code: LED_CAPSL,
+      value: (leds & 2 != 0) as i32,
+    },
+    InputEventRaw {
+      time: zero,
+      type_: EV_LED,
+      code: LED_SCROLLL,
+      value: (leds & 4 != 0) as i32,
+    },
+    InputEventRaw {
+      time: zero,
+      type_: EV_SYN,
+      code: SYN_REPORT,
+      value: 0,
+    },
   ];
   unsafe {
     libc::write(fd, events.as_ptr() as *const libc::c_void, size_of_val(&events));
@@ -471,11 +615,128 @@ fn has_bit(fd: RawFd, ev: u32, bit: usize) -> bool {
   bit / 8 < bits.len() && bits[bit / 8] & (1 << (bit % 8)) != 0
 }
 
-const fn ioc_read(ty: u64, nr: u64, size: u64) -> u64 { (2u64 << 30) | (size << 16) | (ty << 8) | nr }
+fn abs_axis(fd: RawFd, axis: u16) -> Option<AbsAxis> {
+  if !has_bit(fd, EV_ABS as u32, axis as usize) {
+    return None;
+  }
+  let mut info = InputAbsInfo::default();
+  let request = ioc_read(b'E' as u64, 0x40 + axis as u64, size_of::<InputAbsInfo>() as u64);
+  if unsafe { libc::ioctl(fd, request as libc::c_ulong, &mut info) } < 0 || info.maximum <= info.minimum {
+    return None;
+  }
+  Some(AbsAxis {
+    min: info.minimum,
+    max: info.maximum,
+    value: info.value,
+  })
+}
+
+fn has_prop(fd: RawFd, prop: usize) -> bool {
+  let mut bits = [0u8; 8];
+  let request = ioc_read(b'E' as u64, 0x09, bits.len() as u64); // EVIOCGPROP
+  if unsafe { libc::ioctl(fd, request as libc::c_ulong, bits.as_mut_ptr()) } < 0 {
+    return false;
+  }
+  prop / 8 < bits.len() && bits[prop / 8] & (1 << (prop % 8)) != 0
+}
+
+fn flush_absolute(dev: &mut Device, tx: &Sender<InputEvent>, wake_fd: RawFd) {
+  let (Some(x), Some(y)) = (dev.abs_x, dev.abs_y) else { return };
+  if !dev.touch_down {
+    return;
+  }
+  if dev.direct {
+    emit(
+      tx,
+      wake_fd,
+      InputEvent::PointerMotion {
+        x: x.normalized(),
+        y: y.normalized(),
+      },
+    );
+    return;
+  }
+
+  let now = (x.value, y.value);
+  if let Some((old_x, old_y)) = dev.last_touch {
+    let x_span = (x.max - x.min).max(1) as f32;
+    let y_span = (y.max - y.min).max(1) as f32;
+    // Two full touchpad traversals cover roughly four output widths.  Keeping
+    // this normalized avoids a 2160p Surface feeling four times slower than a
+    // small 1024px test display.
+    let dx = (now.0 - old_x) as f32 / x_span * 2.0;
+    let dy = (now.1 - old_y) as f32 / y_span * 2.0;
+    if dx != 0.0 || dy != 0.0 {
+      emit(tx, wake_fd, InputEvent::PointerRelativeNormalized { dx, dy });
+    }
+  }
+  dev.last_touch = Some(now);
+}
+
+fn set_touch_state(dev: &mut Device, down: bool) {
+  if dev.touch_down == down {
+    return;
+  }
+  dev.touch_down = down;
+  dev.last_touch = None;
+  // Direct devices behave as a conventional pointer for clients which do not
+  // bind wl_touch (including the shell itself).  Defer the edge to report end
+  // so a down is always preceded by the coordinates from the same frame.
+  if dev.direct {
+    dev.touch_button_pending = Some(down);
+  }
+}
+
+fn flush_touch_button(dev: &mut Device, tx: &Sender<InputEvent>, wake_fd: RawFd) {
+  let Some(down) = dev.touch_button_pending.take() else { return };
+  if dev.touch_button_down == down {
+    return;
+  }
+  dev.touch_button_down = down;
+  emit(
+    tx,
+    wake_fd,
+    InputEvent::PointerButton {
+      button: BTN_LEFT as u32,
+      pressed: down,
+    },
+  );
+}
+
+const fn ioc_read(ty: u64, nr: u64, size: u64) -> u64 {
+  (2u64 << 30) | (size << 16) | (ty << 8) | nr
+}
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn absolute_device(direct: bool) -> Device {
+    Device {
+      fd: -1,
+      keyboard: false,
+      pointer: true,
+      abs_x: Some(AbsAxis {
+        min: 0,
+        max: 1000,
+        value: 250,
+      }),
+      abs_y: Some(AbsAxis {
+        min: 0,
+        max: 500,
+        value: 125,
+      }),
+      mt_axes: true,
+      direct,
+      touch_down: true,
+      touch_button_down: false,
+      touch_button_pending: None,
+      abs_dirty: false,
+      mt_slot: 0,
+      last_touch: None,
+      led_fd: -1,
+    }
+  }
 
   #[test]
   fn maps_function_keys_to_vts() {
@@ -541,6 +802,69 @@ mod tests {
         button: 0x110,
         pressed: false
       }
+    ));
+    unsafe { libc::close(wake_fd) };
+  }
+
+  #[test]
+  fn direct_absolute_device_maps_to_normalized_output() {
+    let (tx, rx) = mpsc::channel();
+    let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+    flush_absolute(&mut absolute_device(true), &tx, wake_fd);
+    assert!(matches!(rx.recv().unwrap(), InputEvent::PointerMotion { x, y } if x == 0.25 && y == 0.25));
+    unsafe { libc::close(wake_fd) };
+  }
+
+  #[test]
+  fn direct_touch_emulates_one_ordered_left_click() {
+    let (tx, rx) = mpsc::channel();
+    let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+    let mut dev = absolute_device(true);
+    dev.touch_down = false;
+
+    set_touch_state(&mut dev, true);
+    flush_absolute(&mut dev, &tx, wake_fd);
+    flush_touch_button(&mut dev, &tx, wake_fd);
+    assert!(matches!(rx.recv().unwrap(), InputEvent::PointerMotion { .. }));
+    assert!(matches!(
+      rx.recv().unwrap(),
+      InputEvent::PointerButton {
+        button: 0x110,
+        pressed: true
+      }
+    ));
+
+    // BTN_TOUCH and ABS_MT_TRACKING_ID commonly describe the same edge.
+    set_touch_state(&mut dev, true);
+    flush_touch_button(&mut dev, &tx, wake_fd);
+    assert!(rx.try_recv().is_err());
+
+    set_touch_state(&mut dev, false);
+    flush_touch_button(&mut dev, &tx, wake_fd);
+    assert!(matches!(
+      rx.recv().unwrap(),
+      InputEvent::PointerButton {
+        button: 0x110,
+        pressed: false
+      }
+    ));
+    unsafe { libc::close(wake_fd) };
+  }
+
+  #[test]
+  fn touchpad_first_contact_does_not_jump_then_moves_relatively() {
+    let (tx, rx) = mpsc::channel();
+    let wake_fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+    let mut dev = absolute_device(false);
+    flush_absolute(&mut dev, &tx, wake_fd);
+    assert!(rx.try_recv().is_err());
+    dev.abs_x.as_mut().unwrap().value += 100;
+    dev.abs_y.as_mut().unwrap().value += 25;
+    flush_absolute(&mut dev, &tx, wake_fd);
+    assert!(matches!(
+      rx.recv().unwrap(),
+      InputEvent::PointerRelativeNormalized { dx, dy }
+        if (dx - 0.2).abs() < 0.0001 && (dy - 0.1).abs() < 0.0001
     ));
     unsafe { libc::close(wake_fd) };
   }

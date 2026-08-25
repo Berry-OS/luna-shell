@@ -1,304 +1,439 @@
-# Vespera / Luna Desktop
+<div align="center">
 
-pure Rust 製 Wayland コンポジタ + libwayland-client 実装 + macOS 風デスクトップシェル (`luna-shell` / `ui/luna-shell.c`)。GTK4 アプリを動かしつつ、Xorg や Weston 等の既存コンポジタの代わりに起動できる。
+# 🌙 Luna Desktop
 
-## 製品名とレイヤー
+### Wayland、Rust、そして HTML/CSS 駆動のネイティブシェルを核に構築された、軽量でハック可能な Linux デスクトップスタック。
 
-| 名前 | 実体 | 役割 |
-|------|------|------|
-| **Luna Desktop** | セッション全体 | カーネル起動後にユーザが触るデスクトップ環境 |
-| **luna-compositor** | `luna-compositor` | DRM/KMS 上の Wayland コンポジタ（Xorg/Weston の代替） |
-| **luna-shell** | `ui/luna-shell.c` | メニューバー・Dock・Launchpad 等の macOS 風シェル UI（Luna UI エンジン） |
-| **Luna UI** | `ui/luna-ui.h` の HTML/CSS エンジン | シェルや設定アプリの UI ツールキット |
-| **wayland-client-rs** | `libwayland_client.so` | GTK 等が接続する Wayland クライアント実装 |
+Luna は **Rust 製 Wayland コンポジタ**、**Luna UI を搭載したネイティブ C デスクトップシェル**、そしてオプションの **Rust 製 `libwayland-client` 実装** を一つの実験的なデスクトップ環境にまとめたものです。
 
-内部コード名は **Vespera** のまま。ユーザー向けには **Luna** で統一する。
+[English](README.md) · [プロジェクトをスポンサーする](https://github.com/sponsors/yui0)
 
-## 起動フロー（カーネル後）
+[![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
+[![Rust: nightly](https://img.shields.io/badge/Rust-nightly-orange.svg?logo=rust)](rust-toolchain.toml)
+[![Wayland](https://img.shields.io/badge/display-Wayland-5b5b5b.svg)](https://wayland.freedesktop.org/)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4%EF%B8%8F-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/yui0)
 
+</div>
+
+Luna は理解できるほど小さく、テーマ変更が柔軟で、Wayland ワイヤプロトコルや DRM/KMS 出力からメニューバー、Dock、Launchpad、ウィジェット、アプリケーションテーマまで、Linux デスクトップスタック全体を実験できるほど低レベルに設計されています。
+
+> **プロジェクトの状態:** Luna Desktop は活発に開発中です。開発用デスクトップ/セッションとしてすでに利用可能ですが、直接 DRM/evdev パスはまだ実験的であり、実機ではそのように扱ってください。
+
+<!-- readme-screenshot-gallery:start -->
+## ✨ デスクトップスキン
+
+以下の画像はすべて **実際の `luna-shell` フレームバッファキャプチャ** です。シェルは X11/EGL キャプチャバックエンドでビルドされ、Xvfb 上で指定のスキンを使って実行されています。ブラウザのプレビューや再作成したモックアップではありません。通常のデスクトップは Luna 独自の KMS/Wayland ホスト経由で動作し、**GLFW は不要** です。
+
+### Luna — デフォルト
+
+<p align="center">
+  <img src="docs/screenshots/luna-shell-skin-default.png" alt="Luna Desktop デフォルトスキン" width="96%">
+</p>
+
+| Nocturne Atelier | Windows XP |
+| --- | --- |
+| ![Nocturne Atelier スキン](docs/screenshots/luna-shell-skin-nocturne-atelier.png) | ![Windows XP スキン](docs/screenshots/luna-shell-skin-windows-xp.png) |
+
+| Windows 95 | Classic Mac OS |
+| --- | --- |
+| ![Windows 95 スキン](docs/screenshots/luna-shell-skin-windows-95.png) | ![Classic Mac OS スキン](docs/screenshots/luna-shell-skin-classic-mac.png) |
+
+| BeOS | Amiga Workbench |
+| --- | --- |
+| ![BeOS スキン](docs/screenshots/luna-shell-skin-beos.png) | ![Amiga Workbench スキン](docs/screenshots/luna-shell-skin-amiga-workbench.png) |
+
+ギャラリーを再生成するには:
+
+```bash
+./tools/capture-shell-skins.sh
 ```
-systemd / init
-  └─ luna-session
-       ├─ luna-compositor  (--backend dri)
-       ├─ luna-shell       (--desktop, Wayland クライアント)
-       └─ GTK アプリ       (WAYLAND_DISPLAY + LD_PRELOAD=libwayland-client)
+<!-- readme-screenshot-gallery:end -->
+
+## 🚀 Luna の特徴は？
+
+| | Luna Desktop |
+|---|---|
+| **フルスタックを自分で持つ** | Rust コンポジタが Wayland プロトコル、コンポジション、入力、DRM/KMS、オプションのブラウザストリーミングを担当します。 |
+| **ネイティブシェル、Web 風スタイリング** | `luna-shell` はネイティブ C プログラムですが、Luna UI はブラウザを埋め込まずに HTML/CSS 風レイアウトからインターフェースを描画します。 |
+| **壁紙以上のテーマ** | スキンはシェルのレイアウト、クロームの配置、ウィジェット、GTK スタイリング、Qt スタイリング、サーバーサイド装飾の色まで変更できます。 |
+| **複数のレンダリングパス** | DRM/KMS 上で実行したり、開発/VM 用にソフトウェアバックエンドを使ったり、WebGL バックエンド経由で Wayland アプリをブラウザにストリーミングしたりできます。 |
+| **Wayland 実装の遊び場** | リポジトリには Rust 製 Wayland サーバーと、プロトコル/ランタイム実験用のオプションの Rust `libwayland-client.so.0` 代替実装の両方が含まれます。 |
+
+## ⚡ クイックスタート
+
+Luna UI サブモジュールを含めてクローン:
+
+```bash
+git clone --recurse-submodules https://github.com/Berry-OS/luna-shell.git
+cd luna-shell
 ```
 
-## luna-shell（デスクトップシェル）
+プロジェクトは **Rust nightly** を使用し、ネイティブ C コンポーネントもビルドします。一般的な開発依存関係には GCC、make、pkg-config、Wayland 開発ツール（`wayland-scanner`）、DRM/GBM/EGL/OpenGL、libinput、libudev、xkbcommon、D-Bus、X11、OpenSSL の開発パッケージが含まれます。
 
-`ui/luna-shell.c` は Luna UI エンジン単体で macOS 風のデスクトップ環境を描画する:
+### 推奨ビルド
 
-- 半透明メニューバー（三日月ロゴの Luna メニュー・時計・ネットワーク/電源状態）
-- Dock（ホバー拡大アニメーション・起動中インジケータ・Trash）
-- Launchpad（アプリグリッド + インクリメンタル検索, Super/F4 で開閉）
-- コントロールセンター（トグル・輝度/音量スライダー・CPU/RAM メーター）
-- デスクトップウィジェット（時計・CPU/メモリ/ディスク統計, /proc から取得）
-- About This Luna・通知トースト・Shut Down/Restart/Log Out 確認ダイアログ
+デスクトップシェルは **ディストリビューション提供の `libwayland-client` をデフォルトで使用** します。これは RPM パッケージングでも使われるパスです。
 
-Dock / Launchpad のアプリは環境変数 `LUNA_APP_<NAME>`（例: `LUNA_APP_TERMINAL=foot`）で差し替えられる。レイアウトは `ui/luna-shell.html` + `ui/luna-shell.css` を実行ファイルへ埋め込み、`LUNA_DESKTOP_LAYOUT` / `LUNA_DESKTOP_CSS` または `--layout` / `--css` で外部ファイルに差し替え可能。
+```bash
+make build-desktop-system
+```
 
-### デスクトップスキン
+ユーザー/セッションが必要な DRM/入力デバイスへのアクセスを既に持っている場合、ワンコマンドの DRI パスは:
 
-**System Settings → Appearance → Desktop Skin** から、シェルを終了せずに
-スキンを切り替えられる。選択内容は `~/.config/luna-shell/settings.conf`
-へ保存される。`skins/` には **Windows XP**、**Windows 95**、**BeOS**、
-**Classic Mac OS**、**Amiga Workbench**、**Nocturne Atelier** を収録している。
+```bash
+make desktop-system
+```
 
-### 言語・キーボードロック
+ソフトウェア志向の開発セッション用:
 
-**System Settings → Language & Region** ではセッションの言語・地域ロケールと
-ログイン時の NumLock を変更できる。言語は変更後に起動したアプリへ即時反映し、
-すべてのアプリには次回ログイン時に反映する。NumLock / CapsLock / ScrollLock は
-Wayland の locked modifier と実キーボードのLEDへ同期されるため、テンキーと各ロックキーを
-通常どおり使用できる。キーボード配列は **Keyboard** で変更でき、複数配列では
-Alt+Shift で切り替える。
+```bash
+make desktop-soft-system
+```
 
-スキンは次の外部ファイルで構成する:
+直接 DRI セッションは現在、実際の Linux VT と直接の DRM/入力アクセスを想定しています。それが権限の昇格を必要とするマシンでは、まず通常ユーザーとしてビルドし、その後適切な権限で VT から既にビルドされたセッションを起動してください。例:
+
+```bash
+sudo LUNA_TTY=/dev/tty2 PROFILE=release ./luna-session
+```
+
+物理ハードウェアで新しいコンポジタをテストする際は、SSH などの復旧パスを確保しておいてください。
+
+## 🧩 デスクトップに実際に含まれるもの
+
+```text
+luna-session
+├── luna-compositor       Rust Wayland コンポジタ / ウィンドウマネージャ
+├── luna-shell            ネイティブ C デスクトップシェル + Luna UI
+├── luna-clipboard        Wayland クリップボードマネージャ
+├── luna-tray-notify      トレイ / 通知ヘルパー
+└── applications          GTK / Qt / SDL / その他の Wayland クライアント
+```
+
+| コンポーネント | 実装 | 役割 |
+|---|---|---|
+| **Luna Desktop** | フルセッション | ユーザーに提示される完全なデスクトップ環境。 |
+| **`luna-compositor`** | Rust (`wayland-server-rs`) | Wayland サーバー、コンポジション、ウィンドウ管理、DRM/KMS、入力、代替レンダリングバックエンド。 |
+| **`luna-shell`** | C + Luna UI | メニューバー/タスクバー、Dock、Launchpad、Control Center、ウィジェット、設定、デスクトップクローム。 |
+| **Luna UI** | `ui/luna-ui` サブモジュール | シェルが使用するネイティブ HTML/CSS 風レイアウトと OpenGL レンダリングエンジン。 |
+| **`luna-clipboard`** | C | Luna セッション用のクリップボード永続化/管理。 |
+| **`luna-tray-notify`** | C | トレイ/通知互換性ヘルパー。 |
+| **`wayland-client-rs`** | Rust | 開発と互換性実験用のオプションの libwayland-client 互換実装。 |
+
+内部コードネーム **Vespera** はソース履歴の一部にまだ残っていますが、ユーザー向けデスクトップ名は **Luna** です。
+
+## 🌙 シェル体験
+
+`ui/luna-shell.c` がメインのデスクトップシェルです。Luna UI を使ってデスクトップを描画し、Wayland 経由でコンポジタと通信します。
+
+現在のシェル機能には以下が含まれます:
+
+- 半透明の Luna メニューバー / 代替タスクバーとデスクバーレイアウト
+- ホバー拡大、実行中アプリインジケータ、Trash を備えた Dock
+- アプリケーション発見、インクリメンタル検索、キーボードショートカットを備えた Launchpad
+- Control Center とシステムステータス UI
+- Wi-Fi、Ethernet、Bluetooth 連携
+- 通知トーストとトレイ/SNI 連携
+- デスクトップ時計、システム統計、天気ウィジェット
+- モニタ/ディスプレイ連携
+- 言語、キーボードレイアウト、NumLock 設定
+- 複数レイアウト構成向けのキーボードレイアウト切り替え
+- About This Luna、ログアウト、再起動、シャットダウンのフロー
+- XDG ベースの設定、データ、状態、キャッシュ、ランタイムパス
+
+アプリケーションはネイティブ Wayland クライアントとして起動されます。`luna-session` は GTK、Qt、Mozilla、SDL 向けの通常のデスクトップ環境変数をエクスポートし、アプリケーションが Luna コンポジタを直接使えるようにします。
+
+### シェルアプリケーションの上書き
+
+Dock と Launchpad のエントリは `LUNA_APP_<NAME>` 変数でリダイレクトできます:
+
+```bash
+LUNA_APP_TERMINAL=foot ./luna-session
+```
+
+シェルのレイアウトとスタイルシートも開発用に置き換え可能です:
+
+```bash
+LUNA_DESKTOP_LAYOUT=/path/to/layout.html \
+LUNA_DESKTOP_CSS=/path/to/style.css \
+./luna-shell --desktop
+```
+
+同等の `--layout` / `--css` コマンドラインオプションも利用できます。
+
+## 🎨 スキンシステム
+
+**System Settings → Appearance → Desktop Skin** を開くと、Luna 実行中にスキンを切り替えられます。選択したスキンは次の場所に保存されます:
+
+```text
+~/.config/luna-shell/settings.conf
+```
+
+同梱スキンは現在以下を含みます:
+
+- **Luna / Default**
+- **Nocturne Atelier**
+- **Windows XP**
+- **Windows 95**
+- **Classic Mac OS**
+- **BeOS**
+- **Amiga Workbench**
+
+スキンはシェルの色だけに限定されません。クロームの配置、GTK/Qt 連携、コンポジタの装飾設定も記述できます。
 
 ```text
 my-skin/
 ├── skin.conf
 ├── style.css
-├── layout.html        # ブラウザで編集し、同じファイルをシェルが読む
-├── gtk/<ThemeName>/   # 任意: GTK 3/4 テーマ
+├── layout.html
+├── gtk/<ThemeName>/        # オプションの GTK 3/4 テーマ
 │   ├── index.theme
 │   ├── gtk-3.0/gtk.css
 │   └── gtk-4.0/gtk.css
 └── qt/
-    ├── style.qss      # 任意: Qt スタイルシート
+    ├── style.qss            # オプションの Qt スタイルシート
     └── colors.conf
 ```
 
-`layout.html` が開発用の本体。各スキンは上書き用ベースなしで、自分用の
-完全な `style.css` を持つ。テーマ作成時は `skins/default/style.css` を
-コピーして始めてもよい:
-
-```html
-<link rel="stylesheet" href="style.css">
-```
-
-`skins/<name>/layout.html` をブラウザで開いて HTML/CSS を直し、同じファイルを
-テーマとして使う。luna-shell は既存の HTML/CSS エンジンでその `<link>` を読む。
-アイコンフォントは `skins/fonts/`（各スキンからは `../fonts`）に置く。
-`layout.html` があれば自動で採用され、`skin.conf` の `layout=` で名前を上書きできる。
+最小限の `skin.conf` は次のようになります:
 
 ```ini
 name=My Skin
-description=Appearance に表示する短い説明
+description=A custom Luna desktop skin
 css=style.css
 layout=layout.html
-# 配置（Wayland レイヤー表面に即時反映）:
+
+# Shell chrome
 chrome=taskbar          # taskbar | deskbar | menubar | luna
 menubar_edge=bottom     # top | bottom
 menubar_height=34
 dock_mode=hidden        # float | hidden
-# ツールキットテーマ（新規起動のアプリ向け。起動中の GTK/Qt は再起動が必要）:
+
+# Application toolkit themes
 gtk_theme=LunaWindows95
 qt_style=Fusion
 qt_qss=qt/style.qss
-# コンポジタ SSD:
+
+# Compositor/server-side decorations
 titlebar_style=2        # 0 modern | 1 classic dots | 2 flat retro
 titlebar_active=#000080
 titlebar_inactive=#808080
 titlebar_frame=#c0c0c0
-prefer_ssd=1            # クライアント未指定時にサーバ装飾を勧める
+prefer_ssd=1
 ```
 
-`chrome=taskbar` はメニューバーを画面**下**に固定し（Windows XP / 95）、
-フローティング Dock を隠してウィンドウ一覧をタスクバーに載せる。
-CSS だけでは Wayland 上のメニューバー位置は変わらないため、これらのキーで
-レイヤー表面のアンカーを付け替える。
+例えば `chrome=taskbar` はシェルストリップをディスプレイの **下部** に移動し、フローティング Dock を非表示にできます。一方 `deskbar` / `menubar` は上部寄りクロームを維持します。これは CSS の位置指定だけではなく、ネイティブ Wayland レイヤーサーフェスのアンカー処理で行われます。
 
-スキン切替時は GTK テーマを `~/.local/share/themes/` にリンクし、
-`settings.ini` / `GTK_THEME` / `QT_STYLE_OVERRIDE` / `LUNA_QT_QSS` を更新、
-SSD 色をコンポジタへ送る。トレイやスタートメニューは chrome の辺（下タスクバー
-なら上向き、上メニューバーなら下向き）に合わせて開く。
+スキンがツールキットのメタデータを提供する場合、Luna はその外観を新しく起動した GTK/Qt アプリケーションに伝播し、コンポジタ側の装飾色も更新できます。
 
-配置先は `~/.local/share/luna-desktop/skins/`、
-`/usr/local/share/luna-desktop/skins/`、`/usr/share/luna-desktop/skins/`、
-または `LUNA_SKIN_PATH` で指定したディレクトリ。CSS と chrome 配置は即時反映。
-カスタム HTML レイアウトは次回ログイン時に読み込まれ、ネイティブ操作との接続を
-保つため `ui/luna-shell.html` の要素 ID を維持する必要がある。
-`--skin NAME` または `LUNA_DESKTOP_SKIN=NAME` でも選択できる。
+カスタムスキンは次の場所に配置できます:
 
-Wayland プロトコルは **内部バス** として使う。Weston/Mutter/Xorg は不要。GTK4 は Vespera コンポジタへ直接接続する。
-
-### 開発マシンで試す
-
-```bash
-cd vespera
-make desktop              # DRI + luna-shell（GPU コンソール）
-make desktop-soft         # software バックエンド（VM 向け）
-
-# GTK アプリも一緒に起動
-LUNA_APPS="target/release/hello-gtk" make desktop
+```text
+~/.local/share/luna-desktop/skins/
+/usr/local/share/luna-desktop/skins/
+/usr/share/luna-desktop/skins/
 ```
 
-### 本番インストール（tty1 でデスクトップ起動）
+または `LUNA_SKIN_PATH` で指定したパス。
+
+明示的にスキンを選択することも可能です:
 
 ```bash
-sudo make install PREFIX=/usr/local
+luna-shell --desktop --skin windows-95
+# または
+LUNA_DESKTOP_SKIN=windows-95 luna-shell --desktop
+```
+
+スキン開発では、`skins/<name>/layout.html` をブラウザで開いて HTML/CSS 構造を反復し、同じファイルを Luna で使用してください。カスタムレイアウトは、ネイティブアクションが接続されたままになるよう、`luna-shell` が期待するシェル要素 ID を保持する必要があります。
+
+## 🏗️ アーキテクチャ
+
+```text
+Linux kernel
+   │
+   ├─ DRM/KMS + evdev/libinput
+   │
+   ▼
+┌───────────────────────────────┐
+│ luna-compositor               │
+│ Rust Wayland server           │
+│                               │
+│ software / DRI+GPU / WebGL    │
+└──────────────┬────────────────┘
+               │ Wayland
+       ┌───────┼───────────────┐
+       │       │               │
+       ▼       ▼               ▼
+  luna-shell  GTK/Qt apps  luna-clipboard
+  C + Luna UI
+       │
+       └─ HTML/CSS-style shell layouts + skins
+```
+
+Wayland は内部デスクトップバスです。通常の Luna セッションでは、Luna とネイティブ Wayland アプリケーションの間に Weston、Mutter、Xorg は必要ありません。
+
+### `wayland-server-rs`
+
+コンポジタは `libwayland-server` をラップするのではなく、Rust で直接 Wayland ワイヤプロトコルとオブジェクトモデルを実装しています。
+
+主な機能:
+
+- `wl_compositor`、`wl_subcompositor`、`wl_shm`、`wl_seat`、`wl_output`、データデバイスサポート
+- アプリケーションウィンドウ用の `xdg_wm_base`
+- `zwp_linux_dmabuf_v1` v4 / dmabuf フィードバックサポート
+- Luna シェル/ウィンドウ管理 IPC
+- evdev 入力と VT 処理
+- ソフトウェアコンポジション
+- DRM/KMS 出力
+- GPU アシストレンダリングパス
+- WebGL/WebSocket ストリーミングバックエンド
+
+### `wayland-client-rs`
+
+リポジトリには、`libwayland-client.so.0` 互換ライブラリをビルドし、互換クライアントヘッダを同梱する実験的な Rust 実装も含まれます。
+
+システムクライアント実装なしでデスクトップがどこまで行けるかをテストするのに有用ですが、**推奨される Luna シェルビルドには不要** です。
+
+ベンダー提供クライアント実装に対して明示的にシェルをビルド/実行するには:
+
+```bash
+make desktop LUNA_WAYLAND_CLIENT=vendored
+```
+
+## 🖥️ レンダリングとテストモード
+
+| コマンド | 目的 |
+|---|---|
+| `make desktop-system` | システム Wayland クライアントライブラリを使用したフル DRI デスクトップ。 |
+| `make desktop-soft-system` | システム Wayland クライアントライブラリを使用したソフトウェアバックエンドデスクトップ。 |
+| `make desktop LUNA_WAYLAND_CLIENT=vendored` | Rust クライアント実装をテストしながらの DRI デスクトップ。 |
+| `make demo` | コンポジタを起動し、サンプル GTK アプリを接続。コンポジタスクリーンショットを `/tmp/luna-compositor.ppm` に書き出します。 |
+| `make webgl` | サンプル GTK アプリをコンポジタのブラウザバックエンド経由でストリーミング。 |
+| `make webgl APP=gtk4-demo` | 別の GTK アプリケーションを WebGL バックエンド経由で実行。 |
+| `make rpm` | ソース tarball と RPM パッケージをビルド。 |
+
+### WebGL モード
+
+```bash
+make webgl
+# その後 http://localhost:8081/ を開く
+```
+
+またはヘルパーを直接使用:
+
+```bash
+./run-gtk
+./run-gtk gtk4-demo
+PORT=9090 ./run-gtk /usr/bin/your-gtk-app
+```
+
+ブラウザは WebSocket 経由で RGBA フレームを受信し、マウス、キーボード、ホイール入力をコンポジタに送り返します。
+
+## 📦 ソースからのインストール
+
+推奨されるシステム Wayland クライアントインストールの場合:
+
+```bash
+sudo make install-system PREFIX=/usr/local
+```
+
+ソースインストールは、専用の tty ベースセッション用に有効化できる `luna-desktop.service` ユニットも提供します:
+
+```bash
 sudo systemctl enable luna-desktop.service
 sudo systemctl start luna-desktop.service
 ```
 
-`getty@tty1` と競合するため、コンソール自動ログイン運用向け。既存の Xorg/Wayland セッションと併用する場合は `luna-session` を手動実行する。
-
-DRIセッションは現在、rootで実Linux VTから起動する。systemd unitは
-`LUNA_TTY=/dev/tty1` を設定し、終了時に元のCRTC・KD・VT状態を復元する。
-手動テストではSSHを確保した上で、起動元を明示する:
+Luna の代替 `libwayland-client` を Luna プレフィックスの一部として意図的にインストールしたい場合は:
 
 ```bash
-sudo LUNA_TTY=/dev/tty2 ./luna-session
+sudo make install PREFIX=/usr/local
 ```
 
-物理キーボードとマウスはevdevから取得する。`Ctrl+Alt+F1`〜`F12` で
-別VTへ切り替わり、復帰時にDRM masterと入力を再取得する。入力を無効化する
-場合は `LUNA_PHYSICAL_INPUT=0` を指定する。非root実行には将来
-libseat/logindによるデバイス権限委譲が必要であり、`input`/`video` グループを
-広く付与する運用は推奨しない。
+Berry Linux のパッケージングはディストリビューションの Wayland クライアントライブラリを使用し、オプションのキオスク風 systemd ユニットを有効化するのではなく、ディスプレイマネージャが `luna-session` を起動することを想定しています。
 
-画面生成に失敗するGPUでは、起動前からsoftware EGLを指定できる:
+## ⚠️ ネイティブ DRM/VT テストの注意点
 
-```bash
-LUNA_EGL_SOFTWARE=1 LUNA_USE_SYSTEM_WAYLAND=1 ./luna-session
-```
+DRI バックエンドはネストされたデスクトッププレビューではなく、実際のコンポジタパスです。DRM/KMS、アクティブな VT、物理入力デバイスの制御を取得できます。
 
-緊急時はSSHから `systemctl stop luna-desktop` を実行する。SysRqが有効なら
-`Alt+SysRq+r`、`Alt+SysRq+k` も利用できる。SIGKILLやカーネル停止では
-プロセス内の復元処理を実行できないため、通常はTERMで停止する。
+- 直接 DRI テストには実際の Linux VT を使用
+- `LUNA_TTY=/dev/ttyN` で VT を明示的に選択
+- 物理入力が有効な場合、`Ctrl+Alt+F1` … `F12` で VT を切り替え可能
+- Luna は通常シャットダウン時に DRM/KD/VT 状態を復元
+- `SIGKILL` より通常の TERM/セッションログアウトを優先（殺されたプロセスはクリーンアップパスを実行できないため）
+- 必要に応じて `LUNA_PHYSICAL_INPUT=0` で直接物理入力処理を無効化
+- 問題のある GPU セットアップでは `LUNA_EGL_SOFTWARE=1` でソフトウェア EGL を強制可能
 
-## ディレクトリ構成
+## 📁 リポジトリマップ
 
-```
-vespera/
-├── rust-toolchain.toml              # nightly (naked_functions のため)
-├── Cargo.toml                       # ワークスペース
-├── Makefile                         # make run / make server / make demo / make webgl
-├── run-gtk                          # WebGL ブラウザ表示スクリプト
+```text
+luna-shell/
+├── Cargo.toml
+├── rust-toolchain.toml
+├── Makefile
+├── luna-session
+├── luna-shell.spec
+├── run-gtk
 │
-├── wayland-client-rs/               # pure Rust libwayland-client 実装 (GTK にリンク)
-│   └── src/
-│       ├── lib.rs                   # #[unsafe(naked)] トランポリン
-│       ├── types.rs                 # wl_argument / wl_array / wl_list 等 C 互換型
-│       ├── interfaces.rs            # wl_display_interface 等 全静的データ
-│       ├── wire.rs                  # Wayland ワイヤプロトコル encode/decode
-│       ├── socket.rs                # Unix ソケット + SCM_RIGHTS fd 受け渡し
-│       ├── proxy.rs                 # WlProxy 構造体
-│       ├── display.rs               # WlDisplay (イベントキュー・roundtrip)
-│       └── ffi.rs                   # wl_display_*/wl_proxy_*/wl_list_* C 関数
+├── ui/
+│   ├── luna-shell.c              # ネイティブデスクトップシェル
+│   ├── luna-ui/                  # Luna UI git サブモジュール
+│   ├── luna-wifi.h
+│   ├── luna-ethernet.h
+│   ├── luna-bluetooth.h
+│   ├── luna-weather.h
+│   ├── luna-monitor.h
+│   └── protocols/
 │
-├── wayland-server-rs/               # pure Rust Wayland コンポジタ (libwayland-server 不使用)
-│   └── src/
-│       ├── lib.rs                   # run() エントリ・モジュール公開
-│       ├── bin/server.rs            # luna-compositor バイナリ (引数解釈)
-│       ├── types.rs                 # 所有型 Arg (C union を使わない安全な引数表現)
-│       ├── wire.rs                  # ワイヤ decode(リクエスト)/encode(イベント)
-│       ├── protocol.rs              # 全インターフェースのシグネチャ表 (純 Rust 定数)
-│       ├── socket.rs                # listen/accept + SCM_RIGHTS fd 受信
-│       ├── shm.rs                   # wl_shm プール mmap・ピクセル読み出し
-│       ├── object.rs                # Object/Role/Surface (= wl_resource 相当)
-│       ├── server.rs                # epoll ループ・global 管理・リクエスト処理・合成
-│       └── render/
-│           ├── mod.rs               # Backend trait + Framebuffer + アルファ合成
-│           ├── software.rs          # CPU 合成 → PPM / Linux fbdev
-│           ├── dri.rs               # DRM/KMS dumb buffer (feature = "dri", 生 ioctl)
-│           └── webgl_server.rs      # WebSocket 経由でブラウザ WebGL へ配信 (feature = "webgl")
+├── skins/                        # シェル + GTK + Qt テーマ
+├── docs/screenshots/             # 生成された実シェルキャプチャ
+├── clipboard/                    # クリップボードヘルパー
+├── tray/                         # トレイ / 通知ヘルパー
+├── systemd/                      # オプションのデスクトップサービス
+├── udev/                         # デバイスルール
+├── tools/                        # スクリーンショット/ギャラリーツール
 │
-└── hello-gtk/                       # サンプル GTK4 アプリ
+├── wayland-server-rs/            # Rust Wayland コンポジタ
+├── wayland-client-rs/            # オプションの Rust クライアントライブラリ
+└── hello-gtk/                    # サンプル GTK アプリケーション
 ```
 
-## クイックスタート
-
-### GTK4 アプリをブラウザで表示する (WebGL モード)
+## 🛠️ 便利なビルドターゲット
 
 ```bash
-cd vespera
-
-# hello-gtk をブラウザに表示 (ビルドも行う)
-./run-gtk
-
-# 任意の GTK4 アプリを表示
-./run-gtk gtk4-demo
-./run-gtk /usr/bin/some-gtk-app
-
-# ポート変更
-PORT=9090 ./run-gtk
-```
-
-ブラウザで `http://localhost:8081/` を開くと 1280×720 RGBA フレームが WebGL にリアルタイムストリーミングされる。キャンバスをクリックするとマウス・キーボード操作がアプリへ転送される。
-
-Makefile 経由でも起動できる:
-
-```bash
-make webgl                    # hello-gtk
-make webgl APP=gtk4-demo      # 任意のアプリ
-make webgl APP=/usr/bin/foo PORT=9090
-```
-
-### コンポジタ + GTK (ソフトウェアレンダリング)
-
-```bash
-make demo
-# 内部動作:
-#   luna-compositor --socket wayland-1 をバックグラウンド起動
-#   WAYLAND_DISPLAY=wayland-1 LD_PRELOAD=libwayland-client.so.0 で hello-gtk を接続
-#   合成結果は /tmp/luna-compositor.ppm に毎フレーム書き出される
-```
-
-### DRI (DRM/KMS) バックエンド
-
-```bash
-cargo build -p wayland-server-rs --features dri,gpu
-./target/debug/luna-compositor --backend dri  # KMS が使える Linux コンソール上で
-```
-
-### Rust 製 libwayland-client のみ差し替えてアプリを起動
-
-```bash
-make run
-# LD_LIBRARY_PATH + LD_PRELOAD で libwayland_client.so を優先ロードする
-```
-
-## ビルド
-
-```bash
-# 通常ビルド (software / dri バックエンド)
 cargo build
-
-# WebGL バックエンドを含むビルド
+cargo build -p wayland-server-rs --features dri,gpu
 cargo build --features webgl
 
-# make 経由
-make build          # software
-make build-webgl    # webgl
+make build
+make build-dri
+make build-webgl
+make build-shell
+make build-desktop-system
+make clean
 ```
 
-## 設計メモ
+## 🤝 貢献
 
-### wayland-server-rs
+Luna は意図的に実験的です。プロトコル互換性、ハードウェアサポート、シェルの磨き上げ、アクセシビリティ、パフォーマンス、ドキュメント、アプリケーション互換性、スキン品質の向上に寄与する貢献を歓迎します。
 
-- `libwayland-server` に一切依存せず、ワイヤプロトコルとオブジェクト管理を自前実装。互換性は「C ABI」ではなく「Wayland ワイヤプロトコル」レベルで担保する。
-- 公開 global: `wl_compositor` / `wl_subcompositor` / `wl_shm` / `wl_seat` / `wl_output` / `wl_data_device_manager` / `xdg_wm_base` / `zwp_linux_dmabuf_v1` (v4)。GTK4 の SHM 経路と dmabuf 経路の両方を満たす。
-- dmabuf (GTK4 が優先): `zwp_linux_dmabuf_v1` v4 + feedback を実装。`format_table` を memfd で提供し `main_device` を `/dev/dri/renderD128` から検出。LINEAR modifier の AR24/XR24 のみ広告 → GTK は CPU-mappable な linear dmabuf を確保するので EGL/GBM 無しで mmap して合成できる。
-- バックエンドは `software` / `dri` / `webgl_server` を差し替え可能 (`Backend` trait)。
+シェルスキンを変更する際は、次のコマンドでスクリーンショットギャラリーを再現可能に保ってください:
 
-### wayland-client-rs
+```bash
+./tools/capture-shell-skins.sh
+```
 
-- `libwayland-client.so.0` という SONAME を持つ cdylib を生成。
-- `include/` に libwayland 互換ヘッダをベンダー済み。C アプリは `libwayland-dev` 不要で、`luna-wayland-client.mk` または `wayland-client.pc` 経由でコンパイル／リンクする。
-- `wl_proxy_marshal_flags`（可変引数）は x86_64 System V ABI の `#[unsafe(naked)]` アセンブリトランポリンで実装。
-- `*const WlInterface` の静的配列には `Spa<N>` ラッパーで `Sync` を実装。
-- 79 シンボルを `.dynsym` にエクスポート。
+## 📄 ライセンス
 
-### WebGL バックエンド (feature = "webgl")
+Luna Desktop は **Mozilla Public License 2.0 (MPL-2.0)** の下でリリースされています。[`LICENSE`](LICENSE) を参照してください。
 
-- バックグラウンドスレッドが TCP ポートを listen。
-- `GET /` → WebGL ビューア HTML を返す。
-- `GET /ws` (Upgrade: websocket) → WebSocket で RGBA フレームをストリーミング。
-- ブラウザから送られたマウス/キーボードイベントを WebSocket で受信し、Wayland 入力イベントとして GTK アプリへ転送する。
-- 入力プロトコル (テキストメッセージ):
-  - `m X Y` — マウス移動 (0.0〜1.0 正規化座標)
-  - `b BTN P` — ボタン (Linux BTN_* コード, P=1押下/0解放)
-  - `a AXIS V` — ホイール (axis=0縦 1横)
-  - `k CODE P` — キー (evdev スキャンコード, P=1押下/0解放)
+## ❤️ Luna をサポートする
+
+低レベルの Linux デスクトップ実験、カスタムデスクトップシェル、Wayland 内部、あるいは楽しすぎるレトロスキンを楽しむ方は、[GitHub Sponsors](https://github.com/sponsors/yui0) を通じて継続的な開発を支援できます。
+
+---
+
+<div align="center">
+
+**ワイヤプロトコルからピクセルまで、デスクトップを構築する。** 🦀🌙
+
+</div>

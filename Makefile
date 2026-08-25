@@ -41,7 +41,7 @@ RPMBUILD_FLAGS ?= $(shell rpm -q rust cargo >/dev/null 2>&1 || echo --nodeps)
 .PHONY: all build build-dri build-webgl build-desktop build-desktop-system build-shell \
         symlinks symlinks-system run server demo webgl run-gtk desktop desktop-system \
         luna-session install install-system stop clean dist rpm srpm luna-shell \
-        luna-clipboard luna-tray-notify
+        luna-clipboard luna-tray-notify luna-wifi-helper
 
 all: build symlinks
 
@@ -62,7 +62,7 @@ build-desktop: build build-dri build-shell symlinks
 build-desktop-system:
 	$(MAKE) build-dri build-shell symlinks-system LUNA_WAYLAND_CLIENT=system
 
-build-shell: luna-shell luna-clipboard luna-tray-notify
+build-shell: luna-shell luna-clipboard luna-tray-notify luna-wifi-helper
 
 # Symlink libwayland-client.so.0 (SONAME expected by GTK4)
 symlinks:
@@ -163,6 +163,9 @@ luna-tray-notify: tray/luna-tray-notify.c
 	@echo "→ Building luna-tray-notify (XEmbed tray notification service)"
 	gcc -Os -Wall -Wextra $$(pkg-config --cflags dbus-1) -o luna-tray-notify tray/luna-tray-notify.c -lX11 $$(pkg-config --libs dbus-1)
 
+luna-wifi-helper: helpers/luna-wifi-helper.c
+	gcc -Os -Wall -Wextra -o luna-wifi-helper helpers/luna-wifi-helper.c
+
 # Run app with Rust libwayland-client preloaded
 run: build symlinks
 	LD_LIBRARY_PATH=$(PWD)/$(TARGET):$$LD_LIBRARY_PATH \
@@ -262,6 +265,7 @@ install: build-desktop
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
+	install -m 4755 luna-wifi-helper $(PREFIX)/bin/luna-wifi-helper
 	install -D -m 644 tray/luna-tray-notify.desktop $(PREFIX)/share/applications/luna-tray-notify.desktop
 	install -m 755 $(TARGET)/libwayland_client.so $(LUNA_LIB)/
 	ln -sf libwayland_client.so $(LUNA_LIB)/libwayland-client.so.0
@@ -318,6 +322,7 @@ install-system: build-desktop-system
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
+	install -m 4755 luna-wifi-helper $(PREFIX)/bin/luna-wifi-helper
 	install -D -m 644 tray/luna-tray-notify.desktop $(PREFIX)/share/applications/luna-tray-notify.desktop
 	install -m 644 $(DEFAULT_SKIN_DIR)/layout.html $(PREFIX)/share/luna-desktop/shell/luna-shell.html
 	install -m 644 $(DEFAULT_SKIN_DIR)/style.css $(PREFIX)/share/luna-desktop/shell/luna-shell.css
@@ -351,7 +356,7 @@ stop:
 
 clean:
 	cargo clean
-	rm -f luna-shell luna-clipboard luna-tray-notify \
+	rm -f luna-shell luna-clipboard luna-tray-notify luna-wifi-helper \
 	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h \
 	  $(UI_DIR)/luna-shell-widgets.css.h $(UI_DIR)/luna-shell-widgets.html.h
 	rm -rf $(RPMBUILD_DIR) $(RPM_DIST)

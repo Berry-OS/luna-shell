@@ -425,11 +425,7 @@ impl DriBackend {
     let vt = match VtSession::open(tty) {
       Ok(vt) => Some(vt),
       Err(e) => {
-        eprintln!(
-          "[luna-compositor] vt: {} ({}); continuing without VT control",
-          tty.unwrap_or("/dev/tty"),
-          e
-        );
+        eprintln!("[luna-compositor] vt: {} ({}); continuing without VT control", tty.unwrap_or("/dev/tty"), e);
         None
       }
     };
@@ -446,10 +442,7 @@ impl DriBackend {
         }
       }
       if !master {
-        eprintln!(
-          "[luna-compositor] dri: failed to acquire DRM master: {}",
-          std::io::Error::last_os_error()
-        );
+        eprintln!("[luna-compositor] dri: failed to acquire DRM master: {}", std::io::Error::last_os_error());
         unsafe { libc::close(fd) };
         return None;
       }
@@ -467,10 +460,7 @@ impl DriBackend {
     };
     match unsafe { Self::setup(fd, vt, input) } {
       Some(b) => {
-        eprintln!(
-          "[luna-compositor] dri: {} ready ({}x{}, pitch={}, double-buf)",
-          path, b.width, b.height, b.bufs[0].pitch
-        );
+        eprintln!("[luna-compositor] dri: {} ready ({}x{}, pitch={}, double-buf)", path, b.width, b.height, b.bufs[0].pitch);
         Some(b)
       }
       None => {
@@ -603,14 +593,7 @@ impl DriBackend {
           ok = false;
           break;
         }
-        let ptr = mmap(
-          std::ptr::null_mut(),
-          create.size as usize,
-          PROT_READ | PROT_WRITE,
-          MAP_SHARED,
-          fd,
-          mapreq.offset as i64,
-        );
+        let ptr = mmap(std::ptr::null_mut(), create.size as usize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mapreq.offset as i64);
         if ptr == MAP_FAILED {
           remove_fb(fd, fbcmd.fb_id);
           destroy_dumb(fd, create.handle);
@@ -672,9 +655,7 @@ impl DriBackend {
         flip_started: std::time::Instant::now(),
         use_page_flip: true,
         front_present_pending: false,
-        present_trace: std::env::var("LUNA_PRESENT_TRACE")
-          .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off"))
-          .unwrap_or(false),
+        present_trace: std::env::var("LUNA_PRESENT_TRACE").map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false") && !v.eq_ignore_ascii_case("off")).unwrap_or(false),
         retire: Vec::new(),
         shadow: vec![0; (w as usize) * (h as usize)],
         row_span_prev: vec![(0, w); h as usize],
@@ -694,9 +675,7 @@ impl Backend for DriBackend {
 
   fn refresh_millihz(&self) -> u32 { mode_refresh_millihz(&self.mode) }
 
-  fn present(&mut self, fb: &Framebuffer) {
-    self.present_damage(fb, fb.full_rect());
-  }
+  fn present(&mut self, fb: &Framebuffer) { self.present_damage(fb, fb.full_rect()); }
 
   fn present_damage(&mut self, fb: &Framebuffer, damage: super::Rect) {
     if !self.active {
@@ -765,20 +744,20 @@ impl Backend for DriBackend {
     true
   }
 
-  fn present_dmabufs(
-    &mut self,
-    surfaces: &[(i32, i32, ShmBuffer)],
-    extra_surface: Option<(i32, i32, &ShmBuffer)>,
-    bitmap: Option<super::GpuBitmap<'_>>,
-  ) -> bool {
-    if !self.use_page_flip { return false; }
+  fn present_dmabufs(&mut self, surfaces: &[(i32, i32, ShmBuffer)], extra_surface: Option<(i32, i32, &ShmBuffer)>, bitmap: Option<super::GpuBitmap<'_>>) -> bool {
+    if !self.use_page_flip {
+      return false;
+    }
     #[cfg(feature = "gpu")]
     {
       let Some(output) = self.gpu.as_mut().and_then(|g| g.render_dmabufs(surfaces, extra_surface, bitmap)) else { return false };
       return self.commit_gpu_output(output.1, output.2);
     }
     #[cfg(not(feature = "gpu"))]
-    { let _ = (surfaces, extra_surface, bitmap); false }
+    {
+      let _ = (surfaces, extra_surface, bitmap);
+      false
+    }
   }
 
   fn can_gpu_compose(&self) -> bool {
@@ -831,23 +810,12 @@ impl Backend for DriBackend {
       let mut off = 0usize;
       while off + 8 <= n {
         let ty = u32::from_ne_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
-        let len =
-          u32::from_ne_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]) as usize;
+        let len = u32::from_ne_bytes([buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7]]) as usize;
         if len < 8 || off + len > n {
           break;
         }
-        let user_data = if len >= 16 {
-          u64::from_ne_bytes([
-            buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11],
-            buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15],
-          ])
-        } else {
-          0
-        };
-        if ty == DRM_EVENT_FLIP_COMPLETE
-          && self.flip_pending
-          && user_data == self.pending_fb_id as u64
-        {
+        let user_data = if len >= 16 { u64::from_ne_bytes([buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11], buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15]]) } else { 0 };
+        if ty == DRM_EVENT_FLIP_COMPLETE && self.flip_pending && user_data == self.pending_fb_id as u64 {
           completed = Some(self.complete_flip(false));
         }
         off += len;
@@ -859,9 +827,7 @@ impl Backend for DriBackend {
     completed
   }
 
-  fn present_busy(&self) -> bool {
-    self.flip_pending || self.front_present_pending
-  }
+  fn present_busy(&self) -> bool { self.flip_pending || self.front_present_pending }
 
   fn poll_presentation(&mut self) -> Option<PresentationFeedback> {
     if self.front_present_pending {
@@ -871,7 +837,9 @@ impl Backend for DriBackend {
         return None;
       }
       self.front_present_pending = false;
-      return Some(PresentationFeedback { timestamp_ms: monotonic_millis() });
+      return Some(PresentationFeedback {
+        timestamp_ms: monotonic_millis(),
+      });
     }
     if !self.flip_pending {
       return None;
@@ -975,15 +943,12 @@ impl DriBackend {
     self.release_retired();
 
     if self.present_trace {
-      eprintln!(
-        "[luna-present] complete source={} fb={} latency={:.2}ms",
-        if watchdog { "watchdog/GETCRTC" } else { "drm-event" },
-        fb_id,
-        elapsed_ms,
-      );
+      eprintln!("[luna-present] complete source={} fb={} latency={:.2}ms", if watchdog { "watchdog/GETCRTC" } else { "drm-event" }, fb_id, elapsed_ms,);
     }
 
-    PresentationFeedback { timestamp_ms: monotonic_millis() }
+    PresentationFeedback {
+      timestamp_ms: monotonic_millis(),
+    }
   }
 
   #[cfg(feature = "gpu")]
@@ -995,24 +960,43 @@ impl DriBackend {
 
   #[cfg(feature = "gpu")]
   fn commit_gpu_output(&mut self, handle: u32, stride: u32) -> bool {
-    let mut cmd = ModeFbCmd { fb_id: 0, width: self.width, height: self.height,
-      pitch: stride, bpp: 32, depth: 24, handle };
+    let mut cmd = ModeFbCmd {
+      fb_id: 0,
+      width: self.width,
+      height: self.height,
+      pitch: stride,
+      bpp: 32,
+      depth: 24,
+      handle,
+    };
     if unsafe { ioctl(self.fd, iowr::<ModeFbCmd>(0xAE), &mut cmd) } != 0 {
-      if let Some(g) = self.gpu.as_mut() { g.discard(); }
+      if let Some(g) = self.gpu.as_mut() {
+        g.discard();
+      }
       return false;
     }
     if !unsafe { self.flip_fb(cmd.fb_id) } {
       unsafe { remove_fb(self.fd, cmd.fb_id) };
-      if let Some(g) = self.gpu.as_mut() { g.discard(); }
+      if let Some(g) = self.gpu.as_mut() {
+        g.discard();
+      }
       return false;
     }
     let old_fb = std::mem::replace(&mut self.gpu_fb, cmd.fb_id);
-    if let Some(g) = self.gpu.as_mut() { g.commit(); }
+    if let Some(g) = self.gpu.as_mut() {
+      g.commit();
+    }
     // GPU composition bypasses the dumb buffers entirely.
     self.invalidate_shadow();
-    if old_fb != 0 { self.retire.push(Retired::Fb(old_fb)); }
-    if let Some(old) = self.direct.take() { self.retire.push(Retired::Scanout(old)); }
-    if !self.flip_pending { self.release_retired(); }
+    if old_fb != 0 {
+      self.retire.push(Retired::Fb(old_fb));
+    }
+    if let Some(old) = self.direct.take() {
+      self.retire.push(Retired::Scanout(old));
+    }
+    if !self.flip_pending {
+      self.release_retired();
+    }
     true
   }
 
@@ -1030,9 +1014,7 @@ impl DriBackend {
     self.set_crtc_fb(self.bufs[self.front].fb_id)
   }
 
-  unsafe fn flip_to(&mut self, idx: usize) -> bool {
-    self.flip_fb(self.bufs[idx].fb_id)
-  }
+  unsafe fn flip_to(&mut self, idx: usize) -> bool { self.flip_fb(self.bufs[idx].fb_id) }
 
   /// Hand `fb_id` to the CRTC.  Prefers an asynchronous page flip — SetCrtc
   /// runs the full modeset path and blocks until the change lands, which on
@@ -1058,11 +1040,7 @@ impl DriBackend {
         self.flip_started = std::time::Instant::now();
         if self.present_trace {
           let refresh_millihz = mode_refresh_millihz(&self.mode);
-          eprintln!(
-            "[luna-present] submit fb={} refresh={:.3}Hz",
-            fb_id,
-            refresh_millihz as f64 / 1000.0,
-          );
+          eprintln!("[luna-present] submit fb={} refresh={:.3}Hz", fb_id, refresh_millihz as f64 / 1000.0,);
         }
         return true;
       }
@@ -1073,10 +1051,7 @@ impl DriBackend {
       // SetCrtc, so give up on page flipping only for the scanout pair.
       let own = fb_id == self.bufs[0].fb_id || fb_id == self.bufs[1].fb_id;
       if own && err != libc::EBUSY {
-        eprintln!(
-          "[luna-compositor] dri: page flip unavailable ({}), switching to paced front-buffer updates",
-          std::io::Error::from_raw_os_error(err)
-        );
+        eprintln!("[luna-compositor] dri: page flip unavailable ({}), switching to paced front-buffer updates", std::io::Error::from_raw_os_error(err));
         self.use_page_flip = false;
       }
     }
@@ -1154,9 +1129,13 @@ impl DriBackend {
         if old != new {
           if trim_edges {
             let mut lo = 0usize;
-            while old[lo] == new[lo] { lo += 1; }
+            while old[lo] == new[lo] {
+              lo += 1;
+            }
             let mut hi = new.len();
-            while old[hi - 1] == new[hi - 1] { hi -= 1; }
+            while old[hi - 1] == new[hi - 1] {
+              hi -= 1;
+            }
             old[lo..hi].copy_from_slice(&new[lo..hi]);
             span = ((x0 + lo) as u32, (x0 + hi) as u32);
           } else {
@@ -1187,11 +1166,7 @@ impl DriBackend {
       }
       if x1 > x0 {
         unsafe {
-          std::ptr::copy_nonoverlapping(
-            src.as_ptr().add(x0 as usize),
-            dst_base.add(y * pitch + x0 as usize * 4) as *mut u32,
-            (x1 - x0) as usize,
-          );
+          std::ptr::copy_nonoverlapping(src.as_ptr().add(x0 as usize), dst_base.add(y * pitch + x0 as usize * 4) as *mut u32, (x1 - x0) as usize);
         }
         wrote = true;
       }
@@ -1277,7 +1252,11 @@ fn import_key(fd: RawFd, buf: &ShmBuffer) -> Option<ImportKey> {
 }
 
 unsafe fn import_scanout(card_fd: RawFd, dma_fd: RawFd, buf: &ShmBuffer, key: ImportKey) -> Option<ImportedScanout> {
-  let mut prime = PrimeHandle { handle: 0, flags: 0, fd: dma_fd };
+  let mut prime = PrimeHandle {
+    handle: 0,
+    flags: 0,
+    fd: dma_fd,
+  };
   if ioctl(card_fd, iowr::<PrimeHandle>(0x2d), &mut prime) != 0 {
     return None;
   }
@@ -1302,11 +1281,12 @@ unsafe fn import_scanout(card_fd: RawFd, dma_fd: RawFd, buf: &ShmBuffer, key: Im
     close_gem(card_fd, prime.handle);
     return None;
   }
-  eprintln!(
-    "[luna-compositor] dri: direct scanout enabled ({}x{}, pitch={})",
-    key.width, key.height, key.stride
-  );
-  Some(ImportedScanout { key, fb_id: fb.fb_id, handle: prime.handle })
+  eprintln!("[luna-compositor] dri: direct scanout enabled ({}x{}, pitch={})", key.width, key.height, key.stride);
+  Some(ImportedScanout {
+    key,
+    fb_id: fb.fb_id,
+    handle: prime.handle,
+  })
 }
 
 #[cfg(test)]

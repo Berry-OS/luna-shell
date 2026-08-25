@@ -130,6 +130,7 @@ typedef struct LunaSniWorker {
     LunaSniSnapshot snapshot;
     LunaSniLive items[LUNA_SNI_MAX_ITEMS];
     int item_count;
+    int owns_watcher;
     DBusConnection* bus;
 } LunaSniWorker;
 
@@ -431,7 +432,7 @@ static void luna_sni_add_item(const char* service, const char* path) {
     luna_sni_refresh_item(&g_luna_sni.items[idx]);
     char key[192];
     luna_sni_item_key(&g_luna_sni.items[idx], key, sizeof(key));
-    luna_sni_emit_registered(key);
+    if (g_luna_sni.owns_watcher) luna_sni_emit_registered(key);
     luna_sni_publish();
 }
 
@@ -445,7 +446,7 @@ static void luna_sni_parse_register(const char* sender, const char* arg,
         return;
     }
     const char* slash = strchr(arg, '/');
-    if (slash && arg[0] == ':') {
+    if (slash && slash != arg) {
         size_t slen = (size_t)(slash - arg);
         if (slen >= sn) slen = sn - 1;
         memcpy(service, arg, slen);
@@ -595,6 +596,40 @@ static DBusHandlerResult luna_sni_filter(DBusConnection* conn, DBusMessage* msg,
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
 
+    /* When another desktop component already owns the watcher name, Luna is
+     * a StatusNotifierHost client.  Mirror that watcher's registration
+     * signals instead of giving up the tray entirely. */
+    if (!g_luna_sni.owns_watcher &&
+        dbus_message_is_signal(msg, LUNA_SNI_WATCHER_IFACE,
+                               "StatusNotifierItemRegistered")) {
+        const char* key = NULL;
+        if (dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &key,
+                                  DBUS_TYPE_INVALID) && key && *key) {
+            char service[96], path[96];
+            luna_sni_parse_register(NULL, key, service, sizeof(service),
+                                    path, sizeof(path));
+            luna_sni_add_item(service, path);
+        }
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
+    if (!g_luna_sni.owns_watcher &&
+        dbus_message_is_signal(msg, LUNA_SNI_WATCHER_IFACE,
+                               "StatusNotifierItemUnregistered")) {
+        const char* key = NULL;
+        if (dbus_message_get_args(msg, NULL, DBUS_TYPE_STRING, &key,
+                                  DBUS_TYPE_INVALID) && key && *key) {
+            char service[96], path[96];
+            luna_sni_parse_register(NULL, key, service, sizeof(service),
+                                    path, sizeof(path));
+            int idx = luna_sni_find(service, path);
+            if (idx >= 0) {
+                luna_sni_remove_at(idx);
+                luna_sni_publish();
+            }
+        }
+        return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+    }
+
     if (dbus_message_has_interface(msg, LUNA_SNI_ITEM_IFACE) &&
         dbus_message_get_type(msg) == DBUS_MESSAGE_TYPE_SIGNAL) {
         const char* sender = dbus_message_get_sender(msg);
@@ -613,6 +648,58 @@ static DBusHandlerResult luna_sni_filter(DBusConnection* conn, DBusMessage* msg,
         return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
     }
     return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+static void luna_sni_join_existing_watcher(void) {
+    const char* unique = dbus_bus_get_unique_name(g_luna_sni.bus);
+    DBusMessage* call = dbus_message_new_method_call(
+        LUNA_SNI_WATCHER_NAME, LUNA_SNI_WATCHER_PATH,
+        LUNA_SNI_WATCHER_IFACE, "RegisterStatusNotifierHost");
+    if (call) {
+        const char* host = unique ? unique : "";
+        dbus_message_append_args(call, DBUS_TYPE_STRING, &host,
+                                 DBUS_TYPE_INVALID);
+        DBusMessage* reply = dbus_connection_send_with_reply_and_block(
+            g_luna_sni.bus, call, 2000, NULL);
+        if (reply) dbus_message_unref(reply);
+        dbus_message_unref(call);
+    }
+
+    call = dbus_message_new_method_call(
+        LUNA_SNI_WATCHER_NAME, LUNA_SNI_WATCHER_PATH,
+        "org.freedesktop.DBus.Properties", "Get");
+    if (!call) return;
+    const char* iface = LUNA_SNI_WATCHER_IFACE;
+    const char* prop = "RegisteredStatusNotifierItems";
+    dbus_message_append_args(call, DBUS_TYPE_STRING, &iface,
+                             DBUS_TYPE_STRING, &prop, DBUS_TYPE_INVALID);
+    DBusMessage* reply = dbus_connection_send_with_reply_and_block(
+        g_luna_sni.bus, call, 2000, NULL);
+    dbus_message_unref(call);
+    if (!reply) return;
+
+    DBusMessageIter it;
+    if (dbus_message_iter_init(reply, &it) &&
+        dbus_message_iter_get_arg_type(&it) == DBUS_TYPE_VARIANT) {
+        DBusMessageIter value;
+        dbus_message_iter_recurse(&it, &value);
+        if (dbus_message_iter_get_arg_type(&value) == DBUS_TYPE_ARRAY) {
+            DBusMessageIter items;
+            dbus_message_iter_recurse(&value, &items);
+            while (dbus_message_iter_get_arg_type(&items) == DBUS_TYPE_STRING) {
+                const char* key = NULL;
+                dbus_message_iter_get_basic(&items, &key);
+                if (key && *key) {
+                    char service[96], path[96];
+                    luna_sni_parse_register(NULL, key, service, sizeof(service),
+                                            path, sizeof(path));
+                    luna_sni_add_item(service, path);
+                }
+                dbus_message_iter_next(&items);
+            }
+        }
+    }
+    dbus_message_unref(reply);
 }
 
 static void luna_sni_call_item(const LunaSniCommand* cmd) {
@@ -645,21 +732,30 @@ static void* luna_sni_thread(void* arg) {
     dbus_connection_set_exit_on_disconnect(g_luna_sni.bus, FALSE);
     int req = dbus_bus_request_name(g_luna_sni.bus, LUNA_SNI_WATCHER_NAME,
                                     DBUS_NAME_FLAG_DO_NOT_QUEUE, &err);
+    g_luna_sni.owns_watcher = req == DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER;
+    dbus_connection_add_filter(g_luna_sni.bus, luna_sni_filter, NULL, NULL);
+    dbus_bus_add_match(g_luna_sni.bus,
+        "type='signal',interface='org.freedesktop.DBus',member='NameOwnerChanged'", &err);
+    dbus_bus_add_match(g_luna_sni.bus,
+        "type='signal',interface='org.kde.StatusNotifierItem'", &err);
     if (req != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER) {
-        fprintf(stderr, "[luna-sni] StatusNotifierWatcher already owned\n");
+        dbus_bus_add_match(g_luna_sni.bus,
+            "type='signal',interface='org.kde.StatusNotifierWatcher'", &err);
         dbus_error_free(&err);
+        luna_sni_join_existing_watcher();
+        pthread_mutex_lock(&g_luna_sni.mutex);
+        g_luna_sni.snapshot.available = 1;
+        g_luna_sni.snapshot.generation++;
+        pthread_mutex_unlock(&g_luna_sni.mutex);
+        luna_sni_notify();
+        fprintf(stderr, "[luna-sni] joined existing StatusNotifierWatcher\n");
     } else {
-        dbus_connection_add_filter(g_luna_sni.bus, luna_sni_filter, NULL, NULL);
         dbus_bus_add_match(g_luna_sni.bus,
             "type='method_call',interface='org.kde.StatusNotifierWatcher'", &err);
         dbus_bus_add_match(g_luna_sni.bus,
             "type='method_call',interface='org.freedesktop.DBus.Properties',path='/StatusNotifierWatcher'", &err);
         dbus_bus_add_match(g_luna_sni.bus,
             "type='method_call',interface='org.freedesktop.DBus.Introspectable',path='/StatusNotifierWatcher'", &err);
-        dbus_bus_add_match(g_luna_sni.bus,
-            "type='signal',interface='org.freedesktop.DBus',member='NameOwnerChanged'", &err);
-        dbus_bus_add_match(g_luna_sni.bus,
-            "type='signal',interface='org.kde.StatusNotifierItem'", &err);
         dbus_error_free(&err);
         DBusMessage* host_sig = dbus_message_new_signal(
             LUNA_SNI_WATCHER_PATH, LUNA_SNI_WATCHER_IFACE, "StatusNotifierHostRegistered");

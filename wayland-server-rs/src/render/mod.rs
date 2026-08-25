@@ -395,6 +395,9 @@ mod tests {
 pub enum InputEvent {
     PointerMotion { x: f32, y: f32 },
     PointerRelative { dx: f32, dy: f32 },
+    /// Relative motion expressed as a fraction of the output size. Absolute
+    /// evdev touchpads use this so speed is independent of output DPI.
+    PointerRelativeNormalized { dx: f32, dy: f32 },
     PointerButton { button: u32, pressed: bool },
     PointerAxis { axis: u32, value: f32 },
     Key { keycode: u32, pressed: bool },

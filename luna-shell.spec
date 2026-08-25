@@ -69,6 +69,7 @@ install -Dpm0755 target/release/luna-compositor \
 install -Dpm0755 luna-shell %{buildroot}%{_bindir}/luna-shell
 install -Dpm0755 luna-clipboard %{buildroot}%{_bindir}/luna-clipboard
 install -Dpm0755 luna-tray-notify %{buildroot}%{_bindir}/luna-tray-notify
+install -Dpm4755 luna-wifi-helper %{buildroot}%{_bindir}/luna-wifi-helper
 
 install -Dpm0644 tray/luna-tray-notify.desktop \
     %{buildroot}%{_datadir}/applications/luna-tray-notify.desktop
@@ -149,6 +150,7 @@ fi
 %{_bindir}/luna-shell
 %{_bindir}/luna-clipboard
 %{_bindir}/luna-tray-notify
+%attr(4755,root,root) %{_bindir}/luna-wifi-helper
 %{_datadir}/applications/luna-tray-notify.desktop
 %{_datadir}/fonts/luna/
 %{_datadir}/luna-desktop/

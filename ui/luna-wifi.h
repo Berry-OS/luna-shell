@@ -83,8 +83,10 @@ void luna_wifi_reaper_unlock(void);
 #ifdef LUNA_WIFI_IMPLEMENTATION
 
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -92,9 +94,13 @@ void luna_wifi_reaper_unlock(void);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <net/if.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -136,6 +142,8 @@ typedef struct LunaWifiWorker {
 } LunaWifiWorker;
 
 static LunaWifiWorker g_luna_wifi;
+static char g_luna_wifi_operation_error[192];
+static int luna_wifi_write_all(int fd, const char* text);
 
 static void luna_wifi_notify(void) {
     LunaWifiNotifyFn fn;
@@ -188,6 +196,81 @@ static int luna_wifi_run_wait(const char* const argv[]) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+static int luna_wifi_is_wireless_iface(const char* name) {
+    char path[PATH_MAX];
+    struct stat st;
+    if (!name || !*name || strchr(name, '/')) return 0;
+    int n = snprintf(path, sizeof(path), "/sys/class/net/%s/wireless", name);
+    if (n > 0 && (size_t)n < sizeof(path) && stat(path, &st) == 0)
+        return 1;
+    /* cfg80211 drivers do not all create the legacy `wireless` directory.
+     * mwifiex on Surface Pro 3 commonly exposes only this wiphy symlink. */
+    n = snprintf(path, sizeof(path), "/sys/class/net/%s/phy80211", name);
+    return n > 0 && (size_t)n < sizeof(path) && lstat(path, &st) == 0;
+}
+
+typedef int (*LunaWifiIfaceFn)(const char* name, void* user);
+
+static int luna_wifi_each_iface(LunaWifiIfaceFn fn, void* user) {
+    DIR* dir = opendir("/sys/class/net");
+    if (!dir) return 0;
+    int count = 0;
+    struct dirent* de;
+    while ((de = readdir(dir)) != NULL) {
+        if (!luna_wifi_is_wireless_iface(de->d_name)) continue;
+        count++;
+        if (fn && !fn(de->d_name, user)) break;
+    }
+    closedir(dir);
+    return count;
+}
+
+static int luna_wifi_set_iface_up(const char* name, void* user) {
+    (void)user;
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return 1;
+    struct ifreq req;
+    memset(&req, 0, sizeof(req));
+    snprintf(req.ifr_name, sizeof(req.ifr_name), "%s", name);
+    if (ioctl(fd, SIOCGIFFLAGS, &req) == 0 && !(req.ifr_flags & IFF_UP)) {
+        req.ifr_flags |= IFF_UP;
+        if (ioctl(fd, SIOCSIFFLAGS, &req) != 0) {
+            fprintf(stderr, "[luna-shell/wifi] cannot bring up %s: %s\n",
+                    name, strerror(errno));
+            if (luna_wifi_command_available("luna-wifi-helper")) {
+                const char* const argv[] = { "luna-wifi-helper", "up", name, NULL };
+                (void)luna_wifi_run_wait(argv);
+            }
+        }
+    }
+    close(fd);
+    return 1;
+}
+
+static void luna_wifi_prepare_interfaces(void) {
+    /* rfkill and IFF_UP are separate kernel states.  ConnMan occasionally
+     * clears only rfkill for mwifiex, leaving mlan0 down and unscannable. */
+    if (luna_wifi_command_available("rfkill")) {
+        const char* const argv[] = { "rfkill", "unblock", "wifi", NULL };
+        (void)luna_wifi_run_wait(argv);
+    }
+    (void)luna_wifi_each_iface(luna_wifi_set_iface_up, NULL);
+}
+
+static int luna_wifi_iw_scan_iface(const char* name, void* user) {
+    int* success = user;
+    const char* const argv[] = { "luna-wifi-helper", "scan", name, NULL };
+    if (luna_wifi_run_wait(argv)) *success = 1;
+    return 1;
+}
+
+static int luna_wifi_trigger_iw_scan(void) {
+    if (!luna_wifi_command_available("luna-wifi-helper")) return 0;
+    int success = 0;
+    (void)luna_wifi_each_iface(luna_wifi_iw_scan_iface, &success);
+    return success;
+}
+
 static int luna_wifi_powered_connman(void) {
     int enabled = 0;
     FILE* f = popen("connmanctl technologies 2>/dev/null", "r");
@@ -195,13 +278,21 @@ static int luna_wifi_powered_connman(void) {
     char line[256];
     int in_wifi = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '/') {
-            in_wifi = strstr(line, "technology/wifi") != NULL;
+        /* connmanctl indents both the object path and its properties.  Testing
+         * line[0] made every normal `technologies` response look powered off. */
+        char* p = line;
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (*p == '/') {
+            in_wifi = strstr(p, "technology/wifi") != NULL;
             continue;
         }
-        if (in_wifi && strstr(line, "Powered") && strstr(line, "True")) {
-            enabled = 1;
-            break;
+        if (in_wifi && !strncmp(p, "Powered", 7)) {
+            char* value = strchr(p, '=');
+            if (value) {
+                value++;
+                while (*value && isspace((unsigned char)*value)) value++;
+                enabled = !strncasecmp(value, "true", 4) || *value == '1';
+            }
         }
     }
     (void)pclose(f);
@@ -216,6 +307,84 @@ static char* luna_wifi_find_last_token(char* text, const char* needle) {
         p++;
     }
     return last;
+}
+
+static int luna_wifi_copy_first_iface(const char* name, void* user) {
+    snprintf(user, IFNAMSIZ, "%s", name);
+    return 0;
+}
+
+static void luna_wifi_add_iw_network(LunaWifiSnapshot* state, const char* iface,
+                                     const char* ssid, int signal, int secure) {
+    if (!state || !ssid || !*ssid || state->count >= LUNA_WIFI_MAX_NETWORKS) return;
+    LunaWifiNetwork* n = &state->networks[state->count++];
+    snprintf(n->name, sizeof(n->name), "%s", ssid);
+    n->secure = secure;
+    n->signal = signal;
+    (void)iface;
+    /* This BSS does not necessarily exist as a ConnMan service object.  Never
+     * invent an object path: route it explicitly to the supplicant fallback. */
+    snprintf(n->id, sizeof(n->id), "iw:%s", ssid);
+}
+
+static int luna_wifi_helper_connect(const char* ssid, const char* passphrase) {
+    char iface[IFNAMSIZ] = {0};
+    (void)luna_wifi_each_iface(luna_wifi_copy_first_iface, iface);
+    if (!iface[0] || !ssid || !*ssid || !luna_wifi_command_available("luna-wifi-helper")) return 0;
+    int pipefd[2];
+    if (pipe2(pipefd, O_CLOEXEC) != 0) return 0;
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, pipefd[0], STDIN_FILENO);
+    posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+    char* argv[] = { (char*)"luna-wifi-helper", (char*)"connect", iface, (char*)ssid, NULL };
+    pid_t pid = -1;
+    int rc = posix_spawnp(&pid, argv[0], &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(pipefd[0]);
+    if (rc != 0) { close(pipefd[1]); return 0; }
+    if (passphrase) (void)luna_wifi_write_all(pipefd[1], passphrase);
+    (void)luna_wifi_write_all(pipefd[1], "\n");
+    close(pipefd[1]);
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) if (errno != EINTR) return 0;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static void luna_wifi_refresh_iw_cache(LunaWifiSnapshot* state) {
+    if (!state || !luna_wifi_command_available("luna-wifi-helper")) return;
+    char iface[IFNAMSIZ] = {0};
+    (void)luna_wifi_each_iface(luna_wifi_copy_first_iface, iface);
+    if (!iface[0]) return;
+    char command[128];
+    snprintf(command, sizeof(command), "luna-wifi-helper dump %s 2>/dev/null", iface);
+    FILE* f = popen(command, "r");
+    if (!f) return;
+    char line[512], ssid[96] = {0};
+    int signal = -1, secure = 0, have_bss = 0;
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p && isspace((unsigned char)*p)) p++;
+        if (!strncmp(p, "BSS ", 4)) {
+            if (have_bss && ssid[0] && state->count < LUNA_WIFI_MAX_NETWORKS) {
+                luna_wifi_add_iw_network(state, iface, ssid, signal, secure);
+            }
+            ssid[0] = 0; signal = -1; secure = 0; have_bss = 1;
+        } else if (!strncmp(p, "SSID:", 5)) {
+            p += 5; while (*p && isspace((unsigned char)*p)) p++;
+            p[strcspn(p, "\r\n")] = 0;
+            snprintf(ssid, sizeof(ssid), "%s", p);
+        } else if (!strncmp(p, "signal:", 7)) {
+            double dbm = strtod(p + 7, NULL);
+            signal = (int)((dbm + 100.0) * 2.0);
+            if (signal < 0) signal = 0;
+            if (signal > 100) signal = 100;
+        } else if (!strncmp(p, "RSN:", 4) || !strncmp(p, "WPA:", 4)) secure = 1;
+    }
+    if (have_bss && ssid[0] && state->count < LUNA_WIFI_MAX_NETWORKS) {
+        luna_wifi_add_iw_network(state, iface, ssid, signal, secure);
+    }
+    (void)pclose(f);
 }
 
 static void luna_wifi_refresh_connman(LunaWifiSnapshot* state) {
@@ -256,6 +425,10 @@ static void luna_wifi_refresh_connman(LunaWifiSnapshot* state) {
         n->signal = -1;
     }
     (void)pclose(f);
+    /* ConnMan on some mwifiex versions reports Scan=NotSupported.  Preserve
+     * ConnMan for power/connection management, but display the kernel scan
+     * cache populated by the narrowly privileged helper. */
+    if (state->count == 0) luna_wifi_refresh_iw_cache(state);
 }
 
 static int luna_wifi_nmcli_split(char* line, char* fields[], int wanted) {
@@ -392,7 +565,16 @@ static LunaWifiPtyEvent luna_wifi_pty_wait_event(int fd, int timeout_ms) {
         if (strstr(window, "Connected ") || strstr(window, "Already connected")) return LUNA_WIFI_PTY_CONNECTED;
         if (strstr(window, "Agent registered")) return LUNA_WIFI_PTY_AGENT_READY;
         if (strstr(window, "Error") || strstr(window, "Failed") ||
-            strstr(window, "invalid-key") || strstr(window, "Invalid key")) return LUNA_WIFI_PTY_FAILED;
+            strstr(window, "invalid-key") || strstr(window, "Invalid key")) {
+            char* detail = strrchr(window, '\n');
+            if (!detail || !detail[1]) detail = window;
+            else detail++;
+            snprintf(g_luna_wifi_operation_error,
+                     sizeof(g_luna_wifi_operation_error), "ConnMan: %.170s", detail);
+            for (char* q = g_luna_wifi_operation_error; *q; q++)
+                if ((unsigned char)*q < 32 && *q != '\t') *q = ' ';
+            return LUNA_WIFI_PTY_FAILED;
+        }
         if (strstr(window, "connmanctl>")) return LUNA_WIFI_PTY_PROMPT;
     }
 }
@@ -490,6 +672,15 @@ static int luna_wifi_do_command(const LunaWifiCommand* command, const LunaWifiSn
     if (!command) return 0;
     LunaWifiBackend backend = before ? before->backend : LUNA_WIFI_NONE;
     int powered = before ? before->powered : 0;
+    /* init queues REFRESH followed by restoration of the saved radio state.
+     * The worker may dequeue both before the first refreshed snapshot has
+     * been published, so do not make SET_POWERED depend on that timing. */
+    if (backend == LUNA_WIFI_NONE) {
+        if (luna_wifi_command_available("connmanctl"))
+            backend = LUNA_WIFI_CONNMAN;
+        else if (luna_wifi_command_available("nmcli"))
+            backend = LUNA_WIFI_NMCLI;
+    }
     if (command->type == LUNA_WIFI_CMD_REFRESH) return 1;
     if (command->type == LUNA_WIFI_CMD_TOGGLE ||
         command->type == LUNA_WIFI_CMD_SET_POWERED) {
@@ -498,19 +689,30 @@ static int luna_wifi_do_command(const LunaWifiCommand* command, const LunaWifiSn
         if (command->type == LUNA_WIFI_CMD_SET_POWERED && target == powered)
             return 1;
         if (backend == LUNA_WIFI_CONNMAN) {
+            if (target) luna_wifi_prepare_interfaces();
             const char* const argv[] = { "connmanctl", target ? "enable" : "disable", "wifi", NULL };
-            return luna_wifi_run_wait(argv);
+            int ok = luna_wifi_run_wait(argv);
+            /* Some drivers create their netdev only after the radio command. */
+            if (target) luna_wifi_prepare_interfaces();
+            return ok;
         }
         if (backend == LUNA_WIFI_NMCLI) {
+            if (target) luna_wifi_prepare_interfaces();
             const char* const argv[] = { "nmcli", "radio", "wifi", target ? "on" : "off", NULL };
-            return luna_wifi_run_wait(argv);
+            int ok = luna_wifi_run_wait(argv);
+            if (target) luna_wifi_prepare_interfaces();
+            return ok;
         }
         return 0;
     }
     if (command->type == LUNA_WIFI_CMD_SCAN) {
+        luna_wifi_prepare_interfaces();
         if (backend == LUNA_WIFI_CONNMAN) {
             const char* const argv[] = { "connmanctl", "scan", "wifi", NULL };
-            return luna_wifi_run_wait(argv);
+            int connman_ok = luna_wifi_run_wait(argv);
+            /* Some ConnMan releases print NotSupported but still exit zero. */
+            int helper_ok = luna_wifi_trigger_iw_scan();
+            return connman_ok || helper_ok;
         }
         if (backend == LUNA_WIFI_NMCLI) {
             const char* const argv[] = { "nmcli", "device", "wifi", "rescan", NULL };
@@ -519,11 +721,28 @@ static int luna_wifi_do_command(const LunaWifiCommand* command, const LunaWifiSn
         return 0;
     }
     if (command->type == LUNA_WIFI_CMD_CONNECT) {
+        if (!strncmp(command->id, "iw:", 3)) {
+            int ok = luna_wifi_helper_connect(command->id + 3, command->passphrase);
+            if (!ok) snprintf(g_luna_wifi_operation_error,
+                              sizeof(g_luna_wifi_operation_error),
+                              "wpa_supplicant fallback failed for %.120s", command->id + 3);
+            return ok;
+        }
         if (backend == LUNA_WIFI_CONNMAN && luna_wifi_valid_connman_service(command->id)) {
-            if (command->passphrase[0])
-                return luna_wifi_connman_connect_interactive(command->id, command->passphrase);
+            if (command->passphrase[0]) {
+                int ok = luna_wifi_connman_connect_interactive(command->id, command->passphrase);
+                if (!ok && !g_luna_wifi_operation_error[0]) snprintf(g_luna_wifi_operation_error,
+                                  sizeof(g_luna_wifi_operation_error),
+                                  "ConnMan rejected %.120s (service missing or invalid key)",
+                                  command->id);
+                return ok;
+            }
             const char* const argv[] = { "connmanctl", "connect", command->id, NULL };
-            return luna_wifi_run_wait(argv);
+            int ok = luna_wifi_run_wait(argv);
+            if (!ok) snprintf(g_luna_wifi_operation_error,
+                              sizeof(g_luna_wifi_operation_error),
+                              "ConnMan could not connect %.130s", command->id);
+            return ok;
         }
         if (backend == LUNA_WIFI_NMCLI && command->id[0]) {
             if (command->passphrase[0]) {
@@ -582,15 +801,29 @@ static void* luna_wifi_thread_main(void* unused) {
         luna_wifi_notify();
 
         int ok = 1;
+        g_luna_wifi_operation_error[0] = 0;
         pthread_mutex_lock(&g_luna_wifi.child_mutex);
         if (command.type != LUNA_WIFI_CMD_REFRESH)
             ok = luna_wifi_do_command(&command, &before);
+        else if (before.count == 0) {
+            luna_wifi_prepare_interfaces();
+            (void)luna_wifi_trigger_iw_scan();
+        }
         LunaWifiSnapshot after;
         luna_wifi_backend_refresh(&after);
+        if (after.powered && after.count == 0 && before.count > 0) {
+            after.count = before.count;
+            memcpy(after.networks, before.networks,
+                   (size_t)before.count * sizeof(after.networks[0]));
+        }
         pthread_mutex_unlock(&g_luna_wifi.child_mutex);
         after.busy = 0;
-        if (!ok && !after.error[0])
-            snprintf(after.error, sizeof(after.error), "Wi-Fi operation failed");
+        if (!ok && !after.error[0]) {
+            snprintf(after.error, sizeof(after.error), "%s",
+                     g_luna_wifi_operation_error[0]
+                         ? g_luna_wifi_operation_error : "Wi-Fi operation failed");
+            fprintf(stderr, "[luna-shell/wifi] %s\n", after.error);
+        }
         luna_wifi_publish(&after);
         memset(command.passphrase, 0, sizeof(command.passphrase));
     }

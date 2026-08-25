@@ -6,242 +6,213 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-
 use super::{Backend, Framebuffer, InputEvent};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tungstenite::{accept, Message};
 
 struct BroadcastState {
-    latest: Arc<Vec<u8>>,
-    senders: Vec<mpsc::SyncSender<Arc<Vec<u8>>>>,
-    input_tx: mpsc::SyncSender<InputEvent>,
-    wakeup_fd: RawFd, // eventfd wakes server epoll
+  latest: Arc<Vec<u8>>,
+  senders: Vec<mpsc::SyncSender<Arc<Vec<u8>>>>,
+  input_tx: mpsc::SyncSender<InputEvent>,
+  wakeup_fd: RawFd, // eventfd wakes server epoll
 }
 
 pub struct WebGlServerBackend {
-    width: u32,
-    height: u32,
-    state: Arc<Mutex<BroadcastState>>,
-    input_rx: Option<mpsc::Receiver<InputEvent>>,
-    eventfd: RawFd,
+  width: u32,
+  height: u32,
+  state: Arc<Mutex<BroadcastState>>,
+  input_rx: Option<mpsc::Receiver<InputEvent>>,
+  eventfd: RawFd,
 }
 
 impl WebGlServerBackend {
-    pub fn new(width: u32, height: u32, port: u16) -> Self {
-        let efd = unsafe {
-            libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC)
-        };
+  pub fn new(width: u32, height: u32, port: u16) -> Self {
+    let efd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
 
-        let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(256);
+    let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(256);
 
-        let state = Arc::new(Mutex::new(BroadcastState {
-            latest: Arc::new(vec![0u8; (width * height * 4) as usize]),
-            senders: Vec::new(),
-            input_tx,
-            wakeup_fd: efd,
-        }));
+    let state = Arc::new(Mutex::new(BroadcastState {
+      latest: Arc::new(vec![0u8; (width * height * 4) as usize]),
+      senders: Vec::new(),
+      input_tx,
+      wakeup_fd: efd,
+    }));
 
-        let st = Arc::clone(&state);
-        thread::spawn(move || run_server(st, port, width, height));
+    let st = Arc::clone(&state);
+    thread::spawn(move || run_server(st, port, width, height));
 
-        eprintln!("[vespera/webgl] open http://localhost:{}/ in a browser", port);
+    eprintln!("[vespera/webgl] open http://localhost:{}/ in a browser", port);
 
-        WebGlServerBackend {
-            width,
-            height,
-            state,
-            input_rx: Some(input_rx),
-            eventfd: efd,
-        }
+    WebGlServerBackend {
+      width,
+      height,
+      state,
+      input_rx: Some(input_rx),
+      eventfd: efd,
     }
+  }
 }
 
 impl Backend for WebGlServerBackend {
-    fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
+  fn size(&self) -> (u32, u32) { (self.width, self.height) }
+
+  fn present(&mut self, fb: &Framebuffer) {
+    let n = (self.width * self.height).min(fb.width * fb.height) as usize;
+    let mut rgba = vec![0u8; n * 4];
+    for (i, &px) in fb.pixels[..n].iter().enumerate() {
+      rgba[i * 4] = (px >> 16) as u8;
+      rgba[i * 4 + 1] = (px >> 8) as u8;
+      rgba[i * 4 + 2] = px as u8;
+      rgba[i * 4 + 3] = (px >> 24) as u8;
     }
 
-    fn present(&mut self, fb: &Framebuffer) {
-        let n = (self.width * self.height).min(fb.width * fb.height) as usize;
-        let mut rgba = vec![0u8; n * 4];
-        for (i, &px) in fb.pixels[..n].iter().enumerate() {
-            rgba[i * 4]     = (px >> 16) as u8;
-            rgba[i * 4 + 1] = (px >>  8) as u8;
-            rgba[i * 4 + 2] =  px        as u8;
-            rgba[i * 4 + 3] = (px >> 24) as u8;
-        }
+    let frame = Arc::new(rgba);
+    let mut st = self.state.lock().unwrap();
+    st.latest = Arc::clone(&frame);
+    st.senders.retain(|tx| match tx.try_send(Arc::clone(&frame)) {
+      Ok(_) => true,
+      Err(mpsc::TrySendError::Full(_)) => true,
+      Err(mpsc::TrySendError::Disconnected(_)) => false,
+    });
+  }
 
-        let frame = Arc::new(rgba);
-        let mut st = self.state.lock().unwrap();
-        st.latest = Arc::clone(&frame);
-        st.senders.retain(|tx| {
-            match tx.try_send(Arc::clone(&frame)) {
-                Ok(_) => true,
-                Err(mpsc::TrySendError::Full(_)) => true,
-                Err(mpsc::TrySendError::Disconnected(_)) => false,
-            }
-        });
-    }
-
-    fn take_input_channel(&mut self) -> Option<(mpsc::Receiver<InputEvent>, RawFd)> {
-        self.input_rx.take().map(|rx| (rx, self.eventfd))
-    }
+  fn take_input_channel(&mut self) -> Option<(mpsc::Receiver<InputEvent>, RawFd)> { self.input_rx.take().map(|rx| (rx, self.eventfd)) }
 }
 
-
 fn run_server(state: Arc<Mutex<BroadcastState>>, port: u16, width: u32, height: u32) {
-    let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("[vespera/webgl] failed to bind port {}: {}", port, e);
-            return;
-        }
-    };
-    for stream in listener.incoming().flatten() {
-        let st = Arc::clone(&state);
-        thread::spawn(move || handle_conn(stream, st, width, height));
+  let listener = match TcpListener::bind(format!("0.0.0.0:{}", port)) {
+    Ok(l) => l,
+    Err(e) => {
+      eprintln!("[vespera/webgl] failed to bind port {}: {}", port, e);
+      return;
     }
+  };
+  for stream in listener.incoming().flatten() {
+    let st = Arc::clone(&state);
+    thread::spawn(move || handle_conn(stream, st, width, height));
+  }
 }
 
 fn handle_conn(stream: TcpStream, state: Arc<Mutex<BroadcastState>>, width: u32, height: u32) {
-    let mut peek = [0u8; 4096];
-    let n = stream.peek(&mut peek).unwrap_or(0);
-    let header = std::str::from_utf8(&peek[..n]).unwrap_or("").to_ascii_lowercase();
+  let mut peek = [0u8; 4096];
+  let n = stream.peek(&mut peek).unwrap_or(0);
+  let header = std::str::from_utf8(&peek[..n]).unwrap_or("").to_ascii_lowercase();
 
-    if header.contains("upgrade: websocket") {
-        handle_ws(stream, state);
-    } else {
-        serve_html(stream, width, height);
-    }
+  if header.contains("upgrade: websocket") {
+    handle_ws(stream, state);
+  } else {
+    serve_html(stream, width, height);
+  }
 }
 
 fn serve_html(mut stream: TcpStream, width: u32, height: u32) {
-    let mut buf = [0u8; 4096];
-    let _ = stream.read(&mut buf);
-    let html = make_html(width, height);
-    let _ = write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        html.len(),
-        html
-    );
+  let mut buf = [0u8; 4096];
+  let _ = stream.read(&mut buf);
+  let html = make_html(width, height);
+  let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", html.len(), html);
 }
 
 fn handle_ws(stream: TcpStream, state: Arc<Mutex<BroadcastState>>) {
-    let mut ws = match accept(stream) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("[vespera/webgl] WebSocket handshake failed: {}", e);
-            return;
-        }
-    };
+  let mut ws = match accept(stream) {
+    Ok(w) => w,
+    Err(e) => {
+      eprintln!("[vespera/webgl] WebSocket handshake failed: {}", e);
+      return;
+    }
+  };
 
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<Arc<Vec<u8>>>(2);
-    let (input_tx, wakeup_fd) = {
-        let mut st = state.lock().unwrap();
-        let initial = Arc::clone(&st.latest);
-        st.senders.push(frame_tx);
-        let itx = st.input_tx.clone();
-        let wfd = st.wakeup_fd;
-        drop(st);
-        // Send first frame blocking before switching modes.
-        if ws.send(Message::Binary((*initial).clone())).is_err() {
-            return;
-        }
-        (itx, wfd)
-    };
+  let (frame_tx, frame_rx) = mpsc::sync_channel::<Arc<Vec<u8>>>(2);
+  let (input_tx, wakeup_fd) = {
+    let mut st = state.lock().unwrap();
+    let initial = Arc::clone(&st.latest);
+    st.senders.push(frame_tx);
+    let itx = st.input_tx.clone();
+    let wfd = st.wakeup_fd;
+    drop(st);
+    // Send first frame blocking before switching modes.
+    if ws.send(Message::Binary((*initial).clone())).is_err() {
+      return;
+    }
+    (itx, wfd)
+  };
 
-    // Blocking writes; read timeout avoids old nonblocking+yield loop (~150ms/frame).
-    ws.get_mut()
-        .set_read_timeout(Some(std::time::Duration::from_millis(1)))
-        .ok();
+  // Blocking writes; read timeout avoids old nonblocking+yield loop (~150ms/frame).
+  ws.get_mut().set_read_timeout(Some(std::time::Duration::from_millis(1))).ok();
+
+  loop {
+    let frame = frame_rx.recv_timeout(std::time::Duration::from_millis(8)).ok();
+    if let Some(mut f) = frame {
+      // Drop stale queued frames; send only the latest.
+      while let Ok(newer) = frame_rx.try_recv() {
+        f = newer;
+      }
+      match ws.send(Message::Binary((*f).clone())) {
+        Ok(_) => {}
+        Err(_) => return,
+      }
+      match ws.flush() {
+        Ok(_) => {}
+        Err(_) => return,
+      }
+    }
 
     loop {
-        let frame = frame_rx.recv_timeout(std::time::Duration::from_millis(8)).ok();
-        if let Some(mut f) = frame {
-            // Drop stale queued frames; send only the latest.
-            while let Ok(newer) = frame_rx.try_recv() {
-                f = newer;
+      match ws.read() {
+        Ok(Message::Text(s)) => {
+          if let Some(ev) = parse_input(&s) {
+            let _ = input_tx.try_send(ev);
+            if wakeup_fd >= 0 {
+              let one: u64 = 1;
+              unsafe { libc::write(wakeup_fd, &one as *const u64 as *const libc::c_void, 8) };
             }
-            match ws.send(Message::Binary((*f).clone())) {
-                Ok(_) => {}
-                Err(_) => return,
-            }
-            match ws.flush() {
-                Ok(_) => {}
-                Err(_) => return,
-            }
+          }
         }
-
-        loop {
-            match ws.read() {
-                Ok(Message::Text(s)) => {
-                    if let Some(ev) = parse_input(&s) {
-                        let _ = input_tx.try_send(ev);
-                        if wakeup_fd >= 0 {
-                            let one: u64 = 1;
-                            unsafe {
-                                libc::write(
-                                    wakeup_fd,
-                                    &one as *const u64 as *const libc::c_void,
-                                    8,
-                                )
-                            };
-                        }
-                    }
-                }
-                Ok(Message::Close(_)) => return,
-                Err(tungstenite::Error::ConnectionClosed) => return,
-                Err(tungstenite::Error::Io(e))
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
-                    break
-                }
-                Err(_) => return,
-                Ok(_) => {}
-            }
-        }
+        Ok(Message::Close(_)) => return,
+        Err(tungstenite::Error::ConnectionClosed) => return,
+        Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => break,
+        Err(_) => return,
+        Ok(_) => {}
+      }
     }
+  }
 }
 
 /// Browser input wire format: "m x y", "b btn pressed", "a axis value", "k code pressed"
 fn parse_input(s: &str) -> Option<InputEvent> {
-    let mut parts = s.split_ascii_whitespace();
-    match parts.next()? {
-        "m" => {
-            let x: f32 = parts.next()?.parse().ok()?;
-            let y: f32 = parts.next()?.parse().ok()?;
-            Some(InputEvent::PointerMotion { x, y })
-        }
-        "b" => {
-            let button: u32 = parts.next()?.parse().ok()?;
-            let pressed = parts.next()?.parse::<u8>().ok()? != 0;
-            Some(InputEvent::PointerButton { button, pressed })
-        }
-        "a" => {
-            let axis: u32 = parts.next()?.parse().ok()?;
-            let value: f32 = parts.next()?.parse().ok()?;
-            Some(InputEvent::PointerAxis { axis, value })
-        }
-        "k" => {
-            let keycode: u32 = parts.next()?.parse().ok()?;
-            let pressed = parts.next()?.parse::<u8>().ok()? != 0;
-            Some(InputEvent::Key { keycode, pressed })
-        }
-        _ => None,
+  let mut parts = s.split_ascii_whitespace();
+  match parts.next()? {
+    "m" => {
+      let x: f32 = parts.next()?.parse().ok()?;
+      let y: f32 = parts.next()?.parse().ok()?;
+      Some(InputEvent::PointerMotion { x, y })
     }
+    "b" => {
+      let button: u32 = parts.next()?.parse().ok()?;
+      let pressed = parts.next()?.parse::<u8>().ok()? != 0;
+      Some(InputEvent::PointerButton { button, pressed })
+    }
+    "a" => {
+      let axis: u32 = parts.next()?.parse().ok()?;
+      let value: f32 = parts.next()?.parse().ok()?;
+      Some(InputEvent::PointerAxis { axis, value })
+    }
+    "k" => {
+      let keycode: u32 = parts.next()?.parse().ok()?;
+      let pressed = parts.next()?.parse::<u8>().ok()? != 0;
+      Some(InputEvent::Key { keycode, pressed })
+    }
+    _ => None,
+  }
 }
 
-
 fn make_html(width: u32, height: u32) -> String {
-    format!(
-        r#"<!DOCTYPE html>
+  format!(
+    r#"<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
@@ -402,7 +373,7 @@ connect();
 </script>
 </body>
 </html>"#,
-        w = width,
-        h = height
-    )
+    w = width,
+    h = height
+  )
 }

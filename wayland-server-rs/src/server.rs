@@ -9002,6 +9002,14 @@ impl Server {
             pending_motion = true;
           }
         }
+        InputEvent::PointerRelativeNormalized { dx, dy } => {
+          self.ptr_x = (self.ptr_x + dx).clamp(0.0, 1.0);
+          self.ptr_y = (self.ptr_y + dy).clamp(0.0, 1.0);
+          self.cursor_dirty = true;
+          if !deferred_left_release {
+            pending_motion = true;
+          }
+        }
         InputEvent::PointerButton { button, pressed } => {
           self.flush_pending_motion(&mut pending_motion);
           if button == 0x110 && !pressed {
