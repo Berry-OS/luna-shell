@@ -1,16 +1,28 @@
-**🚀 Luna Desktop**
+<div align="center">
 
-A **pure Rust** Wayland compositor + custom `libwayland-client` implementation + macOS-style desktop shell (`luna-shell` / `ui/luna-shell.c`). Run GTK4 apps while replacing Xorg or Weston!
+# 🌙 Luna Desktop
 
-[![Sponsor](https://img.shields.io/badge/Sponsor%20this%20project-%E2%9D%A4%EF%B8%8F-white?logo=githubsponsors&logoColor=EA4AAA&labelColor=EA4AAA)](https://github.com/sponsors/yui0)
+### A lightweight, hackable Linux desktop stack built around Wayland, Rust, and an HTML/CSS-driven native shell.
+
+Luna combines a **Rust Wayland compositor**, a **native C desktop shell powered by Luna UI**, and an optional **Rust `libwayland-client` implementation** into one experimental desktop environment.
+
+[日本語](README.ja.md) · [Sponsor the project](https://github.com/sponsors/yui0)
+
+[![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
+[![Rust: nightly](https://img.shields.io/badge/Rust-nightly-orange.svg?logo=rust)](rust-toolchain.toml)
+[![Wayland](https://img.shields.io/badge/display-Wayland-5b5b5b.svg)](https://wayland.freedesktop.org/)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4%EF%B8%8F-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/yui0)
+
+</div>
+
+Luna is designed to be small enough to understand, flexible enough to theme, and low-level enough to experiment with the whole Linux desktop stack—from the Wayland wire protocol and DRM/KMS output to the menu bar, Dock, Launchpad, widgets, and application themes.
+
+> **Project status:** Luna Desktop is under active development. It is already usable as a development desktop/session, but the direct DRM/evdev path is still experimental and should be treated as such on real hardware.
 
 <!-- readme-screenshot-gallery:start -->
-## ✨ Luna Desktop skins
+## ✨ Desktop skins
 
-Every image below is a **real `luna-shell` framebuffer capture**. The shell is
-built with its X11/EGL backend and run under Xvfb with the named skin; these are
-not browser previews or recreated mockups. The current shell uses its own
-KMS/Wayland/X11 hosts, so the capture path does **not** require GLFW.
+Every image below is a **real `luna-shell` framebuffer capture**. The shell is built with its X11/EGL capture backend and run under Xvfb with the named skin; these are not browser previews or recreated mockups. The normal desktop can run through Luna's own KMS/Wayland hosts and does **not** require GLFW.
 
 ### Luna — Default
 
@@ -30,255 +42,398 @@ KMS/Wayland/X11 hosts, so the capture path does **not** require GLFW.
 | --- | --- |
 | ![BeOS skin](docs/screenshots/luna-shell-skin-beos.png) | ![Amiga Workbench skin](docs/screenshots/luna-shell-skin-amiga-workbench.png) |
 
-Regenerate the full gallery with:
+Regenerate the gallery with:
 
 ```bash
 ./tools/capture-shell-skins.sh
 ```
 <!-- readme-screenshot-gallery:end -->
 
----
+## 🚀 What makes Luna different?
 
-## 🏷️ Product Names & Layers
+| | Luna Desktop |
+|---|---|
+| **Own the full stack** | A Rust compositor handles the Wayland protocol, composition, input, DRM/KMS and optional browser streaming. |
+| **Native shell, web-like styling** | `luna-shell` is a native C program, while Luna UI renders its interface from HTML/CSS-style layouts without embedding a browser. |
+| **Theme more than wallpaper** | Skins can change shell layout, chrome placement, widgets, GTK styling, Qt styling and server-side decoration colors. |
+| **Multiple rendering paths** | Run on DRM/KMS, use the software backend for development/VM work, or stream a Wayland app to a browser through the WebGL backend. |
+| **Wayland implementation playground** | The repository includes both a Rust Wayland server and an optional Rust `libwayland-client.so.0` replacement for protocol/runtime experiments. |
 
-| Name              | Actual Binary       | Role |
-|-------------------|---------------------|------|
-| **Luna Desktop**  | Full session        | The complete desktop environment users see after kernel boot |
-| **luna-compositor** | `luna-compositor`  | DRM/KMS Wayland compositor (Xorg/Weston replacement) |
-| **luna-shell**    | `ui/luna-shell.c`   | macOS-style menu bar, Dock, Launchpad & widgets (Luna UI engine) |
-| **Luna UI**       | `ui/luna-ui.h` HTML/CSS engine | UI toolkit for shell & settings apps |
-| **wayland-client-rs** | `libwayland_client.so` | Pure Rust client lib that GTK apps connect to |
+## ⚡ Quick start
 
-**Internal codename:** Vespera
-**User-facing name:** **Luna** (short, memorable, like GNOME/KDE)
-
-## 🔄 Boot Flow (After Kernel)
+Clone with the Luna UI submodule:
 
 ```bash
-systemd / init
-  └─ luna-session
-       ├─ luna-compositor  (--backend dri) ✨
-       ├─ luna-shell       (luna-shell --desktop) 🌙
-       └─ GTK Apps         (WAYLAND_DISPLAY + LD_PRELOAD=libwayland-client) 📱
+git clone --recurse-submodules https://github.com/Berry-OS/luna-shell.git
+cd luna-shell
 ```
 
-## 🌙 luna-shell — the Luna Desktop shell
+The project uses **Rust nightly** and also builds native C components. Typical development dependencies include GCC, make, pkg-config, Wayland development tools (`wayland-scanner`), DRM/GBM/EGL/OpenGL, libinput, libudev, xkbcommon, D-Bus, X11 and OpenSSL development packages.
 
-`ui/luna-shell.c` renders a full macOS-style desktop with the Luna UI engine alone:
+### Recommended build
 
-- Translucent menu bar — crescent-moon Luna menu, clock, network & power status
+The desktop shell uses the **distribution-provided `libwayland-client` by default**. This is also the path used by the RPM packaging.
+
+```bash
+make build-desktop-system
+```
+
+If your user/session already has access to the required DRM/input devices, the one-command DRI path is:
+
+```bash
+make desktop-system
+```
+
+For a software-oriented development session:
+
+```bash
+make desktop-soft-system
+```
+
+The direct DRI session currently expects a real Linux VT and direct DRM/input access. On machines where that requires elevated privileges, build as your normal user first, then launch the already-built session from a VT with the appropriate permissions, for example:
+
+```bash
+sudo LUNA_TTY=/dev/tty2 PROFILE=release ./luna-session
+```
+
+Keep SSH or another recovery path available when testing a new compositor on physical hardware.
+
+## 🧩 What is actually in the desktop?
+
+```text
+luna-session
+├── luna-compositor       Rust Wayland compositor / window manager
+├── luna-shell            Native C desktop shell + Luna UI
+├── luna-clipboard        Wayland clipboard manager
+├── luna-tray-notify      tray / notification helper
+└── applications          GTK / Qt / SDL / other Wayland clients
+```
+
+| Component | Implementation | Role |
+|---|---|---|
+| **Luna Desktop** | Full session | The complete desktop environment presented to the user. |
+| **`luna-compositor`** | Rust (`wayland-server-rs`) | Wayland server, composition, window management, DRM/KMS, input and alternate rendering backends. |
+| **`luna-shell`** | C + Luna UI | Menu bar/taskbar, Dock, Launchpad, Control Center, widgets, settings and desktop chrome. |
+| **Luna UI** | `ui/luna-ui` submodule | Native HTML/CSS-style layout and OpenGL rendering engine used by the shell. |
+| **`luna-clipboard`** | C | Clipboard persistence/management for the Luna session. |
+| **`luna-tray-notify`** | C | Tray/notification compatibility helper. |
+| **`wayland-client-rs`** | Rust | Optional libwayland-client-compatible implementation for development and compatibility experiments. |
+
+The internal codename **Vespera** still appears in parts of the source history, but the user-facing desktop is **Luna**.
+
+## 🌙 The shell experience
+
+`ui/luna-shell.c` is the main desktop shell. It renders the desktop using Luna UI and talks to the compositor over Wayland.
+
+Current shell features include:
+
+- translucent Luna menu bar / alternative taskbar and deskbar layouts
 - Dock with hover magnification, running-app indicators and Trash
-- Launchpad app grid with incremental search (Super / F4)
-- Control Center — toggles, brightness/volume sliders, CPU/RAM meters
-- Desktop widgets — clock plus CPU/memory/disk stats read from /proc
-- About This Luna, notification toasts, Shut Down / Restart / Log Out dialogs
+- Launchpad with application discovery, incremental search and keyboard shortcuts
+- Control Center and system status UI
+- Wi-Fi, Ethernet and Bluetooth integration
+- notification toasts and tray/SNI integration
+- desktop clock, system-statistics and weather widgets
+- monitor/display integration
+- language, keyboard-layout and NumLock settings
+- keyboard-layout switching for multi-layout configurations
+- About This Luna, Log Out, Restart and Shut Down flows
+- XDG-based configuration, data, state, cache and runtime paths
 
-Dock & Launchpad apps are overridable via `LUNA_APP_<NAME>` (e.g. `LUNA_APP_TERMINAL=foot`).
-The layout (`ui/luna-shell.html` + `ui/luna-shell.css`) is embedded into the binary and can be
-replaced with `LUNA_DESKTOP_LAYOUT` / `LUNA_DESKTOP_CSS` or `--layout` / `--css`.
+Applications are launched as native Wayland clients. `luna-session` exports the usual desktop environment variables for GTK, Qt, Mozilla and SDL so applications can use the Luna compositor directly.
 
-### Desktop skins
+### Override shell applications
 
-Open **System Settings → Appearance → Desktop Skin** to switch skins while the
-shell is running. The choice is saved in `~/.config/luna-shell/settings.conf`.
-Bundled themes under `skins/` include **Windows XP**, **Windows 95**, **BeOS**,
-**Classic Mac OS**, **Amiga Workbench**, and **Nocturne Atelier**.
+Dock and Launchpad entries can be redirected with `LUNA_APP_<NAME>` variables:
 
-A skin is an external directory with this shape:
+```bash
+LUNA_APP_TERMINAL=foot ./luna-session
+```
+
+The shell layout and stylesheet can also be replaced for development:
+
+```bash
+LUNA_DESKTOP_LAYOUT=/path/to/layout.html \
+LUNA_DESKTOP_CSS=/path/to/style.css \
+./luna-shell --desktop
+```
+
+Equivalent `--layout` / `--css` command-line options are available.
+
+## 🎨 Skin system
+
+Open **System Settings → Appearance → Desktop Skin** to switch skins while Luna is running. The selected skin is saved in:
+
+```text
+~/.config/luna-shell/settings.conf
+```
+
+Bundled skins currently include:
+
+- **Luna / Default**
+- **Nocturne Atelier**
+- **Windows XP**
+- **Windows 95**
+- **Classic Mac OS**
+- **BeOS**
+- **Amiga Workbench**
+
+A skin is not limited to shell colors. It can also describe chrome placement, GTK/Qt integration and compositor decoration preferences.
 
 ```text
 my-skin/
 ├── skin.conf
 ├── style.css
-├── layout.html        # author in a browser; same file is the shell layout
-├── gtk/<ThemeName>/   # optional GTK 3/4 theme (index.theme + gtk.css)
+├── layout.html
+├── gtk/<ThemeName>/        # optional GTK 3/4 theme
 │   ├── index.theme
 │   ├── gtk-3.0/gtk.css
 │   └── gtk-4.0/gtk.css
 └── qt/
-    ├── style.qss      # optional Qt stylesheet (Fusion + qt5ct/qt6ct)
+    ├── style.qss            # optional Qt stylesheet
     └── colors.conf
 ```
 
-`layout.html` is the development surface. Each skin ships its own complete
-`style.css` (no shared base sheet to override). Theme skins may optionally
-start from a copy of `skins/default/style.css`, or link it during preview:
-
-```html
-<link rel="stylesheet" href="style.css">
-```
-
-Open `skins/<name>/layout.html` in a browser, edit HTML/CSS there, and use the
-same files as the theme — luna-shell loads those `<link>`s via the existing
-HTML/CSS engine. Icon fonts live in `skins/fonts/` (resolved as `../fonts`
-from each skin). If `layout.html` is present it is picked up automatically
-(override with `layout=` in `skin.conf`).
+A minimal `skin.conf` can look like this:
 
 ```ini
 name=My Skin
-description=A short label shown in Appearance
+description=A custom Luna desktop skin
 css=style.css
 layout=layout.html
-# Chrome placement (applied live to Wayland layer-shell surfaces):
+
+# Shell chrome
 chrome=taskbar          # taskbar | deskbar | menubar | luna
-menubar_edge=bottom     # top | bottom  (overrides chrome preset)
-menubar_height=34       # exclusive-zone height in px
+menubar_edge=bottom     # top | bottom
+menubar_height=34
 dock_mode=hidden        # float | hidden
-# Toolkit themes (new apps pick these up; restart running GTK/Qt apps):
+
+# Application toolkit themes
 gtk_theme=LunaWindows95
 qt_style=Fusion
 qt_qss=qt/style.qss
-# Compositor SSD chrome:
+
+# Compositor/server-side decorations
 titlebar_style=2        # 0 modern | 1 classic dots | 2 flat retro
 titlebar_active=#000080
 titlebar_inactive=#808080
 titlebar_frame=#c0c0c0
-prefer_ssd=1            # recommend server decorations when client unset
+prefer_ssd=1
 ```
 
-`chrome=taskbar` pins the menubar to the **bottom** of the screen (Windows XP /
-95) and hides the floating dock so apps live in the taskbar window list.
-`chrome=deskbar` / `menubar` keep a top strip without a dock. CSS alone cannot
-move the menubar on Wayland — the shell re-anchors the layer surface from these
-keys.
+`chrome=taskbar`, for example, can move the shell strip to the **bottom** of the display and hide the floating Dock, while `deskbar` / `menubar` keep top-oriented chrome. This is handled by native Wayland layer-surface anchoring rather than CSS positioning alone.
 
-Selecting a skin also installs its GTK theme under `~/.local/share/themes/`,
-updates `gtk-3.0`/`gtk-4.0` `settings.ini`, exports `GTK_THEME` /
-`QT_STYLE_OVERRIDE` / `LUNA_QT_QSS`, and pushes SSD colors to the compositor.
-Tray and Start menus open toward the active chrome edge (above a bottom
-taskbar, below a top menubar).
+When a skin supplies toolkit metadata, Luna can propagate its appearance to newly launched GTK/Qt applications and update compositor-side decoration colors as well.
 
-Put it in `~/.local/share/luna-desktop/skins/`,
-`/usr/local/share/luna-desktop/skins/`, `/usr/share/luna-desktop/skins/`, or a
-directory named by `LUNA_SKIN_PATH`. CSS and chrome changes apply immediately.
-A custom HTML layout is loaded on the next sign-in and must preserve the
-element IDs in `ui/luna-shell.html` so native shell actions remain connected.
-Skins can also be selected with `--skin NAME` or `LUNA_DESKTOP_SKIN=NAME`.
+Custom skins can be placed in:
 
-Wayland protocol is used as an **internal bus**. No Weston, Mutter, or Xorg needed. GTK4 connects directly to the Vespera compositor.
-
-## 🛠️ Try It on Your Dev Machine
-
-```bash
-cd vespera
-make desktop              # 🚀 DRI + luna-shell (GPU console)
-make desktop-soft         # 💻 Software backend (great for VMs)
-
-# Launch with GTK apps
-LUNA_APPS="target/release/hello-gtk" make desktop
+```text
+~/.local/share/luna-desktop/skins/
+/usr/local/share/luna-desktop/skins/
+/usr/share/luna-desktop/skins/
 ```
 
-## 📦 Production Install (Launch Desktop on tty1)
+or in a path named by `LUNA_SKIN_PATH`.
+
+You can also select a skin explicitly:
 
 ```bash
-sudo make install PREFIX=/usr/local
+luna-shell --desktop --skin windows-95
+# or
+LUNA_DESKTOP_SKIN=windows-95 luna-shell --desktop
+```
+
+For skin development, open `skins/<name>/layout.html` in a browser to iterate on the HTML/CSS structure, then use those same files in Luna. Custom layouts must preserve the shell element IDs expected by `luna-shell` so native actions stay connected.
+
+## 🏗️ Architecture
+
+```text
+Linux kernel
+   │
+   ├─ DRM/KMS + evdev/libinput
+   │
+   ▼
+┌───────────────────────────────┐
+│ luna-compositor               │
+│ Rust Wayland server           │
+│                               │
+│ software / DRI+GPU / WebGL    │
+└──────────────┬────────────────┘
+               │ Wayland
+       ┌───────┼───────────────┐
+       │       │               │
+       ▼       ▼               ▼
+  luna-shell  GTK/Qt apps  luna-clipboard
+  C + Luna UI
+       │
+       └─ HTML/CSS-style shell layouts + skins
+```
+
+Wayland is the internal desktop bus. A normal Luna session does not need Weston, Mutter or Xorg between Luna and native Wayland applications.
+
+### `wayland-server-rs`
+
+The compositor implements the Wayland wire protocol and object model directly in Rust rather than wrapping `libwayland-server`.
+
+Highlights include:
+
+- `wl_compositor`, `wl_subcompositor`, `wl_shm`, `wl_seat`, `wl_output` and data-device support
+- `xdg_wm_base` for application windows
+- `zwp_linux_dmabuf_v1` v4 / dmabuf feedback support
+- Luna shell/window-management IPC
+- evdev input and VT handling
+- software composition
+- DRM/KMS output
+- GPU-assisted rendering paths
+- WebGL/WebSocket streaming backend
+
+### `wayland-client-rs`
+
+The repository also contains an experimental Rust implementation that builds a `libwayland-client.so.0`-compatible library and vendors compatible client headers.
+
+It is useful for testing how far a desktop can go without the system client implementation, but it is **not required for the recommended Luna shell build**.
+
+To explicitly build/run the shell against the vendored client implementation:
+
+```bash
+make desktop LUNA_WAYLAND_CLIENT=vendored
+```
+
+## 🖥️ Rendering and test modes
+
+| Command | Purpose |
+|---|---|
+| `make desktop-system` | Full DRI desktop using the system Wayland client library. |
+| `make desktop-soft-system` | Software-backend desktop using the system Wayland client library. |
+| `make desktop LUNA_WAYLAND_CLIENT=vendored` | DRI desktop while testing the Rust client implementation. |
+| `make demo` | Start the compositor and connect the sample GTK app; writes compositor screenshots to `/tmp/luna-compositor.ppm`. |
+| `make webgl` | Stream the sample GTK app through the compositor's browser backend. |
+| `make webgl APP=gtk4-demo` | Run another GTK application through the WebGL backend. |
+| `make rpm` | Build the source tarball and RPM package. |
+
+### WebGL mode
+
+```bash
+make webgl
+# then open http://localhost:8081/
+```
+
+Or use the helper directly:
+
+```bash
+./run-gtk
+./run-gtk gtk4-demo
+PORT=9090 ./run-gtk /usr/bin/your-gtk-app
+```
+
+The browser receives RGBA frames over WebSocket and sends mouse, keyboard and wheel input back to the compositor.
+
+## 📦 Installing from source
+
+For the recommended system-Wayland-client installation:
+
+```bash
+sudo make install-system PREFIX=/usr/local
+```
+
+The source install also provides a `luna-desktop.service` unit that can be enabled for a dedicated tty-based session:
+
+```bash
 sudo systemctl enable luna-desktop.service
 sudo systemctl start luna-desktop.service
 ```
 
-Works alongside `getty@tty1` auto-login. For manual testing with existing sessions, just run `luna-session`.
+If you deliberately want Luna's replacement `libwayland-client` installed as part of the Luna prefix, use:
 
-## 📁 Directory Structure
-
+```bash
+sudo make install PREFIX=/usr/local
 ```
-vespera/
-├── rust-toolchain.toml
+
+Berry Linux packaging uses the distribution Wayland client library and expects the display manager to launch `luna-session` rather than enabling the optional kiosk-style systemd unit.
+
+## ⚠️ Native DRM/VT testing notes
+
+The DRI backend is a real compositor path, not a nested desktop preview. It can take control of DRM/KMS, the active VT and physical input devices.
+
+- use a real Linux VT for direct DRI testing
+- `LUNA_TTY=/dev/ttyN` selects the VT explicitly
+- `Ctrl+Alt+F1` … `F12` can switch VTs when physical input is enabled
+- Luna restores DRM/KD/VT state during normal shutdown
+- prefer a normal TERM/session logout over `SIGKILL`, because a killed process cannot run its cleanup path
+- `LUNA_PHYSICAL_INPUT=0` disables direct physical input handling when needed
+- `LUNA_EGL_SOFTWARE=1` can force software EGL on problematic GPU setups
+
+## 📁 Repository map
+
+```text
+luna-shell/
 ├── Cargo.toml
+├── rust-toolchain.toml
 ├── Makefile
-├── run-gtk                    # 🌐 WebGL browser launcher
+├── luna-session
+├── luna-shell.spec
+├── run-gtk
 │
-├── wayland-client-rs/         # Pure Rust libwayland-client
-├── wayland-server-rs/         # Pure Rust Wayland server (no libwayland-server!)
-└── hello-gtk/                 # Sample GTK4 app
+├── ui/
+│   ├── luna-shell.c              # native desktop shell
+│   ├── luna-ui/                  # Luna UI git submodule
+│   ├── luna-wifi.h
+│   ├── luna-ethernet.h
+│   ├── luna-bluetooth.h
+│   ├── luna-weather.h
+│   ├── luna-monitor.h
+│   └── protocols/
+│
+├── skins/                        # shell + GTK + Qt themes
+├── docs/screenshots/             # generated real-shell captures
+├── clipboard/                    # clipboard helper
+├── tray/                         # tray / notification helper
+├── systemd/                      # optional desktop service
+├── udev/                         # device rules
+├── tools/                        # screenshot/gallery tools
+│
+├── wayland-server-rs/            # Rust Wayland compositor
+├── wayland-client-rs/            # optional Rust client library
+└── hello-gtk/                    # sample GTK application
 ```
 
-## ⚡ Quick Start
-
-### 🌐 **WebGL Mode** – Run GTK4 Apps in Browser
+## 🛠️ Useful build targets
 
 ```bash
-cd vespera
-
-# Build + show hello-gtk in browser
-./run-gtk
-
-# Any GTK4 app
-./run-gtk gtk4-demo
-./run-gtk /usr/bin/your-gtk-app
-
-# Custom port
-PORT=9090 ./run-gtk
-```
-
-Open `http://localhost:8081/` → Real-time 1280×720 RGBA streaming via WebGL!
-🖱️ Click & type directly in the browser — input goes to the GTK app.
-
-### 💻 **Software Rendering Demo**
-
-```bash
-make demo
-# luna-compositor runs in background
-# GTK app connects via LD_PRELOAD
-# Output saved to /tmp/luna-compositor.ppm every frame
-```
-
-### 🎮 **DRI / Hardware Backend**
-
-```bash
+cargo build
 cargo build -p wayland-server-rs --features dri,gpu
-./target/debug/luna-compositor --backend dri
-```
-
-## 🛠️ Build Commands
-
-```bash
-cargo build                    # Software + DRI
-cargo build --features webgl   # + WebGL backend
+cargo build --features webgl
 
 make build
+make build-dri
 make build-webgl
+make build-shell
+make build-desktop-system
+make clean
 ```
 
-## 🎨 Luna UI CSS Engine (`ui/luna-ui.h`)
+## 🤝 Contributing
 
-Single-header HTML/CSS → OpenGL renderer. Everything on screen is styled by CSS — no immediate-mode drawing.
+Luna is intentionally experimental. Contributions that improve protocol compatibility, hardware support, shell polish, accessibility, performance, documentation, application compatibility or skin quality are welcome.
 
-**Selectors**: type / `.class` / `#id` / `*`, descendant & child (`>`) & sibling (`+`, `~`) combinators, `:hover` `:active` `:focus` `:focus-visible` `:focus-within`, `:first-child` `:last-child` `:nth-child(odd|even|An+B)`, `:not(...)`, `!important`, CSS variables (`var()`), `calc()`.
+When changing shell skins, keep the screenshot gallery reproducible with:
 
-**Box**: flexbox (wrap, grow/shrink/basis, gaps, auto margins), grid (templates, areas, auto-flow), block flow, `position: static|relative|absolute|fixed|sticky`, `box-sizing`, min/max sizes, `overflow` + styled scrollbars + scroll-snap/smooth-scroll, `z-index`.
+```bash
+./tools/capture-shell-skins.sh
+```
 
-**Paint**: per-corner `border-radius`, borders, `linear-gradient` / `radial-gradient` (multi-stop), **multi-layer `box-shadow` with `inset` and spread**, `background-image: url()`, `opacity`, `transform: translate/scale` (px/%), `transition`, `@keyframes` animations.
+## 📄 License
 
-**Text**: `font-size/weight`, `line-height`, `text-align`, `white-space`, `text-overflow: ellipsis`, `overflow-wrap`, **`letter-spacing`, `text-transform`, `text-decoration` (underline/line-through), `text-shadow`**, units `px` / `%` / `rem` / `em` / `pt`.
+Luna Desktop is released under the **Mozilla Public License 2.0 (MPL-2.0)**. See [`LICENSE`](LICENSE).
 
-**Fast**: batched glyph rendering (one draw call per line), SDF shaders for rounded rects & Gaussian shadows with early-discard, dirty-flag relayout (layout only on change), viewport culling, cached z-order.
+## ❤️ Support Luna
 
-## 🧠 Design Highlights
-
-### **wayland-server-rs** ✨
-- Zero dependency on `libwayland-server`
-- Full wire protocol compatibility
-- Supports: `wl_compositor`, `wl_shm`, `wl_seat`, `xdg_wm_base`, `zwp_linux_dmabuf_v1` (v4)
-- dmabuf path works with GTK4 using linear modifiers → easy CPU mapping
-
-### **wayland-client-rs** 🔧
-- Produces `libwayland_client.so.0` with proper SONAME
-- Vendors libwayland-compatible headers under `include/` (no system `libwayland-dev`)
-- Apps use `luna-wayland-client.mk` or `wayland-client.pc` to compile/link
-- Uses `#[unsafe(naked)]` assembly trampoline for `wl_proxy_marshal_flags`
-- 79 symbols exported
-
-### **WebGL Backend** 🌍 (feature = "webgl")
-- Background TCP server
-- Serves WebGL viewer on `/`
-- WebSocket streaming of RGBA frames
-- Real-time mouse/keyboard input forwarding:
-  - `m X Y` → mouse move
-  - `b BTN P` → button press/release
-  - `k CODE P` → key press/release
+If you enjoy low-level Linux desktop experiments, custom desktop shells, Wayland internals or delightfully unnecessary retro skins, you can support continued development through [GitHub Sponsors](https://github.com/sponsors/yui0).
 
 ---
 
-**Ready to build the future of Linux desktops in pure Rust?** 🦀✨
+<div align="center">
 
-Let’s make Lu Desktop the snappiest, most hackable desktop environment yet! 🚀
+**Build the desktop from the wire protocol to the pixels.** 🦀🌙
+
+</div>
