@@ -1514,3 +1514,19 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 #mb_logo:hover + .mb_logo_tip {
   visibility: visible; animation: mb-tip-in 0.16s forwards; animation-delay: 0.8s;
 }
+
+
+/* XDG application icons --------------------------------------------------
+ * Raster images are resolved from freedesktop icon themes by luna-shell.
+ * SVG paths are retained for the planned luna-svg renderer. */
+.lp_icon, .dock_xdg_icon {
+  padding: 0;
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dock_xdg_icon { background-color: transparent; }
+#dock_xdg_sep.hidden { display: none !important; }
