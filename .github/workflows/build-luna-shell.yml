@@ -44,3 +44,6 @@ jobs:
 
       - name: Validate generated source changes
         run: git diff --check
+
+# Keep this workflow intentionally focused on the native shell target so PRs
+# catch C/compiler regressions without requiring the full Rust compositor build.
