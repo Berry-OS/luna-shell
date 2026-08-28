@@ -1,0 +1,50 @@
+name: Build luna-shell
+
+on:
+  pull_request:
+    paths:
+      - 'ui/**'
+      - 'skins/**'
+      - 'Makefile'
+      - '.github/workflows/build-luna-shell.yml'
+  push:
+    branches:
+      - master
+      - 'feature/**'
+    paths:
+      - 'ui/**'
+      - 'skins/**'
+      - 'Makefile'
+      - '.github/workflows/build-luna-shell.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out Luna Shell and pinned submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install luna-shell build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libx11-dev libgl1-mesa-dev libegl1-mesa-dev libgbm-dev libdrm-dev \
+            libinput-dev libudev-dev libxkbcommon-dev libwayland-dev libwayland-bin \
+            libdbus-1-dev libssl-dev
+
+      - name: Build luna-shell
+        run: make luna-shell
+
+      - name: Validate generated source changes
+        run: git diff --check
+
+# Keep this workflow intentionally focused on the native shell target so PRs
+# catch C/compiler regressions without requiring the full Rust compositor build.

@@ -103,16 +103,16 @@ SHELL_WL_LABEL  := system wayland-client
 endif
 
 $(UI_DIR)/luna-shell.css.h: $(DEFAULT_SKIN_DIR)/style.css $(UI_DIR)/gen_include.sh
-	cd $(UI_DIR) && ./gen_include.sh -o luna-shell.css.h ../$(DEFAULT_SKIN_DIR)/style.css
+	cd $(UI_DIR) && sh ./gen_include.sh -o luna-shell.css.h ../$(DEFAULT_SKIN_DIR)/style.css
 
 $(UI_DIR)/luna-shell-widgets.css.h: skins/widgets.css $(UI_DIR)/gen_include.sh
-	cd $(UI_DIR) && ./gen_include.sh -o luna-shell-widgets.css.h ../skins/widgets.css
+	cd $(UI_DIR) && sh ./gen_include.sh -o luna-shell-widgets.css.h ../skins/widgets.css
 
 $(UI_DIR)/luna-shell-widgets.html.h: skins/widgets.html $(UI_DIR)/gen_include.sh
-	cd $(UI_DIR) && ./gen_include.sh -o luna-shell-widgets.html.h ../skins/widgets.html
+	cd $(UI_DIR) && sh ./gen_include.sh -o luna-shell-widgets.html.h ../skins/widgets.html
 
 $(UI_DIR)/luna-shell.html.h: $(DEFAULT_SKIN_DIR)/layout.html $(UI_DIR)/gen_include.sh
-	cd $(UI_DIR) && ./gen_include.sh -o luna-shell.html.h ../$(DEFAULT_SKIN_DIR)/layout.html
+	cd $(UI_DIR) && sh ./gen_include.sh -o luna-shell.html.h ../$(DEFAULT_SKIN_DIR)/layout.html
 
 SHELL_CFLAGS := -pthread \
                 $(shell pkg-config --cflags libdrm 2>/dev/null) \
