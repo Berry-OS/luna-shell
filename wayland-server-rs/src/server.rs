@@ -376,7 +376,10 @@ const CSD_MOVE_THRESHOLD_PX: i32 = 8;
 /// Left/right chrome reserved for client titlebar buttons (traffic lights /
 /// close-min-max).  Outside these zones the compositor owns the drag so
 /// move/snap no longer depend on a luna_wm.start_move round-trip.
-const CSD_BUTTON_ZONE_PX: i32 = 96;
+// Three libdecor/GTK controls plus their padding can occupy roughly 140 px.
+// Keep a conservative band on both sides so a slightly moving click on
+// close/maximize/minimize is never promoted to a compositor window drag.
+const CSD_BUTTON_ZONE_PX: i32 = 160;
 /// Distance at which a dragged window sticks to the screen or another window.
 const MAGNET_PX: i32 = 16;
 /// Default server-side decoration titlebar height, overridden per skin by
@@ -2882,14 +2885,29 @@ impl Server {
   /// client CSD (mode 0/1), inside the top strip, outside the left/right
   /// button chrome so luna-ui traffic lights still receive clicks, and not a
   /// child subsurface (Firefox tabs / libdecor chrome keep their own drags).
+  // libdecor places titlebar children above the parent's content origin and
+  // includes that band in xdg_surface.window_geometry. Do not mistake content
+  // subsurfaces (e.g. a browser's WebRender view) for draggable chrome.
+  fn csd_surface_can_drag(client: &Client, hit: u32, root: u32, py: i32) -> bool {
+    if !Self::surface_is_subsurface_in(client, hit) {
+      return true;
+    }
+    let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&root) else {
+      return false;
+    };
+    matches!(s.window_geom, Some((_, gy, _, _))
+      if gy < 0 && py >= s.y.saturating_add(gy) && py < s.y)
+  }
+
   fn csd_title_drag_hit(&self, fd: RawFd, surface_id: u32, px: i32, py: i32) -> bool {
     let Some(client) = self.clients.get(&fd) else {
       return false;
     };
-    if Self::surface_is_subsurface_in(client, surface_id) {
+    let hit = surface_id;
+    let surface_id = Self::toplevel_root_of(client, surface_id).unwrap_or(surface_id);
+    if !Self::csd_surface_can_drag(client, hit, surface_id, py) {
       return false;
     }
-    let surface_id = Self::toplevel_root_of(client, surface_id).unwrap_or(surface_id);
     if Self::uses_ssd(self.toplevel_decoration_mode(fd, surface_id)) {
       return false;
     }
@@ -2915,10 +2933,11 @@ impl Server {
     let Some(client) = self.clients.get(&fd) else {
       return false;
     };
-    if Self::surface_is_subsurface_in(client, surface_id) {
+    let hit = surface_id;
+    let surface_id = Self::toplevel_root_of(client, surface_id).unwrap_or(surface_id);
+    if !Self::csd_surface_can_drag(client, hit, surface_id, py) {
       return false;
     }
-    let surface_id = Self::toplevel_root_of(client, surface_id).unwrap_or(surface_id);
     if Self::uses_ssd(self.toplevel_decoration_mode(fd, surface_id)) {
       return false;
     }
@@ -10001,10 +10020,15 @@ impl Server {
     if pressed && button == 0x111 {
       let (px, py) = self.screen_ptr();
       if self.csd_title_menu_hit(fd, surf_id, px, py) {
-        self.raise_surface(fd, surf_id);
+        // A libdecor titlebar is a child surface; WM actions and the menu's
+        // window id must refer to the owning toplevel, not that decoration.
+        let root = self.clients.get(&fd)
+          .and_then(|client| Self::toplevel_root_of(client, surf_id))
+          .unwrap_or(surf_id);
+        self.raise_surface(fd, root);
         self.focused_client_fd = fd;
-        self.focused_surface_id = surf_id;
-        self.pending_shell_menu = Some((fd, surf_id, px, py));
+        self.focused_surface_id = root;
+        self.pending_shell_menu = Some((fd, root, px, py));
         self.last_button_serial = self.next_serial();
         self.last_button_pressed = false;
         self.dirty = true;
@@ -11048,6 +11072,27 @@ mod tests {
     client.objects.insert(41, Object::new(&protocol::WL_KEYBOARD, 7, Role::Keyboard));
     client.objects.insert(17, Object::new(&protocol::WL_KEYBOARD, 7, Role::Keyboard));
     assert_eq!(Server::keyboard_ids(&client), vec![17, 41]);
+  }
+
+  #[test]
+  fn decoration_children_drag_but_content_children_do_not() {
+    let mut client = Client::new(-1);
+    let mut root = crate::object::Surface::default();
+    root.y = 200;
+    root.window_geom = Some((0, -24, 640, 504));
+    let mut child = crate::object::Surface::default();
+    child.subsurface_parent = Some(10);
+    client.objects.insert(10, Object::new(&protocol::WL_SURFACE, 4, Role::Surface(root)));
+    client.objects.insert(11, Object::new(&protocol::WL_SURFACE, 4, Role::Surface(child)));
+    assert!(Server::csd_surface_can_drag(&client, 11, 10, 176));
+    assert!(Server::csd_surface_can_drag(&client, 11, 10, 199));
+    assert!(!Server::csd_surface_can_drag(&client, 11, 10, 175));
+    assert!(!Server::csd_surface_can_drag(&client, 11, 10, 200));
+    assert!(Server::csd_surface_can_drag(&client, 10, 10, 200));
+    if let Role::Surface(s) = &mut client.objects.get_mut(&10).unwrap().role {
+      s.window_geom = Some((0, 0, 640, 480));
+    }
+    assert!(!Server::csd_surface_can_drag(&client, 11, 10, 199));
   }
 
   #[test]

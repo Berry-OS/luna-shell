@@ -513,7 +513,10 @@ pub fn toplevel_meta(client: &Client, xdg_surface_id: u32) -> (String, String, b
 pub fn is_shell_surface(title: &str, app_id: &str) -> bool {
   let t = title.to_ascii_lowercase();
   let a = app_id.to_ascii_lowercase();
-  t.contains("luna desktop") || t.contains("luna-shell") || a.contains("luna-shell") || a.contains("glfw")
+  // GLFW identifies a client toolkit, not the desktop shell. Treating its
+  // app_id as the shell hides ordinary clients from taskbar/Alt+Tab and
+  // prevents focus restoration after another window closes.
+  t.contains("luna desktop") || t.contains("luna-shell") || a.contains("luna-shell")
 }
 
 /// Layer-shell namespace used by luna-shell for modeless dialogs that should
@@ -630,7 +633,16 @@ fn simple_hash(windows: &[WindowInfo], tray: &[TrayItem]) -> u64 {
 
 #[cfg(test)]
 mod tests {
-  use super::{split_window_id, window_id};
+  use super::{is_shell_surface, split_window_id, window_id};
+
+  #[test]
+  fn glfw_applications_are_not_desktop_shell_surfaces() {
+    assert!(!is_shell_surface("GLFW Demo", "glfw-application"));
+    assert!(!is_shell_surface("Editor", "org.example.GLFW.editor"));
+    assert!(!is_shell_surface("Luna Memo", ""));
+    assert!(is_shell_surface("Luna Desktop", "glfw-application"));
+    assert!(is_shell_surface("", "luna-shell"));
+  }
 
   #[test]
   fn shell_window_ids_are_client_scoped_and_reversible() {

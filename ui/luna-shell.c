@@ -22,14 +22,16 @@
 /* Skins grew with Network/Bluetooth/Sound panels; toast sits at the end of
  * layout.html and was the first thing dropped when this cap was 800.
  * Launchpad XDG slots add ~150 nodes on top of the chrome DOM. */
-#define LUNA_UI_MAX_ELEMENTS 2000
+#define LUNA_UI_MAX_ELEMENTS 3000
 /* The shell loads the base sheet, a complete skin sheet, and the shared
  * widget sheet into one cascade.  The luna-ui default (600 expanded
  * selectors) silently clipped the tail of that cascade; every non-default
  * skin consequently lost the widget rules that are intentionally appended
  * last.  Size this host for the full shipped cascade, including selector-list
  * expansion and enough headroom for external skins. */
-#define LUNA_UI_MAX_RULES 2400
+#define LUNA_UI_MAX_RULES 3400
+/* Enable NanoSVG for <img> / background-image .svg (nanosvg.h next to luna-ui.h). */
+#define LUNA_UI_NANOSVG
 #define LUNA_UI_IMPLEMENTATION
 /* Custom KMS / Wayland / X11 host — do not pull in luna_linux.h (GLFW). */
 #define LUNA_UI_NO_PLATFORM
@@ -1469,6 +1471,61 @@ static int g_win_menu_idx  = -1;
 static int g_clip_menu_idx = -1;
 static int g_mb_clip_idx   = -1;
 static uint64_t g_win_menu_target = 0;
+/* >=0 → win_menu is targeting a shell modeless dialog (not a compositor window). */
+static int g_win_menu_dialog = -1;
+/* When set, #win_menu is reparented under a dialog box so it paints on that
+ * dialog's Wayland surface (and above its chrome) instead of a separate
+ * overlay that can end up behind luna.dialog.* layers. */
+static int g_win_menu_embedded = 0;
+static int g_win_menu_saved_parent = -1;
+
+/* Shared chrome for shell modeless dialogs (settings / about / confirm / …).
+ * Titlebar drag, traffic-lights, and the right-click window menu all key off
+ * this table so a new dialog only needs one descriptor. */
+typedef enum {
+    SHELL_DLG_SETTINGS = 0,
+    SHELL_DLG_ABOUT,
+    SHELL_DLG_CONFIRM,
+    SHELL_DLG_NET_DETAIL,
+    SHELL_DLG_COUNT
+} ShellDialogKind;
+
+enum {
+    SHELL_DLG_F_MAXIMIZE  = 1 << 0, /* green traffic light / menu Maximize */
+    SHELL_DLG_F_DIALOG_NS = 1 << 1  /* luna.dialog.* layer-shell namespace */
+};
+
+typedef struct {
+    const char* name;       /* LunaSurface.name */
+    const char* root_id;    /* overlay root (hidden when closed) */
+    const char* box_id;     /* sheet / dialog box */
+    const char* drag_id;    /* titlebar drag handle */
+    const char* title_id;   /* optional; used as win_menu caption */
+    const char* close_id;
+    const char* min_id;
+    const char* max_id;
+    unsigned    flags;
+} ShellDialogChrome;
+
+static const ShellDialogChrome g_shell_dialogs[SHELL_DLG_COUNT] = {
+    { "settings",   "settings_win",     "settings_sheet",  "settings_drag",
+      "settings_title",   "stl_close", "stl_min", "stl_max",
+      SHELL_DLG_F_MAXIMIZE | SHELL_DLG_F_DIALOG_NS },
+    { "about",      "about_win",        "about_box",       "about_drag",
+      "about_title",      "tl_close",  "tl_min",  "tl_max",
+      SHELL_DLG_F_MAXIMIZE | SHELL_DLG_F_DIALOG_NS },
+    { "confirm",    "confirm_overlay",  "confirm_box",     "confirm_drag",
+      "confirm_title",    "ctl_close", "ctl_min", "ctl_max",
+      0 },
+    { "net_detail", "net_detail_win",   "net_detail_box",  "net_detail_drag",
+      "net_detail_title", "ntl_close", "ntl_min", "ntl_max",
+      SHELL_DLG_F_DIALOG_NS },
+};
+
+static int  shell_dialog_kind_from_hit(int hit);
+static int  shell_dialog_hit_is_titlebar(int kind, int hit, double x, double y);
+static void shell_dialog_menu_open(int kind, float x, float y);
+static void win_menu_detach_embed(void);
 /* Cached menubar hit-test indices (avoid repeated ID lookups in mouse hook) */
 static int g_mb_logo_idx  = -1;
 static int g_mb_cc_idx    = -1;
@@ -1553,12 +1610,6 @@ static int g_sw_slot_idx[MAX_SWITCHER_SLOTS];
 #define MAX_DOCK_XDG 8
 #define MAX_DOCK_PINNED 32
 
-typedef enum {
-    LUNA_ICON_NONE = 0,
-    LUNA_ICON_RASTER,
-    LUNA_ICON_SVG
-} LunaIconType;
-
 typedef struct {
     char id[NAME_MAX + 1];
     char name[256];
@@ -1566,7 +1617,6 @@ typedef struct {
     char icon_name[256];
     char icon_path[PATH_MAX];
     char startup_wm_class[256];
-    LunaIconType icon_type;
 } LunaLpXdgApp;
 
 typedef struct {
@@ -6249,7 +6299,9 @@ static void dismiss_cc(int trap_idx) {
 
 static void dismiss_win_menu(void) {
     if (is_shown(g_win_menu_idx)) set_hidden(g_win_menu_idx, 1);
+    win_menu_detach_embed();
     g_win_menu_target = 0;
+    g_win_menu_dialog = -1;
 }
 
 static void dismiss_clip_menu(void) {
@@ -6587,24 +6639,18 @@ static int luna_str_ends_ci(const char* s, const char* suffix) {
     return sl >= xl && !strcasecmp(s + sl - xl, suffix);
 }
 
-static LunaIconType luna_icon_type_from_path(const char* path) {
-    if (!path || !*path) return LUNA_ICON_NONE;
-    if (luna_str_ends_ci(path, ".png") || luna_str_ends_ci(path, ".jpg") ||
-        luna_str_ends_ci(path, ".jpeg") || luna_str_ends_ci(path, ".bmp") ||
-        luna_str_ends_ci(path, ".tga"))
-        return LUNA_ICON_RASTER;
-    if (luna_str_ends_ci(path, ".svg") || luna_str_ends_ci(path, ".svgz"))
-        return LUNA_ICON_SVG;
-    return LUNA_ICON_NONE;
+/* Formats luna-ui can paint via background-image (stb_image + NanoSVG). */
+static int luna_icon_path_supported(const char* path) {
+    if (!path || !*path) return 0;
+    return luna_str_ends_ci(path, ".png") || luna_str_ends_ci(path, ".jpg") ||
+           luna_str_ends_ci(path, ".jpeg") || luna_str_ends_ci(path, ".bmp") ||
+           luna_str_ends_ci(path, ".tga") || luna_str_ends_ci(path, ".svg");
 }
 
-static int luna_icon_accept_path(const char* path, char* out, size_t out_n,
-                                 LunaIconType* type) {
+static int luna_icon_accept_path(const char* path, char* out, size_t out_n) {
     if (!path || !*path || access(path, R_OK) != 0) return 0;
-    LunaIconType t = luna_icon_type_from_path(path);
-    if (t == LUNA_ICON_NONE) return 0;
+    if (!luna_icon_path_supported(path)) return 0;
     snprintf(out, out_n, "%s", path);
-    if (type) *type = t;
     return 1;
 }
 
@@ -6613,7 +6659,7 @@ static void luna_icon_normalize_name(const char* src, char* dst, size_t dst_n) {
     dst[0] = 0;
     if (!src || !*src) return;
     snprintf(dst, dst_n, "%s", src);
-    static const char* exts[] = { ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".svg", ".svgz", NULL };
+    static const char* exts[] = { ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".svg", NULL };
     for (int i = 0; exts[i]; i++) {
         size_t dl = strlen(dst), el = strlen(exts[i]);
         if (dl > el && !strcasecmp(dst + dl - el, exts[i])) {
@@ -6624,19 +6670,19 @@ static void luna_icon_normalize_name(const char* src, char* dst, size_t dst_n) {
 }
 
 static int luna_icon_try_pixmap_dir(const char* dir, const char* name,
-                                    char* out, size_t out_n, LunaIconType* type) {
-    static const char* exts[] = { "", ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".svg", ".svgz", NULL };
+                                    char* out, size_t out_n) {
+    static const char* exts[] = { "", ".png", ".jpg", ".jpeg", ".bmp", ".tga", ".svg", NULL };
     for (int i = 0; exts[i]; i++) {
         char path[PATH_MAX];
         int n = snprintf(path, sizeof(path), "%s/%s%s", dir, name, exts[i]);
         if (n > 0 && (size_t)n < sizeof(path) &&
-            luna_icon_accept_path(path, out, out_n, type)) return 1;
+            luna_icon_accept_path(path, out, out_n)) return 1;
     }
     return 0;
 }
 
 static int luna_icon_try_theme(const char* root, const char* theme, const char* name,
-                               char* out, size_t out_n, LunaIconType* type) {
+                               char* out, size_t out_n) {
     static const int sizes[] = { 512, 256, 192, 128, 96, 72, 64, 48, 32, 24, 22, 16 };
     static const char* contexts[] = { "apps", "applications", NULL };
     static const char* raster_exts[] = { ".png", ".jpg", ".jpeg", ".bmp", ".tga", NULL };
@@ -6648,31 +6694,26 @@ static int luna_icon_try_theme(const char* root, const char* theme, const char* 
                                  root, theme, sizes[s], sizes[s], contexts[c], name,
                                  raster_exts[e]);
                 if (n > 0 && (size_t)n < sizeof(path) &&
-                    luna_icon_accept_path(path, out, out_n, type)) return 1;
+                    luna_icon_accept_path(path, out, out_n)) return 1;
             }
         }
     }
-    static const char* svg_exts[] = { ".svg", ".svgz", NULL };
     for (int c = 0; contexts[c]; c++) {
-        for (int e = 0; svg_exts[e]; e++) {
-            char path[PATH_MAX];
-            int n = snprintf(path, sizeof(path), "%s/%s/scalable/%s/%s%s",
-                             root, theme, contexts[c], name, svg_exts[e]);
-            if (n > 0 && (size_t)n < sizeof(path) &&
-                luna_icon_accept_path(path, out, out_n, type)) return 1;
-        }
+        char path[PATH_MAX];
+        int n = snprintf(path, sizeof(path), "%s/%s/scalable/%s/%s.svg",
+                         root, theme, contexts[c], name);
+        if (n > 0 && (size_t)n < sizeof(path) &&
+            luna_icon_accept_path(path, out, out_n)) return 1;
     }
     return 0;
 }
 
-static int luna_app_icon_resolve(const char* icon, char* out, size_t out_n,
-                                 LunaIconType* type) {
+static int luna_app_icon_resolve(const char* icon, char* out, size_t out_n) {
     if (!out || out_n == 0) return 0;
     out[0] = 0;
-    if (type) *type = LUNA_ICON_NONE;
     if (!icon || !*icon) return 0;
     if (path_is_absolute(icon))
-        return luna_icon_accept_path(icon, out, out_n, type);
+        return luna_icon_accept_path(icon, out, out_n);
 
     char name[256];
     luna_icon_normalize_name(icon, name, sizeof(name));
@@ -6694,7 +6735,7 @@ static int luna_app_icon_resolve(const char* icon, char* out, size_t out_n,
 
     for (int t = 0; themes[t]; t++)
         for (int r = 0; roots[r]; r++)
-            if (roots[r][0] && luna_icon_try_theme(roots[r], themes[t], name, out, out_n, type))
+            if (roots[r][0] && luna_icon_try_theme(roots[r], themes[t], name, out, out_n))
                 return 1;
 
     char user_pixmaps[PATH_MAX] = "";
@@ -6702,8 +6743,8 @@ static int luna_app_icon_resolve(const char* icon, char* out, size_t out_n,
     const char* pixmaps[] = { user_pixmaps, "/usr/local/share/pixmaps", "/usr/share/pixmaps", NULL };
     for (int i = 0; pixmaps[i]; i++) {
         if (!pixmaps[i][0]) continue;
-        if (luna_icon_try_pixmap_dir(pixmaps[i], icon, out, out_n, type)) return 1;
-        if (strcmp(icon, name) && luna_icon_try_pixmap_dir(pixmaps[i], name, out, out_n, type)) return 1;
+        if (luna_icon_try_pixmap_dir(pixmaps[i], icon, out, out_n)) return 1;
+        if (strcmp(icon, name) && luna_icon_try_pixmap_dir(pixmaps[i], name, out, out_n)) return 1;
     }
     return 0;
 }
@@ -6713,12 +6754,10 @@ static void xdg_app_icon_apply(int element_idx, const LunaLpXdgApp* app) {
     luna_set_background_image(element_idx, NULL);
     luna_set_text(element_idx, "");
     if (!app) return;
-    if (app->icon_type == LUNA_ICON_RASTER && app->icon_path[0]) {
+    if (app->icon_path[0]) {
         luna_set_background_image(element_idx, app->icon_path);
         return;
     }
-    /* SVG paths are deliberately retained.  Future luna-svg integration only
-     * needs to replace this branch; desktop parsing/theme lookup stays shared. */
     luna_set_text(element_idx, "\uf2d0");
 }
 
@@ -6749,13 +6788,10 @@ static void lp_xdg_try_add(const char* path, const char* desktop_id,
     snprintf(slot->icon_name, sizeof(slot->icon_name), "%s", entry.icon);
     snprintf(slot->startup_wm_class, sizeof(slot->startup_wm_class), "%s",
              entry.startup_wm_class);
-    (void)luna_app_icon_resolve(entry.icon, slot->icon_path,
-                                sizeof(slot->icon_path), &slot->icon_type);
-    fprintf(stderr, "[luna-shell/icon] %s: Icon=%s -> %s (%s)\n",
+    (void)luna_app_icon_resolve(entry.icon, slot->icon_path, sizeof(slot->icon_path));
+    fprintf(stderr, "[luna-shell/icon] %s: Icon=%s -> %s\n",
             slot->name, slot->icon_name[0] ? slot->icon_name : "(none)",
-            slot->icon_path[0] ? slot->icon_path : "(not found)",
-            slot->icon_type == LUNA_ICON_RASTER ? "raster" :
-            slot->icon_type == LUNA_ICON_SVG ? "svg" : "none");
+            slot->icon_path[0] ? slot->icon_path : "(not found)");
 }
 
 static void lp_xdg_scan_dir(const char* dir,
@@ -7103,8 +7139,9 @@ static void on_mouse_release_hook(int hit, int drag_moved) {
         !hit_inside(hit, g_alarm_ring_idx))
         dismiss_calendar_menu();
     if (is_shown(g_win_menu_idx) && !hit_inside(hit, g_win_menu_idx)) {
-        /* Keep open when the click was on a win_item or tray window icon
-         * (handler opens/repositions on press or release). */
+        /* Keep open when the click was on a win_item, tray window icon, or
+         * modeless-dialog titlebar (handler opens on press; release must not
+         * race-dismiss the menu). */
         int on_anchor = 0;
         for (int p = hit; p != -1; p = luna_element_at(p)->parent_idx) {
             const char* id = luna_element_at(p)->id;
@@ -7113,6 +7150,13 @@ static void on_mouse_release_hook(int hit, int drag_moved) {
             if (id[0]=='t' && id[1]=='r' && id[2]=='a' && id[3]=='y' && id[4]=='_') {
                 on_anchor = 1; break;
             }
+        }
+        if (!on_anchor) {
+            double mx = 0.0, my = 0.0;
+            luna_get_pointer(&mx, &my);
+            int dlg = shell_dialog_kind_from_hit(hit);
+            if (dlg >= 0 && shell_dialog_hit_is_titlebar(dlg, hit, mx, my))
+                on_anchor = 1;
         }
         if (!on_anchor) dismiss_win_menu();
     }
@@ -9119,6 +9163,8 @@ static void poll_shell_state(void) {
                 break;
             }
         }
+        g_win_menu_dialog = -1;
+        win_menu_detach_embed();
         g_win_menu_target = wid;
         win_menu_set_maximize_label(w);
         int t = g_ui_idx[UI_WIN_MENU_TITLE];
@@ -9356,11 +9402,267 @@ static uint64_t win_id_from_element(LunaElement* e) {
     return 0;
 }
 
+static int* shell_dialog_max_flag(int kind) {
+    if (kind == SHELL_DLG_SETTINGS) return &g_settings_sheet_max;
+    if (kind == SHELL_DLG_ABOUT) return &g_about_sheet_max;
+    return NULL;
+}
+
+static int shell_dialog_box_idx(int kind) {
+    if (kind < 0 || kind >= SHELL_DLG_COUNT) return -1;
+    return luna_get_element_by_id(g_shell_dialogs[kind].box_id);
+}
+
+static int shell_dialog_root_idx(int kind) {
+    if (kind < 0 || kind >= SHELL_DLG_COUNT) return -1;
+    return luna_get_element_by_id(g_shell_dialogs[kind].root_id);
+}
+
+static int shell_dialog_kind_by_name(const char* name) {
+    if (!name || !name[0]) return -1;
+    for (int k = 0; k < SHELL_DLG_COUNT; k++)
+        if (!strcmp(g_shell_dialogs[k].name, name)) return k;
+    return -1;
+}
+
+static int shell_dialog_kind_from_hit(int hit) {
+    for (int p = hit; p != -1; p = luna_element_at(p)->parent_idx) {
+        const char* id = luna_element_at(p)->id;
+        if (!id || !id[0]) continue;
+        for (int k = 0; k < SHELL_DLG_COUNT; k++) {
+            int root = shell_dialog_root_idx(k);
+            if (root < 0 || !is_shown(root)) continue;
+            const ShellDialogChrome* d = &g_shell_dialogs[k];
+            if (!strcmp(id, d->root_id) || !strcmp(id, d->box_id) ||
+                !strcmp(id, d->drag_id))
+                return k;
+        }
+    }
+    return -1;
+}
+
+static int shell_dialog_hit_is_control(int kind, int hit) {
+    const ShellDialogChrome* d = &g_shell_dialogs[kind];
+    const char* local[3] = { d->close_id, d->min_id, d->max_id };
+    for (int i = 0; i < 3; i++) {
+        if (!local[i] || !local[i][0]) continue;
+        int idx = luna_get_element_by_id(local[i]);
+        if (idx >= 0 && hit_inside(hit, idx)) return 1;
+    }
+    return 0;
+}
+
+static int shell_dialog_hit_is_titlebar(int kind, int hit, double x, double y) {
+    if (kind < 0 || kind >= SHELL_DLG_COUNT || hit < 0) return 0;
+    if (shell_dialog_hit_is_control(kind, hit)) return 0;
+
+    const ShellDialogChrome* d = &g_shell_dialogs[kind];
+    int drag = luna_get_element_by_id(d->drag_id);
+    if (drag >= 0 && hit_inside(hit, drag)) return 1;
+
+    /* Any hit inside the titleband of a shown dialog counts as chrome —
+     * including a title label layered above/below the drag handle — as long
+     * as it is not a traffic-light control. */
+    int box = shell_dialog_box_idx(kind);
+    LunaElement* be = box >= 0 ? luna_element_at(box) : NULL;
+    if (!be || be->w <= 0.0f || be->h <= 0.0f) return 0;
+    if (!hit_inside(hit, box)) return 0;
+    float th = 52.0f;
+    if (drag >= 0) {
+        LunaElement* de = luna_element_at(drag);
+        if (de && de->h > 1.0f) th = de->h;
+    }
+    return x >= be->x && x <= be->x + be->w &&
+           y >= be->y && y <= be->y + th;
+}
+
+static void shell_dialog_close(int kind) {
+    switch (kind) {
+        case SHELL_DLG_SETTINGS:   on_settings_close(NULL); break;
+        case SHELL_DLG_ABOUT:      on_about_close(NULL); break;
+        case SHELL_DLG_CONFIRM:    on_confirm_cancel(NULL); break;
+        case SHELL_DLG_NET_DETAIL: net_detail_close(NULL); break;
+        default: break;
+    }
+}
+
+static void shell_dialog_minimize(int kind) {
+    /* Yellow traffic light: hide the sheet (same as each dialog's min handler). */
+    shell_dialog_close(kind);
+}
+
+static void shell_dialog_maximize(int kind) {
+    int box = shell_dialog_box_idx(kind);
+    int* flag = shell_dialog_max_flag(kind);
+    if (box < 0 || !flag) return;
+    if (!(g_shell_dialogs[kind].flags & SHELL_DLG_F_MAXIMIZE)) return;
+    sheet_toggle_maximize(box, flag);
+}
+
+static void shell_dialog_center(int kind) {
+    int box = shell_dialog_box_idx(kind);
+    if (box < 0) box = shell_dialog_root_idx(kind);
+    if (box < 0) return;
+    int* flag = shell_dialog_max_flag(kind);
+    if (flag && *flag) {
+        *flag = 0;
+        LunaElement* e = luna_element_at(box);
+        if (e) {
+            e->has_css_width = 0;
+            e->has_css_height = 0;
+        }
+    }
+    center_element(box);
+}
+
+static void win_menu_detach_embed(void) {
+    if (!g_win_menu_embedded || g_win_menu_idx < 0) {
+        g_win_menu_embedded = 0;
+        g_win_menu_saved_parent = -1;
+        return;
+    }
+    LunaElement* menu = luna_element_at(g_win_menu_idx);
+    if (menu) {
+        menu->parent_idx = g_win_menu_saved_parent;
+        menu->z_override_valid = 0;
+    }
+    g_win_menu_embedded = 0;
+    g_win_menu_saved_parent = -1;
+    luna_mark_layout_dirty();
+}
+
+static void win_menu_embed_in(int host_idx) {
+    if (g_win_menu_idx < 0 || host_idx < 0) return;
+    LunaElement* menu = luna_element_at(g_win_menu_idx);
+    if (!menu) return;
+    if (g_win_menu_embedded && menu->parent_idx == host_idx) {
+        menu->z_override_valid = 1;
+        menu->z_override = 9000;
+        menu->z_index = 9000;
+        return;
+    }
+    win_menu_detach_embed();
+    g_win_menu_saved_parent = menu->parent_idx;
+    menu->parent_idx = host_idx;
+    menu->z_override_valid = 1;
+    menu->z_override = 9000;
+    menu->z_index = 9000;
+    g_win_menu_embedded = 1;
+    luna_mark_layout_dirty();
+}
+
+/* Like position_menu_at, but when the menu is embedded under a dialog box the
+ * click is in document space and must be converted to box-local coordinates. */
+static void position_menu_at_for_host(int menu_idx, int host_idx, float x, float y) {
+    if (menu_idx < 0) return;
+    float lx = x, ly = y;
+    float host_w = luna_window_width;
+    float host_h = luna_window_height;
+    LunaElement* host = host_idx >= 0 ? luna_element_at(host_idx) : NULL;
+    if (host && host->w > 1.0f && host->h > 1.0f) {
+        lx = x - host->x;
+        ly = y - host->y;
+        host_w = host->w;
+        host_h = host->h;
+    }
+    LunaElement* m = luna_element_at(menu_idx);
+    float mw = m->w > 1.0f ? m->w : (m->css_width > 1.0f ? m->css_width : 200.0f);
+    float mh = m->h > 1.0f ? m->h : (m->css_height > 1.0f ? m->css_height : 160.0f);
+    if (lx + mw > host_w - 8.0f) lx = host_w - mw - 8.0f;
+    if (ly + mh > host_h - 8.0f) ly = host_h - mh - 8.0f;
+    if (lx < 6.0f) lx = 6.0f;
+    if (ly < 6.0f) ly = 6.0f;
+    {
+        float avail = host_h - ly - 8.0f;
+        if (avail > 48.0f && mh > avail) {
+            m->has_max_height = 1;
+            m->css_max_height = floorf(avail);
+            m->max_height_pct = 0;
+            m->raw_max_height = m->css_max_height;
+            m->raw_max_height_off = 0.0f;
+        }
+    }
+    m->rel_x = floorf(lx);
+    m->rel_y = floorf(ly);
+    m->pos_overridden_x = 1;
+    m->pos_overridden_y = 1;
+    m->pct_left = 0;
+    m->pct_top = 0;
+    m->has_left = 1;
+    m->has_top = 1;
+    m->has_right = 0;
+    m->has_bottom = 0;
+    m->raw_left = m->rel_x;
+    m->raw_top = m->rel_y;
+    luna_mark_layout_dirty();
+}
+
+static void win_menu_set_dialog_maximize_label(int kind) {
+    int* flag = shell_dialog_max_flag(kind);
+    const char* label = (flag && *flag) ? "Restore" : "Maximize";
+    if (g_wm_maximize_label_idx >= 0) luna_set_text(g_wm_maximize_label_idx, label);
+    if (g_wm_fullscreen_label_idx >= 0) luna_set_text(g_wm_fullscreen_label_idx, "Fullscreen");
+}
+
+static void shell_dialog_menu_open(int kind, float x, float y) {
+    if (kind < 0 || kind >= SHELL_DLG_COUNT || g_win_menu_idx < 0) return;
+    const ShellDialogChrome* d = &g_shell_dialogs[kind];
+    dismiss_luna_menu(g_luna_menu_idx);
+    dismiss_cc(g_cc_idx);
+    dismiss_clip_menu();
+    g_win_menu_target = 0;
+    g_win_menu_dialog = kind;
+    win_menu_set_dialog_maximize_label(kind);
+    const char* title = "Window";
+    if (d->title_id) {
+        int t = luna_get_element_by_id(d->title_id);
+        LunaElement* te = t >= 0 ? luna_element_at(t) : NULL;
+        if (te && te->text[0]) title = te->text;
+    }
+    int mt = luna_get_element_by_id("win_menu_title");
+    if (mt >= 0) luna_set_text(mt, title);
+    /* Embed under the dialog box so the menu shares that surface and cannot
+     * fall behind a luna.dialog.* / modal sheet layer. */
+    int box = shell_dialog_box_idx(kind);
+    win_menu_embed_in(box >= 0 ? box : shell_dialog_root_idx(kind));
+    set_hidden(g_win_menu_idx, 0);
+    position_menu_at_for_host(g_win_menu_idx, box, x, y);
+}
+
+static int on_win_menu_dialog_action(const char* id) {
+    int kind = g_win_menu_dialog;
+    if (kind < 0 || !id) return 0;
+    dismiss_win_menu();
+    if (!strcmp(id, "wm_activate"))
+        return 1; /* already front-most among shell chrome */
+    if (!strcmp(id, "wm_minimize")) {
+        shell_dialog_minimize(kind);
+        return 1;
+    }
+    if (!strcmp(id, "wm_maximize") || !strcmp(id, "wm_fullscreen")) {
+        shell_dialog_maximize(kind);
+        return 1;
+    }
+    if (!strcmp(id, "wm_tile_left") || !strcmp(id, "wm_tile_right"))
+        return 1; /* no tiling for modeless sheets */
+    if (!strcmp(id, "wm_center")) {
+        shell_dialog_center(kind);
+        return 1;
+    }
+    if (!strcmp(id, "wm_close")) {
+        shell_dialog_close(kind);
+        return 1;
+    }
+    return 0;
+}
+
 static void win_menu_open(uint64_t wid, int anchor_idx, const char* title) {
     if (!wid || g_win_menu_idx < 0) return;
     dismiss_luna_menu(g_luna_menu_idx);
     dismiss_cc(g_cc_idx);
     dismiss_clip_menu();
+    win_menu_detach_embed();
+    g_win_menu_dialog = -1;
     g_win_menu_target = wid;
     LunaWinEntry* w = NULL;
     for (int i = 0; i < g_win_count; i++) {
@@ -9374,12 +9676,16 @@ static void win_menu_open(uint64_t wid, int anchor_idx, const char* title) {
 }
 
 static void on_win_menu_action(LunaElement* e) {
-    uint64_t wid = g_win_menu_target;
     const char* id = NULL;
     for (int idx = elem_idx_of(e); idx != -1; idx = luna_element_at(idx)->parent_idx) {
         const char* cand = luna_element_at(idx)->id;
         if (cand[0] == 'w' && cand[1] == 'm' && cand[2] == '_') { id = cand; break; }
     }
+    if (g_win_menu_dialog >= 0) {
+        on_win_menu_dialog_action(id);
+        return;
+    }
+    uint64_t wid = g_win_menu_target;
     LunaWinEntry* w = NULL;
     for (int i = 0; i < g_win_count; i++) {
         if (g_wins[i].id == wid) { w = &g_wins[i]; break; }
@@ -10140,9 +10446,8 @@ static void bind_indices(void) {
      * behavior in the shell so presentation-only HTML changes cannot disable
      * moving either sheet. */
     {
-        const char* drag_ids[] = { "about_drag", "settings_drag", "confirm_drag", "net_detail_drag" };
-        for (size_t i = 0; i < sizeof(drag_ids) / sizeof(drag_ids[0]); i++) {
-            int idx = luna_get_element_by_id(drag_ids[i]);
+        for (int k = 0; k < SHELL_DLG_COUNT; k++) {
+            int idx = luna_get_element_by_id(g_shell_dialogs[k].drag_id);
             if (idx < 0) continue;
             LunaElement* drag = luna_element_at(idx);
             drag->is_draggable = 1;
@@ -11667,6 +11972,11 @@ typedef struct {
     struct zwlr_layer_surface_v1*  layer_surf;
     struct wl_egl_window*          egl_win;
     EGLSurface                     egl_surf;
+    /* Presentation pacing.  A fixed 17 ms timer runs at 58.8 Hz and beats
+     * against a physical 60 Hz scanout, producing a very visible periodic
+     * hitch.  Keep at most one committed frame in flight and let the
+     * compositor's wl_surface.frame event open the next slot. */
+    struct wl_callback*            frame_cb;
     int                            configured;
     int                            surf_w, surf_h;      /* logical surface size */
     int                            buffer_scale;        /* integer Wayland output scale */
@@ -11916,24 +12226,18 @@ static int wl_point_in_id(const char* id, double x, double y) {
 }
 
 static int wl_point_over_dialog_control(double x, double y) {
-    static const char* const ids[] = {
-        "stl_close", "stl_min", "stl_max",
-        "tl_close", "tl_min", "tl_max",
-        "ctl_close", "ctl_min", "ctl_max",
-        "ntl_close", "ntl_min", "ntl_max"
-    };
-    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
-        if (wl_point_in_id(ids[i], x, y)) return 1;
+    for (int k = 0; k < SHELL_DLG_COUNT; k++) {
+        const ShellDialogChrome* d = &g_shell_dialogs[k];
+        const char* ids[3] = { d->close_id, d->min_id, d->max_id };
+        for (int i = 0; i < 3; i++)
+            if (ids[i] && wl_point_in_id(ids[i], x, y)) return 1;
+    }
     return 0;
 }
 
 static const char* wl_compact_drag_id(const LunaSurface* s) {
-    if (!s || !s->name) return NULL;
-    if (!strcmp(s->name, "settings"))   return "settings_drag";
-    if (!strcmp(s->name, "about"))      return "about_drag";
-    if (!strcmp(s->name, "confirm"))    return "confirm_drag";
-    if (!strcmp(s->name, "net_detail")) return "net_detail_drag";
-    return NULL;
+    int kind = s ? shell_dialog_kind_by_name(s->name) : -1;
+    return kind >= 0 ? g_shell_dialogs[kind].drag_id : NULL;
 }
 
 /* Synchronize a compact modeless Wayland layer with its actual Luna box.
@@ -11944,16 +12248,34 @@ static int surf_sync_compact_geometry(LunaSurface* s) {
     LunaElement* box = luna_element_at(s->input_root_idx);
     if (!box || box->w <= 0.0f || box->h <= 0.0f) return 0;
 
-    int box_w = (int)ceilf(box->w);
-    int box_h = (int)ceilf(box->h);
+    float left = box->x;
+    float top = box->y;
+    float right = box->x + box->w;
+    float bottom = box->y + box->h;
+
+    /* An embedded window menu is painted on this surface; grow the compact
+     * buffer so the popup is not clipped when it hangs past the dialog edge. */
+    if (g_win_menu_embedded && g_win_menu_idx >= 0 && is_shown(g_win_menu_idx) &&
+        hit_inside(g_win_menu_idx, s->input_root_idx)) {
+        LunaElement* menu = luna_element_at(g_win_menu_idx);
+        if (menu && menu->w > 0.0f && menu->h > 0.0f) {
+            if (menu->x < left) left = menu->x;
+            if (menu->y < top) top = menu->y;
+            if (menu->x + menu->w > right) right = menu->x + menu->w;
+            if (menu->y + menu->h > bottom) bottom = menu->y + menu->h;
+        }
+    }
+
+    int box_w = (int)ceilf(right - left);
+    int box_h = (int)ceilf(bottom - top);
     if (box_w < 1) box_w = 1;
     if (box_h < 1) box_h = 1;
 
     /* Keep transparent breathing room around the real dialog so its
      * CSS box-shadow is not clipped by the compact Wayland buffer. */
     int pad = wl_compact_pad(s);
-    int x = (int)floorf(box->x) - pad;
-    int y = (int)floorf(box->y) - pad;
+    int x = (int)floorf(left) - pad;
+    int y = (int)floorf(top) - pad;
     int w = box_w + pad * 2;
     int h = box_h + pad * 2;
 
@@ -12563,10 +12885,15 @@ static int surf_wl_create(LunaSurface* s) {
      * xdg_toplevels (GTK apps) and list them in Alt+Tab.  Menus / launchpad /
      * toast stay on the always-on-top overlay path via "luna-shell". */
     const char* ns = "luna-shell";
-    if (s->compact_to_input && s->name) {
-        if (!strcmp(s->name, "settings"))        ns = "luna.dialog.settings";
-        else if (!strcmp(s->name, "about"))      ns = "luna.dialog.about";
-        else if (!strcmp(s->name, "net_detail")) ns = "luna.dialog.net_detail";
+    char dialog_ns[64];
+    {
+        int kind = shell_dialog_kind_by_name(s->name);
+        if (s->compact_to_input && kind >= 0 &&
+            (g_shell_dialogs[kind].flags & SHELL_DLG_F_DIALOG_NS)) {
+            snprintf(dialog_ns, sizeof(dialog_ns), "luna.dialog.%s",
+                     g_shell_dialogs[kind].name);
+            ns = dialog_ns;
+        }
     }
     s->layer_surf = zwlr_layer_shell_v1_get_layer_surface(
         g_wl.layer_shell, s->wl_surf, NULL, s->layer, ns);
@@ -12673,6 +13000,24 @@ static EGLBoolean surf_swap(LunaSurface* s) {
     return g_egl_swap_damage(g_wl.dpy, s->egl_surf, rect, 1);
 }
 
+static void surf_frame_done(void* data, struct wl_callback* cb,
+                            uint32_t callback_data) {
+    (void)callback_data;
+    LunaSurface* s = (LunaSurface*)data;
+    if (s->frame_cb == cb) s->frame_cb = NULL;
+    wl_callback_destroy(cb);
+}
+
+static const struct wl_callback_listener g_surf_frame_listener = {
+    .done = surf_frame_done,
+};
+
+static void surf_frame_cancel(LunaSurface* s) {
+    if (!s->frame_cb) return;
+    wl_callback_destroy(s->frame_cb);
+    s->frame_cb = NULL;
+}
+
 
 /* ── Drop the EGL window of a hidden overlay ──
  * Each full-screen overlay costs a whole buffer chain (1920x1200x4 x N) on the
@@ -12682,6 +13027,7 @@ static EGLBoolean surf_swap(LunaSurface* s) {
  * the next open.  The layer surface itself stays around, so no re-negotiation
  * with the compositor is needed. */
 static void surf_egl_destroy(LunaSurface* s) {
+    surf_frame_cancel(s);
     if (s->egl_surf == EGL_NO_SURFACE) return;
     /* Never destroy the surface the context is currently bound to. */
     if (eglGetCurrentSurface(EGL_DRAW) == s->egl_surf)
@@ -12725,6 +13071,7 @@ static int wl_check_error(const char* where) {
 
 /* ── Free a layer surface (used when unmap is permanent, e.g. on close) ── */
 static void surf_destroy(LunaSurface* s) {
+    surf_frame_cancel(s);
     surf_egl_destroy(s);
     if (s->layer_surf) { zwlr_layer_surface_v1_destroy(s->layer_surf); s->layer_surf = NULL; }
     if (s->wl_surf)    { wl_surface_destroy(s->wl_surf);       s->wl_surf    = NULL; }
@@ -12776,6 +13123,20 @@ static void shell_dispatch_pending_right_click(void) {
     if (!g_shell_pending_right) return;
     g_shell_pending_right = 0;
     int hit = hit_test_at(g_shell_right_x, g_shell_right_y);
+
+    /* Modeless dialog titlebars share the same window menu as compositor
+     * windows (minimize / maximize / center / close). */
+    {
+        int dlg = shell_dialog_kind_from_hit(hit);
+        if (dlg >= 0 &&
+            shell_dialog_hit_is_titlebar(dlg, hit, g_shell_right_x, g_shell_right_y)) {
+            shell_dialog_menu_open(dlg, (float)g_shell_right_x, (float)g_shell_right_y);
+            luna_consume_pointer_event();
+            shell_request_repaint(-1);
+            return;
+        }
+    }
+
     for (int i = hit; i != -1; ) {
         LunaElement* e = luna_element_at(i);
         if (!e) break;
@@ -13004,10 +13365,24 @@ static void surf_update_input_region(LunaSurface* s) {
     if (g_wl_dialog_drag.active && g_wl_dialog_drag.surf == s) return;
     LunaElement* box = luna_element_at(s->input_root_idx);
     if (!box) return;
-    int x = (int)floorf(box->x - s->doc_x);
-    int y = (int)floorf(box->y - s->doc_y);
-    int w = (int)ceilf(box->w);
-    int h = (int)ceilf(box->h);
+    float left = box->x;
+    float top = box->y;
+    float right = box->x + box->w;
+    float bottom = box->y + box->h;
+    if (g_win_menu_embedded && g_win_menu_idx >= 0 && is_shown(g_win_menu_idx) &&
+        hit_inside(g_win_menu_idx, s->input_root_idx)) {
+        LunaElement* menu = luna_element_at(g_win_menu_idx);
+        if (menu && menu->w > 0.0f && menu->h > 0.0f) {
+            if (menu->x < left) left = menu->x;
+            if (menu->y < top) top = menu->y;
+            if (menu->x + menu->w > right) right = menu->x + menu->w;
+            if (menu->y + menu->h > bottom) bottom = menu->y + menu->h;
+        }
+    }
+    int x = (int)floorf(left - s->doc_x);
+    int y = (int)floorf(top - s->doc_y);
+    int w = (int)ceilf(right - left);
+    int h = (int)ceilf(bottom - top);
     if (w <= 0 || h <= 0) return;
     if (x == s->input_x && y == s->input_y && w == s->input_w && h == s->input_h)
         return;
@@ -13177,6 +13552,10 @@ static int wl_backend_start(void) {
 /* ── Render one surface (skipped when clean — see g_surf_dirty) ── */
 static void wl_surf_render(LunaSurface* s, int surf_idx) {
     if (!surf_is_live(s) || s->surf_w <= 0 || s->surf_h <= 0) return;
+    /* Do not queue frames faster than the compositor can present them.  The
+     * callback wakes wl_backend_poll_events(), after which the still-dirty
+     * surface is rendered with the newest animation/input state. */
+    if (s->frame_cb) return;
     /* Native dialog drag moves the layer via set_margin while the Luna sheet
      * stays put.  Re-rendering with the live doc origin crops the old sheet
      * out of the compact buffer and leaves a blank (or torn) dialog. */
@@ -13204,9 +13583,18 @@ static void wl_surf_render(LunaSurface* s, int surf_idx) {
      * eglSwapBuffers() on a dead connection walks into create_wl_buffer()
      * with a NULL image — the "segfault in libgallium" crash. */
     if (wl_check_error("pre-swap")) return;
+    s->frame_cb = wl_surface_frame(s->wl_surf);
+    if (!s->frame_cb) {
+        fprintf(stderr, "[luna-shell/wl] cannot allocate frame callback for '%s'\n",
+                s->name);
+        g_should_close = 1;
+        return;
+    }
+    wl_callback_add_listener(s->frame_cb, &g_surf_frame_listener, s);
     if (!eglMakeCurrent(g_wl.dpy, s->egl_surf, s->egl_surf, g_wl.ctx)) {
         fprintf(stderr, "[luna-shell/wl] eglMakeCurrent failed for '%s' (EGL 0x%x)\n",
                 s->name, eglGetError());
+        surf_frame_cancel(s);
         g_should_close = 1;
         return;
     }
@@ -13234,6 +13622,7 @@ static void wl_surf_render(LunaSurface* s, int surf_idx) {
     shell_gl_sync_before_swap();
     if (!surf_swap(s)) {
         EGLint err = eglGetError();
+        surf_frame_cancel(s);
         fprintf(stderr, "[luna-shell/wl] eglSwapBuffers failed for '%s' (EGL 0x%x)\n",
                 s->name, err);
         if (err == EGL_BAD_ALLOC)
@@ -13274,6 +13663,11 @@ static void wl_surfs_update(void) {
     for (int i = LUNA_SURF_FIRST_OL; i < LUNA_SURF_COUNT; i++) {
         LunaSurface* s = &g_surfs[i];
         int shown = (s->root_idx >= 0) ? is_shown(s->root_idx) : 0;
+        /* Dialog titlebar menus are reparented onto the dialog surface; keep
+         * the dedicated win_menu overlay unmapped so it cannot stack behind. */
+        if (shown && g_win_menu_embedded && s->root_id &&
+            !strcmp(s->root_id, "win_menu"))
+            shown = 0;
         if (shown != s->was_shown) {
             s->was_shown = shown;
             if (shown) s->input_w = s->input_h = -1;

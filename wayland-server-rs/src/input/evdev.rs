@@ -29,6 +29,9 @@ const ABS_MT_TRACKING_ID: u16 = 0x39;
 const BTN_LEFT: u16 = 0x110;
 const BTN_TASK: u16 = 0x117;
 const BTN_TOUCH: u16 = 0x14a;
+const BTN_TOOL_FINGER: u16 = 0x145;
+const BTN_TOOL_PEN: u16 = 0x140;
+const BTN_STYLUS: u16 = 0x14b;
 const INPUT_PROP_DIRECT: usize = 0x01;
 const KEY_LEFTCTRL: u16 = 29;
 const KEY_RIGHTCTRL: u16 = 97;
@@ -520,10 +523,27 @@ fn rescan(devices: &mut HashMap<String, Device>, active: bool, leds: u8) {
     let mt_x = abs_axis(fd, ABS_MT_POSITION_X);
     let mt_y = abs_axis(fd, ABS_MT_POSITION_Y);
     let mt_axes = mt_x.is_some() && mt_y.is_some();
-    let abs_x = if mt_axes { mt_x } else { abs_axis(fd, ABS_X) };
-    let abs_y = if mt_axes { mt_y } else { abs_axis(fd, ABS_Y) };
+    let mut abs_x = if mt_axes { mt_x } else { abs_axis(fd, ABS_X) };
+    let mut abs_y = if mt_axes { mt_y } else { abs_axis(fd, ABS_Y) };
     let direct = has_prop(fd, INPUT_PROP_DIRECT);
-    let pointer = (has_bit(fd, EV_REL as u32, REL_X as usize) && has_bit(fd, EV_REL as u32, REL_Y as usize)) || (abs_x.is_some() && abs_y.is_some()) || has_bit(fd, EV_KEY as u32, BTN_LEFT as usize);
+    // ABS_X/ABS_Y alone does not make a device a pointing device.  Sensors and
+    // joysticks expose the same axes and stream samples continuously: Apple's
+    // SMC sudden-motion sensor (input node "applesmc") reports a few hundred
+    // noisy samples a second, which flush_absolute() then turns into pointer
+    // deltas and the cursor shakes for as long as the machine is powered on.
+    // A real touchpad, touchscreen or tablet always reports a contact button
+    // as well, so require one before trusting the absolute axes.
+    let contact_button = has_bit(fd, EV_KEY as u32, BTN_TOUCH as usize)
+      || has_bit(fd, EV_KEY as u32, BTN_LEFT as usize)
+      || has_bit(fd, EV_KEY as u32, BTN_TOOL_FINGER as usize)
+      || has_bit(fd, EV_KEY as u32, BTN_TOOL_PEN as usize)
+      || has_bit(fd, EV_KEY as u32, BTN_STYLUS as usize);
+    if !contact_button {
+      abs_x = None;
+      abs_y = None;
+    }
+    let relative = has_bit(fd, EV_REL as u32, REL_X as usize) && has_bit(fd, EV_REL as u32, REL_Y as usize);
+    let pointer = relative || (abs_x.is_some() && abs_y.is_some()) || has_bit(fd, EV_KEY as u32, BTN_LEFT as usize);
     if !keyboard && !pointer {
       unsafe { libc::close(fd) };
       continue;
