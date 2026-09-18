@@ -306,7 +306,10 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 
 #luna_menu { left: 8px; width: 256px; }
-#win_menu  { left: 200px; width: 210px; }
+/* Above .modal_sheet / .dialog_window so the window menu cannot paint under
+ * modeless dialogs on single-framebuffer backends (and as a belt-and-braces
+ * stacking hint when the menu is embedded in a dialog). */
+#win_menu  { left: 200px; width: 210px; z-index: 860; }
 #clip_menu { right: 160px; left: auto; width: 288px; max-height: 420px; }
 .clip_empty {
   display: block; height: 38px; padding: 10px 14px;
@@ -750,8 +753,8 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 .dialog_alert .tl_yellow, .dialog_alert .tl_green { display: none; }
 .dialog_alert .tl_red { display: block; cursor: pointer; z-index: 12; }
 
-/* Shared title-bar drag handle for all three dialog types. */
-#about_drag, #settings_drag, #confirm_drag {
+/* Shared title-bar drag handle for all modeless dialog types. */
+#about_drag, #settings_drag, #confirm_drag, #net_detail_drag {
   position: absolute; left: 0; top: 0; width: 100%;
   height: var(--dialog-titlebar);
   z-index: 10;

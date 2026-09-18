@@ -323,6 +323,7 @@ pub struct Server {
   /// 0 = dynamic gradient chrome, 1 = original solid traffic-light chrome,
   /// 2 = flat retro titlebar (Win95-style).
   wm_titlebar_style: i32,
+  wm_titlebar_controls_left: bool,
   /// Server-side decoration titlebar height, in pixels.  Single source of
   /// truth for `draw_ssd_titlebar` / `hit_ssd` / maximize tiling insets and
   /// for the client-side chrome height Luna apps draw: luna-shell writes the
@@ -514,6 +515,7 @@ impl Server {
       wm_focus_outline: true,
       wm_cascade_windows: true,
       wm_titlebar_style: 0,
+      wm_titlebar_controls_left: true,
       wm_ssd_bar_h: SSD_BAR_H_DEFAULT,
       wm_titlebar_active: 0,
       wm_titlebar_inactive: 0,
@@ -2103,6 +2105,10 @@ impl Server {
                     "titlebar_double_click" => self.wm_titlebar_double_click = value != 0,
                     "titlebar_style" => {
                       self.wm_titlebar_style = value.clamp(0, 2);
+                      self.dirty = true;
+                    }
+                    "titlebar_controls" => {
+                      self.wm_titlebar_controls_left = value != 0;
                       self.dirty = true;
                     }
                     "titlebar_height" => {
@@ -5286,8 +5292,29 @@ impl Server {
     self.clients.insert(fd, client);
   }
 
+  fn ssd_control_centers(style: i32, left: bool, width: i32) -> [i32; 3] {
+    let (inset, step) = if style == 0 { (22, 18) } else { (16, 20) };
+    if left {
+      [inset, inset + step, inset + step * 2]
+    } else {
+      [width - inset, width - inset - step * 2, width - inset - step]
+    }
+  }
+
+  fn ssd_control_hit(style: i32, left: bool, width: i32, height: i32, x: i32, y: i32) -> Option<&'static str> {
+    if x < 0 || x >= width || y < 0 || y >= height || (y - height / 2).abs() > 8 {
+      return None;
+    }
+    Self::ssd_control_centers(style, left, width).into_iter()
+      .zip(["close", "min", "max"])
+      .find_map(|(center, action)| ((x - center).abs() <= 8).then_some(action))
+  }
+
   fn draw_ssd_titlebar(&mut self, win_x: i32, win_y: i32, win_w: i32, focused: bool) {
     let bar_y = win_y - self.wm_ssd_bar_h;
+    let [close_x, min_x, max_x] = Self::ssd_control_centers(
+      self.wm_titlebar_style, self.wm_titlebar_controls_left, win_w,
+    ).map(|x| win_x + x);
     // Chrome is drawn through Framebuffer::put so a damage-limited composite
     // leaves the parts of the titlebar nobody touched exactly as they were.
     let clip = self.fb.clip();
@@ -5320,9 +5347,9 @@ impl Server {
         }
       };
       let cy = bar_y + self.wm_ssd_bar_h / 2;
-      draw_dot(&mut self.fb, win_x + 16, cy, 0xffe8_4a4a);
-      draw_dot(&mut self.fb, win_x + 36, cy, 0xffe8_c04a);
-      draw_dot(&mut self.fb, win_x + 56, cy, 0xff4a_c86a);
+      draw_dot(&mut self.fb, close_x, cy, 0xffe8_4a4a);
+      draw_dot(&mut self.fb, min_x, cy, 0xffe8_c04a);
+      draw_dot(&mut self.fb, max_x, cy, 0xff4a_c86a);
       return;
     }
 
@@ -5360,20 +5387,20 @@ impl Server {
           }
         }
       };
-      draw_box(&mut self.fb, win_x + 16, 0xffc0_c0c0, 0xff00_0000);
-      draw_box(&mut self.fb, win_x + 36, 0xffc0_c0c0, 0xff00_0000);
-      draw_box(&mut self.fb, win_x + 56, 0xffc0_c0c0, 0xff00_0000);
+      draw_box(&mut self.fb, close_x, 0xffc0_c0c0, 0xff00_0000);
+      draw_box(&mut self.fb, min_x, 0xffc0_c0c0, 0xff00_0000);
+      draw_box(&mut self.fb, max_x, 0xffc0_c0c0, 0xff00_0000);
       let ink = if focused { 0xff00_0000 } else { 0xff40_4040 };
       for d in -3..=3 {
-        self.fb.put(win_x + 16 + d, cy + d, ink);
-        self.fb.put(win_x + 16 + d, cy - d, ink);
-        self.fb.put(win_x + 36 + d, cy, ink);
+        self.fb.put(close_x + d, cy + d, ink);
+        self.fb.put(close_x + d, cy - d, ink);
+        self.fb.put(min_x + d, cy, ink);
       }
       for d in -2..=2 {
-        self.fb.put(win_x + 56 + d, cy - 2, ink);
-        self.fb.put(win_x + 56 + d, cy + 2, ink);
-        self.fb.put(win_x + 54, cy + d, ink);
-        self.fb.put(win_x + 58, cy + d, ink);
+        self.fb.put(max_x + d, cy - 2, ink);
+        self.fb.put(max_x + d, cy + 2, ink);
+        self.fb.put(max_x - 2, cy + d, ink);
+        self.fb.put(max_x + 2, cy + d, ink);
       }
       return;
     }
@@ -5387,60 +5414,37 @@ impl Server {
       0xff00_0000 | (r << 16) | (g << 8) | bl
     }
 
-    // The modern style changes hue across the title bar, and shifts to a
-    // quieter graphite gradient when inactive.  A slim highlight/separator
-    // keeps the 28px bar crisp without reverting to a heavy frame.
-    let (left, right) = if focused {
-      if self.wm_titlebar_active != 0 {
-        (self.wm_titlebar_active, self.wm_titlebar_active)
-      } else {
-        (0xff63_3f91, 0xff17_7898)
-      }
+    let base = if focused {
+      if self.wm_titlebar_active != 0 { self.wm_titlebar_active } else { 0xff35_3646 }
     } else if self.wm_titlebar_inactive != 0 {
-      (self.wm_titlebar_inactive, self.wm_titlebar_inactive)
+      self.wm_titlebar_inactive
     } else {
-      (0xff31_303d, 0xff25_2b34)
+      0xff2b_2c3b
     };
+    let bottom = mix_rgb(base, 0xff1f_202e, 170);
     let x0 = win_x.max(0).max(clip.x0);
     let x1 = (win_x + win_w).min(fw).min(clip.x1);
     for y in bar_y.max(0).max(clip.y0)..(bar_y + self.wm_ssd_bar_h).min(fh).min(clip.y1) {
       for x in x0..x1 {
-        let t = (((x - win_x).max(0) as i64 * 255) / win_w.max(1) as i64) as u32;
-        let mut color = mix_rgb(left, right, t.min(255));
+        let t = ((y - bar_y) * 255 / (self.wm_ssd_bar_h - 1).max(1)) as u32;
+        let mut color = mix_rgb(base, bottom, t.min(255));
         if y == bar_y { color = mix_rgb(color, 0xffff_ffff, if focused { 42 } else { 24 }); }
         if y == bar_y + self.wm_ssd_bar_h - 1 { color = mix_rgb(color, 0xff00_0000, 48); }
         self.fb.put(x, y, color);
       }
     }
 
-    // Compact translucent controls; their hit targets intentionally remain
-    // identical to the classic style.
     let cy = bar_y + self.wm_ssd_bar_h / 2;
-    let draw_control = |fb: &mut Framebuffer, cx: i32, glyph: u8, danger: bool| {
-      for dy in -6i32..=6 {
-        for dx in -6i32..=6 {
-          if dx * dx + dy * dy <= 36 {
-            let edge = dx * dx + dy * dy >= 25;
-            let c = if danger && focused {
-              if edge { 0xfff7_8985 } else { 0xffd9_5b5b }
-            } else if edge { 0xffa7_afbf } else { 0xff30_3542 };
-            fb.put(cx + dx, cy + dy, c);
+    for (cx, color) in [(close_x, 0xffff_5f57), (min_x, 0xfffe_bc2e), (max_x, 0xff28_c840)] {
+      for dy in -6i32..6 {
+        for dx in -6i32..6 {
+          let distance = (dx * 2 + 1).pow(2) + (dy * 2 + 1).pow(2);
+          if distance <= 144 {
+            self.fb.put(cx + dx, cy + dy, color);
           }
         }
       }
-      let ink = if danger && focused { 0xffff_f6f5 } else { 0xfff1_f4fa };
-      match glyph {
-        b'x' => for d in -2..=2 { fb.put(cx + d, cy + d, ink); fb.put(cx + d, cy - d, ink); },
-        b'-' => for d in -3..=3 { fb.put(cx + d, cy, ink); },
-        _ => {
-          for d in -2..=2 { fb.put(cx + d, cy - 2, ink); fb.put(cx + d, cy + 2, ink); }
-          for d in -2..=2 { fb.put(cx - 2, cy + d, ink); fb.put(cx + 2, cy + d, ink); }
-        }
-      }
-    };
-    draw_control(&mut self.fb, win_x + 16, b'x', true);
-    draw_control(&mut self.fb, win_x + 36, b'-', false);
-    draw_control(&mut self.fb, win_x + 56, b'+', false);
+    }
   }
 
   /// Visible window frame so the user can see (and grab) resize borders.
@@ -5562,14 +5566,10 @@ impl Server {
         let hit_top = bar_y.max(uy);
         if px >= ox && px < ox + w && py >= hit_top && py < oy {
           let lx = px - ox;
-          if (lx - 16).abs() <= 8 {
-            return Some(("close", fd, sid));
-          }
-          if (lx - 36).abs() <= 8 {
-            return Some(("min", fd, sid));
-          }
-          if (lx - 56).abs() <= 8 {
-            return Some(("max", fd, sid));
+          if let Some(action) = Self::ssd_control_hit(
+            self.wm_titlebar_style, self.wm_titlebar_controls_left, w, self.wm_ssd_bar_h, lx, py - bar_y,
+          ) {
+            return Some((action, fd, sid));
           }
           return Some(("move", fd, sid));
         }
@@ -5733,21 +5733,14 @@ impl Server {
   /// Effective decoration mode for a toplevel, given what its client asked for.
   ///
   /// `requested` is the client's own `set_mode` (0 = it called `unset_mode` or
-  /// never chose).  A skin that declares `prefer_ssd=1` wins outright: the
-  /// desktop's look is a property of the session, not of whichever application
-  /// happens to prefer drawing its own bar, and letting the client win is how a
-  /// window ends up with a compositor titlebar *and* its own.  With
-  /// `prefer_ssd=0` the client's request is honoured, which is right — an app
-  /// with tabs in its titlebar cannot delegate that to the compositor.
+  /// never chose).  An explicit request always wins.  In particular Chromium,
+  /// GTK header bars and libdecor already paint client-side chrome; forcing SSD
+  /// on those clients creates a second titlebar and also disables the dma-buf
+  /// GPU composition path.  The skin preference is only a default for clients
+  /// which leave the mode to the compositor.
   #[inline]
   fn effective_decoration_mode(&self, requested: u32) -> u32 {
-    if self.wm_prefer_ssd {
-      2
-    } else if requested == 0 {
-      1
-    } else {
-      requested
-    }
+    effective_decoration_mode(self.wm_prefer_ssd, requested)
   }
 
   fn req_toplevel_decoration(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
@@ -5835,12 +5828,9 @@ impl Server {
   /// Change the compositor decoration preference and renegotiate every toplevel
   /// that has an xdg-decoration object.
   ///
-  /// This deliberately reconfigures clients that made an explicit `set_mode`
-  /// too.  Every luna-window.h application asks for client-side chrome, so
-  /// skipping them made `prefer_ssd=1` a no-op for exactly the windows the skin
-  /// was meant to restyle — and left them drawing their own titlebar under the
-  /// compositor's.  The client's request is remembered, so turning SSD back off
-  /// restores it rather than flattening everyone to CSD.
+  /// Explicit client choices are left intact.  Changing the preference only
+  /// reconfigures decorations which were unset, avoiding duplicate chrome and
+  /// preserving the zero-copy/GPU path for CSD applications.
   ///
   /// This is a settings event, so the scan never touches the frame/input hot
   /// paths.
@@ -5865,13 +5855,7 @@ impl Server {
         continue;
       }
       for (decoration_id, toplevel_id, requested) in decorated {
-        let effective = if prefer {
-          2
-        } else if requested == 0 {
-          1
-        } else {
-          requested
-        };
+        let effective = effective_decoration_mode(prefer, requested);
         if let Some(Object {
           role: Role::XdgToplevel { decoration_mode, .. }, ..
         }) = client.objects.get_mut(&toplevel_id) {
@@ -8635,6 +8619,10 @@ impl Server {
       sig = Self::sig_mix(sig, ((w as u64) << 32) | h as u64);
       sig = Self::sig_mix(sig, self.wm_titlebar_style as u64);
       sig = Self::sig_mix(sig, self.wm_ssd_bar_h as u64);
+      sig = Self::sig_mix(sig, self.wm_titlebar_controls_left as u64);
+      sig = Self::sig_mix(sig, self.wm_titlebar_active as u64);
+      sig = Self::sig_mix(sig, self.wm_titlebar_inactive as u64);
+      sig = Self::sig_mix(sig, self.wm_titlebar_frame as u64);
       for group in [&layers[0], &layers[1]] {
         for &(fd, sid, dx, dy) in group {
           if let Some(c) = self.clients.get(&fd) {
@@ -11032,6 +11020,16 @@ fn moved_damage(prev: &[(RawFd, u32, Rect)], cur: &[(RawFd, u32, Rect)]) -> Rect
   moved
 }
 
+#[inline]
+fn effective_decoration_mode(prefer_ssd: bool, requested: u32) -> u32 {
+  match requested {
+    // Explicit client/server requests are protocol choices, not hints.
+    1 | 2 => requested,
+    // unset_mode (or no set_mode yet) follows the compositor policy.
+    _ => if prefer_ssd { 2 } else { 1 },
+  }
+}
+
 fn env_flag(name: &str) -> bool {
   match std::env::var(name) {
     Ok(v) => !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"),
@@ -11067,6 +11065,31 @@ mod tests {
   }
 
   #[test]
+  fn ssd_controls_match_dialog_positions() {
+    assert_eq!(Server::ssd_control_centers(0, true, 620), [22, 40, 58]);
+    assert_eq!(Server::ssd_control_centers(0, false, 620), [598, 562, 580]);
+    assert_eq!(Server::ssd_control_centers(2, false, 620), [604, 564, 584]);
+  }
+
+  #[test]
+  fn ssd_controls_hit_their_drawn_centers() {
+    for style in 0..=2 {
+      for left in [true, false] {
+        for height in [20, 28, 52, 64] {
+          let centers = Server::ssd_control_centers(style, left, 620);
+          for (x, action) in centers.into_iter().zip(["close", "min", "max"]) {
+            assert_eq!(Server::ssd_control_hit(style, left, 620, height, x, height / 2), Some(action));
+            assert_eq!(Server::ssd_control_hit(style, left, 620, height, x, 0), None);
+          }
+          assert_eq!(Server::ssd_control_hit(style, left, 620, height, 310, height / 2), None);
+          assert_eq!(Server::ssd_control_hit(style, left, 620, height, -1, height / 2), None);
+          assert_eq!(Server::ssd_control_hit(style, left, 620, height, 620, height / 2), None);
+        }
+      }
+    }
+  }
+
+  #[test]
   fn keyboard_ids_include_every_bound_resource() {
     let mut client = Client::new(-1);
     client.objects.insert(41, Object::new(&protocol::WL_KEYBOARD, 7, Role::Keyboard));
@@ -11099,6 +11122,16 @@ mod tests {
   fn an_unchanged_scene_reports_no_moved_damage() {
     let frame = [(3, 10, r(100, 100, 400, 400)), (3, 20, r(0, 0, 50, 50))];
     assert_eq!(moved_damage(&frame, &frame), Rect::EMPTY);
+  }
+
+  #[test]
+  fn explicit_client_decoration_is_never_overridden_by_skin_policy() {
+    assert_eq!(effective_decoration_mode(true, 1), 1);
+    assert_eq!(effective_decoration_mode(false, 1), 1);
+    assert_eq!(effective_decoration_mode(true, 2), 2);
+    assert_eq!(effective_decoration_mode(false, 2), 2);
+    assert_eq!(effective_decoration_mode(true, 0), 2);
+    assert_eq!(effective_decoration_mode(false, 0), 1);
   }
 
   #[test]

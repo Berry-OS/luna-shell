@@ -792,7 +792,7 @@ typedef struct {
     char brightness_backend[16]; /* "auto" | "sysfs" | "brightnessctl" | "xrandr" */
     /* Toolkit scale for apps launched from Luna (see apply_toolkit_session_env).
      * LUNA_GDK_* / LUNA_QT_* / LUNA_XCURSOR_SIZE still override when set. */
-    char gdk_scale[8];       /* toolkit scale: "0.75" | "1" | "2" */
+    char gdk_scale[8];       /* integer toolkit scale: "1" | "2" | "3" */
     char gdk_dpi_scale[8];   /* fractional text scale: "0.75" | "1" | "1.25" | … */
     char qt_scale_factor[8]; /* Qt scale, same values as gdk_dpi_scale */
     char xcursor_size[8];    /* "24" | "32" | "48" */
@@ -866,9 +866,11 @@ static void settings_defaults(void) {
     snprintf(g_settings.alsa_card, sizeof(g_settings.alsa_card), "default");
     snprintf(g_settings.alsa_control, sizeof(g_settings.alsa_control), "Master");
     snprintf(g_settings.brightness_backend, sizeof(g_settings.brightness_backend), "auto");
-    /* Widget scale stays slightly under 1 so pcmanfm chrome matches the
-     * desktop.  Text scale is 1.0 so Terminal / gedit are not undersized. */
-    snprintf(g_settings.gdk_scale, sizeof(g_settings.gdk_scale), "0.8");
+    /* Xorg parity: GDK_SCALE is integer-only (GTK ignores "0.8"), and a
+     * GDK_DPI_SCALE below 1 shrinks every explicitly sized font (gedit, sakura,
+     * Firefox).  UI font size comes from gtk-font-name, mirrored to GSettings
+     * in gsettings_mirror_gtk_font(). */
+    snprintf(g_settings.gdk_scale, sizeof(g_settings.gdk_scale), "1");
     snprintf(g_settings.gdk_dpi_scale, sizeof(g_settings.gdk_dpi_scale), "1");
     snprintf(g_settings.qt_scale_factor, sizeof(g_settings.qt_scale_factor), "1");
     snprintf(g_settings.xcursor_size, sizeof(g_settings.xcursor_size), "24");
@@ -1113,7 +1115,6 @@ typedef struct {
     unsigned int titlebar_active;   /* 0 = compositor default palette */
     unsigned int titlebar_inactive;
     unsigned int titlebar_frame;
-    int  prefer_ssd;      /* recommend server decorations when client unset */
     int  window_theme;    /* -1 auto | 0 light | 1 dark for Luna UI clients */
     int  controls_on_left;/* client-side control placement */
 } LunaSkin;
@@ -1171,10 +1172,8 @@ static void skin_chrome_defaults(LunaSkin* skin) {
     skin->titlebar_active = 0;
     skin->titlebar_inactive = 0;
     skin->titlebar_frame = 0;
-    /* CSD is the safe fallback for clients which do not bind
-     * xdg-decoration (GTK commonly draws a HeaderBar in that case).  Retro
-     * skins which want compositor chrome opt in through skin.conf. */
-    skin->prefer_ssd = 0;
+    /* Clients which do not bind xdg-decoration retain their native CSD
+     * (GTK commonly draws a HeaderBar in that case). */
     skin->window_theme = -1;
     skin->controls_on_left = 1;
 }
@@ -1282,7 +1281,9 @@ static void skin_add_dir(const char* root, const char* id) {
         } else if (!strcmp(key, "titlebar_frame")) {
             skin.titlebar_frame = skin_parse_color(val);
         } else if (!strcmp(key, "prefer_ssd")) {
-            skin.prefer_ssd = atoi(val) != 0;
+            /* Kept as a recognised legacy key.  Window chrome is now always
+             * compositor-owned so SDL, GLFW/libdecor and native clients all
+             * use the selected skin's titlebar renderer. */
         } else if (!strcmp(key, "window_theme")) {
             if (!strcasecmp(val, "dark")) skin.window_theme = 1;
             else if (!strcasecmp(val, "light")) skin.window_theme = 0;
@@ -4824,114 +4825,76 @@ static int apply_numlock_setting(void) {
     return shell_send_cmd(cmd);
 }
 
-static int gtk_ini_has_key(const char* path, const char* key) {
-    FILE* f = fopen(path, "r");
-    if (!f) return 0;
-    char line[512];
-    size_t key_len = strlen(key);
-    int found = 0;
-    while (fgets(line, sizeof(line), f)) {
-        char* p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (!strncmp(p, key, key_len)) {
-            p += key_len;
-            while (*p == ' ' || *p == '\t') p++;
-            if (*p == '=') { found = 1; break; }
-        }
-    }
-    fclose(f);
-    return found;
-}
-
-static void ensure_gtk_ini_defaults(const char* path, const char* layout,
-                                    const char* font_name) {
-    int have_layout = gtk_ini_has_key(path, "gtk-decoration-layout");
-    int have_font = gtk_ini_has_key(path, "gtk-font-name");
-    int have_dpi = gtk_ini_has_key(path, "gtk-xft-dpi");
-    if (have_layout && have_font && have_dpi) return;
-
-    FILE* f = fopen(path, access(path, F_OK) == 0 ? "a" : "w");
-    if (!f) return;
-    /* Xorg/LXDE normally supplies these through XSettings.  A bare Wayland
-     * session has no XSettings manager, so GTK otherwise falls back to an
-     * 11-point font even when the Xorg desktop used 9 points.  Keep existing
-     * user choices; only fill values which are absent. */
-    fprintf(f, "\n[Settings]\n");
-    if (!have_layout) fprintf(f, "gtk-decoration-layout=%s\n", layout);
-    if (!have_font) fprintf(f, "gtk-font-name=%s\n", font_name);
-    if (!have_dpi) fprintf(f, "gtk-xft-dpi=98304\n"); /* 96 * 1024 */
-    fclose(f);
-}
-
 /* Rewrite (or create) gtk settings.ini so gtk-theme-name matches the skin.
  * Other Settings keys are preserved when present. */
 static void gtk_ini_set_theme(const char* path, const char* theme_name,
                               const char* layout, const char* font_name) {
-    if (!path || !theme_name || !*theme_name) return;
-    char tmp[640];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    if (!path || !layout || !*layout) return;
+    char tmp[PATH_MAX];
+    int n = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    if (n < 0 || (size_t)n >= sizeof(tmp)) return;
     FILE* in = fopen(path, "r");
     FILE* out = fopen(tmp, "w");
     if (!out) {
         if (in) fclose(in);
         return;
     }
+    const char* keys[] = { "gtk-theme-name", "gtk-decoration-layout",
+                           "gtk-font-name", "gtk-xft-dpi" };
+    const char* values[] = { theme_name, layout, font_name, "98304" };
+    int seen[4] = { 0 };
+    int in_settings = 0;
     int saw_settings = 0;
-    int wrote_theme = 0;
-    int wrote_layout = 0;
-    int wrote_font = 0;
-    int wrote_dpi = 0;
+    int failed = 0;
     char line[512];
-    if (in) {
-        while (fgets(line, sizeof(line), in)) {
-            char* p = line;
-            while (*p == ' ' || *p == '\t') p++;
-            if (*p == '[') {
-                if (!strncmp(p, "[Settings]", 10)) saw_settings = 1;
-                else if (saw_settings && !wrote_theme) {
-                    fprintf(out, "gtk-theme-name=%s\n", theme_name);
-                    wrote_theme = 1;
-                    if (layout && *layout && !wrote_layout) {
-                        fprintf(out, "gtk-decoration-layout=%s\n", layout);
-                        wrote_layout = 1;
+    for (;;) {
+        int have_line = in && fgets(line, sizeof(line), in);
+        char* p = line;
+        if (have_line) while (*p == ' ' || *p == '\t') p++;
+        if (!have_line || *p == '[') {
+            if (in_settings) {
+                fputc('\n', out);
+                for (int i = 0; i < 4; i++) {
+                    if (!seen[i] && values[i] && *values[i]) {
+                        fprintf(out, "%s=%s\n", keys[i], values[i]);
+                        seen[i] = 1;
                     }
-                    if (font_name && *font_name && !wrote_font) {
-                        fprintf(out, "gtk-font-name=%s\n", font_name);
-                        wrote_font = 1;
-                    }
-                    if (!wrote_dpi) {
-                        fprintf(out, "gtk-xft-dpi=98304\n");
-                        wrote_dpi = 1;
-                    }
-                    saw_settings = 0;
-                }
-                fputs(line, out);
-                continue;
-            }
-            if (!strncmp(p, "gtk-theme-name", 14)) {
-                char* eq = strchr(p, '=');
-                if (eq) {
-                    fprintf(out, "gtk-theme-name=%s\n", theme_name);
-                    wrote_theme = 1;
-                    continue;
                 }
             }
-            if (!strncmp(p, "gtk-decoration-layout", 21)) wrote_layout = 1;
-            if (!strncmp(p, "gtk-font-name", 13)) wrote_font = 1;
-            if (!strncmp(p, "gtk-xft-dpi", 11)) wrote_dpi = 1;
-            fputs(line, out);
+            if (!have_line) break;
+            in_settings = !strncmp(p, "[Settings]", 10);
+            saw_settings |= in_settings;
+        } else if (in_settings) {
+            int skip = 0;
+            for (int i = 0; i < 4; i++) {
+                size_t len = strlen(keys[i]);
+                if (strncmp(p, keys[i], len)) continue;
+                char* eq = p + len;
+                while (*eq == ' ' || *eq == '\t') eq++;
+                if (*eq != '=') continue;
+                if (i < 2 && values[i] && *values[i]) {
+                    if (!seen[i]) fprintf(out, "%s=%s\n", keys[i], values[i]);
+                    skip = 1;
+                }
+                seen[i] = 1;
+                break;
+            }
+            if (skip) continue;
         }
+        fputs(line, out);
+    }
+    if (in) {
+        failed = ferror(in);
         fclose(in);
     }
-    if (!wrote_theme) {
-        fprintf(out, "[Settings]\n");
-        fprintf(out, "gtk-theme-name=%s\n", theme_name);
-        if (layout && *layout) fprintf(out, "gtk-decoration-layout=%s\n", layout);
-        if (font_name && *font_name) fprintf(out, "gtk-font-name=%s\n", font_name);
-        fprintf(out, "gtk-xft-dpi=98304\n");
+    if (!saw_settings) {
+        fprintf(out, "\n[Settings]\n");
+        for (int i = 0; i < 4; i++)
+            if (values[i] && *values[i]) fprintf(out, "%s=%s\n", keys[i], values[i]);
     }
-    fclose(out);
-    rename(tmp, path);
+    failed |= ferror(out);
+    if (fclose(out) != 0) failed = 1;
+    if (failed || rename(tmp, path) != 0) unlink(tmp);
 }
 
 static void skin_apply_toolkit(int skin_idx) {
@@ -5046,8 +5009,14 @@ static int skin_apply_wm_decoration(int skin_idx) {
     snprintf(cmd, sizeof(cmd), "wm_config titlebar_height %d",
              skin_titlebar_height(skin));
     ok &= shell_send_cmd(cmd);
-    snprintf(cmd, sizeof(cmd), "wm_config prefer_ssd %d", skin->prefer_ssd ? 1 : 0);
+    snprintf(cmd, sizeof(cmd), "wm_config titlebar_controls %d", skin->controls_on_left);
     ok &= shell_send_cmd(cmd);
+    /* Use one decoration implementation for every xdg-decoration client.
+     * GTK-style clients which do not expose that protocol retain their CSD,
+     * while SDL, GLFW/libdecor and Luna clients negotiate the compositor SSD.
+     * This removes toolkit-specific bars and also keeps hit testing, moving,
+     * resizing and window controls on the compositor's existing fast path. */
+    ok &= shell_send_cmd("wm_config prefer_ssd 1");
     return ok;
 }
 
@@ -5215,6 +5184,81 @@ static void prefer_libdecor_cairo(void) {
         setenv("LIBDECOR_PLUGIN_DIR", dir, 0);
 }
 
+/* GTK 3/4 on Wayland take fonts from GSettings (org.gnome.desktop.interface)
+ * whenever no XSettings manager or settings portal exists, and ignore
+ * settings.ini.  Xorg reads settings.ini instead, so the same apps came up in
+ * "Adwaita Sans 11" here and in the LXAppearance font there.  Mirror the ini
+ * font into GSettings so both sessions size text identically. */
+static int gtk_ini_get(const char* path, const char* key, char* out, size_t n) {
+    FILE* f = fopen(path, "r");
+    if (!f) return 0;
+    char line[512];
+    size_t key_len = strlen(key);
+    int found = 0;
+    while (!found && fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, key, key_len)) continue;
+        p += key_len;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p++ != '=') continue;
+        while (*p == ' ' || *p == '\t' || *p == '"') p++;
+        char* e = p + strlen(p);
+        while (e > p && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ' ||
+                         e[-1] == '\t' || e[-1] == '"')) e--;
+        *e = 0;
+        if (*p) { snprintf(out, n, "%s", p); found = 1; }
+    }
+    fclose(f);
+    return found;
+}
+
+static void gsettings_mirror_gtk_font(void) {
+    char ini[PATH_MAX], font[128];
+    font[0] = 0;
+    const char* env_font = getenv("LUNA_GTK_FONT_NAME");
+    if (env_font && *env_font)
+        snprintf(font, sizeof(font), "%s", env_font);
+    else if (!path_join2(ini, sizeof(ini), g_xdg.config_home, "gtk-3.0/settings.ini") ||
+             !gtk_ini_get(ini, "gtk-font-name", font, sizeof(font)))
+        snprintf(font, sizeof(font), "Sans 9");
+
+    const char* layout = getenv("LUNA_GTK_BUTTON_LAYOUT");
+    if (!layout || !*layout) layout = "icon:minimize,maximize,close";
+    static char applied[128], applied_layout[256];
+    if (!strcmp(applied, font) && !strcmp(applied_layout, layout)) return;
+
+    pid_t pid = fork();
+    if (pid < 0) return;
+    if (pid > 0) {
+        snprintf(applied, sizeof(applied), "%s", font);
+        snprintf(applied_layout, sizeof(applied_layout), "%s", layout);
+        return;
+    }
+    const char* sets[][3] = {
+        { "org.gnome.desktop.interface", "font-name", font },
+        { "org.gnome.desktop.interface", "document-font-name", font },
+        { "org.gnome.desktop.interface", "text-scaling-factor", "1.0" },
+        { "org.gnome.desktop.wm.preferences", "button-layout", layout },
+    };
+    for (size_t i = 0; i < sizeof(sets) / sizeof(sets[0]); i++) {
+        pid_t c = fork();
+        if (c == 0) {
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) { dup2(devnull, 2); close(devnull); }
+            execlp("gsettings", "gsettings", "set", sets[i][0], sets[i][1], sets[i][2],
+                   (char*)NULL);
+            _exit(127);
+        }
+        if (c < 0) break;
+        int st = 0;
+        pid_t waited;
+        do { waited = waitpid(c, &st, 0); } while (waited < 0 && errno == EINTR);
+        if (waited < 0 || (WIFEXITED(st) && WEXITSTATUS(st) == 127)) break;
+    }
+    _exit(0);
+}
+
 static void apply_toolkit_session_env(void) {
     if (!getenv("LANG") || !getenv("LANG")[0])
         setenv("LANG", "ja_JP.UTF-8", 0);
@@ -5266,15 +5310,20 @@ static void apply_toolkit_session_env(void) {
         if (!gdk_dpi || !*gdk_dpi) gdk_dpi = g_settings.gdk_dpi_scale;
         if (!qt_scale || !*qt_scale) qt_scale = g_settings.qt_scale_factor;
         if (!cursor_sz || !*cursor_sz) cursor_sz = g_settings.xcursor_size;
-        if (!gdk_scale || !*gdk_scale) gdk_scale = "0.8";
+        if (!gdk_scale || !*gdk_scale) gdk_scale = "1";
         if (!gdk_dpi || !*gdk_dpi) gdk_dpi = "1";
         if (!qt_scale || !*qt_scale) qt_scale = "1";
         if (!cursor_sz || !*cursor_sz) cursor_sz = "24";
-        setenv("GDK_SCALE", gdk_scale, 1);
+        /* GTK parses GDK_SCALE as an integer; old configs saved "0.8". */
+        char gdk_scale_int[8];
+        int gs = (int)lroundf(strtof(gdk_scale, NULL));
+        snprintf(gdk_scale_int, sizeof(gdk_scale_int), "%d", gs < 1 ? 1 : gs > 3 ? 3 : gs);
+        setenv("GDK_SCALE", gdk_scale_int, 1);
         setenv("GDK_DPI_SCALE", gdk_dpi, 1);
         setenv("QT_SCALE_FACTOR", qt_scale, 1);
         setenv("XCURSOR_SIZE", cursor_sz, 1);
     }
+    gsettings_mirror_gtk_font();
     /* luna-session may set LUNA_CLIENT_RENDERER / GSK_RENDERER.  Still reject
      * vulkan: Luna has no Vulkan WSI / dmabuf path for clients, and GTK4 then
      * stalls (Firefox dialogs never paint). */
@@ -5303,7 +5352,7 @@ static void apply_toolkit_session_env(void) {
             path_join2(dir, sizeof(dir), g_xdg.config_home, vers[i]);
             snprintf(ini, sizeof(ini), "%s/settings.ini", dir);
             mkdir_p_mode(dir, 0700);
-            ensure_gtk_ini_defaults(ini, layout, font_name);
+            gtk_ini_set_theme(ini, NULL, layout, font_name);
         }
     }
 
@@ -7418,8 +7467,8 @@ static void apply_wm_settings(void) {
     ok &= shell_send_cmd(cmd);
     snprintf(cmd, sizeof(cmd), "wm_config super_shortcuts %d", g_settings.super_shortcuts);
     ok &= shell_send_cmd(cmd);
-    /* Skin titlebar style/colors/prefer_ssd win over the Settings toggle when
-     * the active skin declares them. */
+    /* The active skin supplies the titlebar style/colors; decoration ownership
+     * is kept compositor-side by skin_apply_wm_decoration(). */
     ok &= skin_apply_wm_decoration(skin_find(g_settings.skin));
 
     /* Dock motion is intentionally CSS-only.  The persisted setting merely
@@ -8744,7 +8793,7 @@ static int scale_write_dpi(float l) {
                                "scale_dpi_val");
 }
 static int scale_write_gdk(float l) {
-    return scale_write_generic(l, 0.50f, 2.00f, 0.05f, 0,
+    return scale_write_generic(l, 1.0f, 3.0f, 1.0f, 1,
                                g_settings.gdk_scale, sizeof(g_settings.gdk_scale),
                                "scale_gdk_val");
 }
@@ -8780,7 +8829,7 @@ static void settings_sync_scale_sliders(void) {
     g_scale_dpi_level = scale_to_ratio(
         scale_parse_value(g_settings.gdk_dpi_scale, 1.0f), 0.50f, 2.00f);
     g_scale_gdk_level = scale_to_ratio(
-        scale_parse_value(g_settings.gdk_scale, 0.8f), 0.50f, 2.00f);
+        scale_parse_value(g_settings.gdk_scale, 1.0f), 1.0f, 3.0f);
     g_scale_qt_level = scale_to_ratio(
         scale_parse_value(g_settings.qt_scale_factor, 1.0f), 0.50f, 2.00f);
     g_scale_cur_level = scale_to_ratio(
@@ -12102,11 +12151,11 @@ void luna_app_request_redraw(void) {
  * wallpaper animation supplies that frame.  KMS/X11 use one framebuffer, so
  * any pending frame (or the animation cadence) can absorb the update. */
 static int shell_bg_passive_refresh_ready(void) {
-    /* Live desktop widgets are useful only if their samples can schedule a
-     * repaint. luna-ui tracks element damage and the Wayland backend uses
-     * swap-with-damage when available, so this no longer implies a full-screen
-     * render every second. */
-    if (g_settings.widgets_enabled) return 1;
+    /* The background has no root filter, so its render path is luna_render()
+     * over the complete output even when only one widget changed.  Damage
+     * limits the compositor copy, but it cannot recover the GL/layout time
+     * already spent here.  Fold status changes into a frame that was going to
+     * happen anyway instead of manufacturing a periodic full-screen frame. */
     if (g_backend == &g_wl_backend) {
         if (g_surf_dirty & (1u << LUNA_SURF_BG)) return 1;
         return g_bg_animated && !shell_desktop_busy();
@@ -14623,6 +14672,14 @@ int main(int argc, char** argv) {
         }
     }
     shell_ensure_widget_css();
+    /* The shell-owned widget sheet is deliberately appended after the
+     * document cascade so its runtime bindings remain available.  Re-apply
+     * the selected skin afterwards: otherwise equal-specificity widget rules
+     * silently win over skin overrides (notably XP's paper widgets, bars and
+     * colours), while a browser preview—where the skin link is last—looks
+     * correct. */
+    if (startup_skin > 0 && g_skins[startup_skin].css[0])
+        luna_load_css_file(g_skins[startup_skin].css);
     shell_trim_heap();
     luna_inject_body_background();
     register_handlers();
