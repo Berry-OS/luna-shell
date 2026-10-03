@@ -1863,46 +1863,62 @@ static int shell_action_drain(void) {
     return any;
 }
 
-static int shell_send_cmd(const char* cmd) {
-    if (!cmd || !*cmd || !g_shell_sock_path[0]) return 0;
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return 0;
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    size_t splen = strlen(g_shell_sock_path);
-    if (splen >= sizeof(addr.sun_path)) {
-        close(fd);
-        return 0;
-    }
-    memcpy(addr.sun_path, g_shell_sock_path, splen + 1);
-    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        close(fd);
-        return 0;
-    }
-    /* Commands are small, but stream writes are still allowed to be partial.
-     * MSG_NOSIGNAL also prevents a compositor restart from killing the shell
-     * with SIGPIPE between connect() and send().  Return success so persistent
-     * compositor settings can be retried when its IPC socket is not ready yet. */
-    int ok = 0;
-    char wire[128];
-    int wn = snprintf(wire, sizeof(wire), "%s\n", cmd);
-    if (wn > 0 && (size_t)wn < sizeof(wire)) {
-        size_t off = 0, len = (size_t)wn;
-        while (off < len) {
-            ssize_t sent = send(fd, wire + off, len - off, MSG_NOSIGNAL);
-            if (sent > 0) {
-                off += (size_t)sent;
-            } else if (sent < 0 && errno == EINTR) {
-                continue;
-            } else {
-                break;
+/* A settings apply can exceed the Unix listener backlog.  Never wait for
+ * the compositor on the UI thread; retain commands in FIFO order instead. */
+#define SHELL_CMD_QUEUE_CAP 256
+static char g_cmd_queue[SHELL_CMD_QUEUE_CAP][128];
+static unsigned g_cmd_head, g_cmd_count;
+static int g_cmd_fd = -1;
+static size_t g_cmd_offset;
+
+static void shell_cmd_flush(void) {
+    while (g_cmd_count) {
+        if (g_cmd_fd < 0) {
+            int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+            if (fd < 0) return;
+            struct sockaddr_un addr = { .sun_family = AF_UNIX };
+            size_t n = strlen(g_shell_sock_path);
+            if (n >= sizeof(addr.sun_path)) { close(fd); return; }
+            memcpy(addr.sun_path, g_shell_sock_path, n + 1);
+            if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+                close(fd);
+                return; /* Backlog full or compositor restarting: retry next tick. */
             }
+            g_cmd_fd = fd;
+            g_cmd_offset = 0;
         }
-        ok = off == len;
+        const char* wire = g_cmd_queue[g_cmd_head];
+        size_t len = strlen(wire);
+        ssize_t n = send(g_cmd_fd, wire + g_cmd_offset, len - g_cmd_offset,
+                         MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+        if (n < 0 && errno == EINTR) return;
+        if (n <= 0) {
+            close(g_cmd_fd);
+            g_cmd_fd = -1;
+            return;
+        }
+        g_cmd_offset += (size_t)n;
+        if (g_cmd_offset < len) return;
+        close(g_cmd_fd);
+        g_cmd_fd = -1;
+        g_cmd_head = (g_cmd_head + 1) % SHELL_CMD_QUEUE_CAP;
+        g_cmd_count--;
     }
-    close(fd);
-    return ok;
+}
+
+static int shell_send_cmd(const char* cmd) {
+    if (!cmd || !*cmd || !g_shell_sock_path[0] ||
+        strlen(cmd) + 1 >= sizeof(g_cmd_queue[0])) return 0;
+    /* Preserve startup retry behavior when no compositor is running (KMS). */
+    if (access(g_shell_sock_path, F_OK) != 0) return 0;
+    shell_cmd_flush();
+    if (g_cmd_count == SHELL_CMD_QUEUE_CAP) return 0;
+    unsigned tail = (g_cmd_head + g_cmd_count) % SHELL_CMD_QUEUE_CAP;
+    snprintf(g_cmd_queue[tail], sizeof(g_cmd_queue[tail]), "%s\n", cmd);
+    g_cmd_count++;
+    shell_cmd_flush();
+    return 1; /* Accepted for delivery; a full backlog does not lose settings. */
 }
 
 /* Native tray items are deliberately not Wayland surfaces.  A status item
@@ -10266,6 +10282,7 @@ static void update_async_status(void) {
 /* Bound event sleep by the next scheduled shell job.  Input descriptors wake
  * poll immediately, so longer idle sleeps do not add input latency. */
 static int shell_wait_timeout_ms(int max_ms, double repaint_deadline) {
+    if (g_cmd_count && max_ms > 10) max_ms = 10;
     double next = g_now + (double)max_ms / 1000.0;
 #define SOONER(deadline) do { \
         double d_ = (deadline); \
@@ -11915,7 +11932,8 @@ static void kms_backend_poll_events(void) {
         do { pr = poll(pfds, nfds, timeout_ms); }
         while (pr < 0 && errno == EINTR);
 
-        if (pr > 0 && (pfds[0].revents & POLLIN))
+        int flip_ready = pr > 0 && (pfds[0].revents & POLLIN);
+        if (flip_ready)
             kms_drain_page_flips();
 
         int input_ready = 0, state_ready = 0, async_ready = 0, action_ready = 0;
@@ -11941,7 +11959,7 @@ static void kms_backend_poll_events(void) {
         if (async_ready) shell_async_drain();
 
         int async_deferred = async_ready && g_interaction_busy;
-        if (action_ready || pr <= 0 || input_ready ||
+        if (flip_ready || action_ready || pr <= 0 || input_ready ||
             (async_ready && !async_deferred))
             break;
         if ((!state_ready && !async_deferred) ||
@@ -14891,6 +14909,7 @@ int main(int argc, char** argv) {
             g_sigchld_pending = 0;
             reap_children();
         }
+        shell_cmd_flush();
         int ui_dragging = luna_pointer_dragging() ||
             (g_backend == &g_wl_backend && wl_dialog_dragging());
         /* The compositor state stream is needed to detect external window
@@ -15014,6 +15033,8 @@ int main(int argc, char** argv) {
             last = g_now;
             if (dt < 0.0) dt = 0.0;
             if (dt > LUNA_MAX_FRAME_DT) dt = LUNA_MAX_FRAME_DT;
+            /* Input callbacks above can invalidate the frame during poll. */
+            want_frame |= g_frame_dirty;
             if (want_frame && !g_backend->present_busy()) {
                 glViewport(0, 0, fbw, fbh);
                 glClearColor(0.04f, 0.05f, 0.12f, 1.0f);
@@ -15042,6 +15063,7 @@ int main(int argc, char** argv) {
     luna_monitor_shutdown();
     shell_state_watch_close();
     shell_action_close();
+    if (g_cmd_fd >= 0) close(g_cmd_fd);
     shell_async_close();
     luna_shutdown();
     g_backend->terminate();

@@ -58,6 +58,7 @@ pub struct ShellIpc {
   runtime_dir: PathBuf,
   extra_tray: Vec<TrayItem>,
   last_export: u64,
+  state_dir_ready: bool,
   /// Reused across exports.  The snapshot is rebuilt on every window title,
   /// focus or map change; churning a fresh String for each of the dozens of
   /// `format!`s it used to run made those moments a burst of allocator work on
@@ -114,6 +115,7 @@ impl ShellIpc {
       runtime_dir: PathBuf::from(runtime),
       extra_tray: Vec::new(),
       last_export: 0,
+      state_dir_ready: false,
       out: String::new(),
       key_scratch: String::new(),
       windows_scratch: Vec::new(),
@@ -411,8 +413,10 @@ impl ShellIpc {
     self.last_export = hash;
 
     let path = self.runtime_dir.join(STATE_FILE);
-    if let Some(parent) = path.parent() {
-      let _ = std::fs::create_dir_all(parent);
+    if !self.state_dir_ready {
+      if let Some(parent) = path.parent() {
+        self.state_dir_ready = std::fs::create_dir_all(parent).is_ok();
+      }
     }
 
     // The snapshot is line-oriented and tab-separated, so tabs and newlines in
@@ -467,8 +471,15 @@ impl ShellIpc {
       out.push('\n');
     }
 
-    if let Ok(mut f) = std::fs::File::create(&path) {
-      let _ = f.write_all(out.as_bytes());
+    // Write-then-rename: truncating the live file let the shell's inotify
+    // reader observe an empty snapshot between truncate and write, which reads
+    // as "every window vanished" for a frame.  The rename is one atomic event.
+    let tmp = path.with_extension("tmp");
+    let written = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(out.as_bytes())).is_ok();
+    if !written || std::fs::rename(&tmp, &path).is_err() {
+      if let Ok(mut f) = std::fs::File::create(&path) {
+        let _ = f.write_all(out.as_bytes());
+      }
     }
     self.out = out;
     self.windows_scratch = windows;

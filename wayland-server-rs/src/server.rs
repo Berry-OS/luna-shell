@@ -122,10 +122,18 @@ pub struct Client {
   /// Client bound `luna_wm_v1` — it will drive absolute placement itself, so
   /// compositor-side CSD title-strip move promotion must not also grab.
   has_luna_wm: bool,
+  /// Peer process id (SO_PEERCRED), 0 when unknown.  Used to read the client's
+  /// own `--window-position` flag, which Wayland gives it no way to send.
+  pid: i32,
 }
 
 impl Client {
   fn new(fd: RawFd) -> Self {
+    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let ok = unsafe {
+      libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut libc::c_void, &mut len)
+    } == 0;
     let mut objects = HashMap::new();
     objects.insert(1, Object::new(&protocol::WL_DISPLAY, 1, Role::Display));
     Client {
@@ -135,6 +143,7 @@ impl Client {
       request_args: Vec::with_capacity(8),
       has_input_popups: false,
       has_luna_wm: false,
+      pid: if ok { cred.pid } else { 0 },
     }
   }
 
@@ -259,6 +268,10 @@ pub struct Server {
   kbd_group_count: u32,
   pressed_keys: HashSet<u32>,
   active_text_input: Option<(RawFd, u32, u32)>,
+  /// Last preedit the input method sent for the active text input.  A
+  /// text-input-v3 done() without preedit_string clears the client's preedit,
+  /// so it is replayed when acknowledging the client's own commits.
+  im_preedit: Option<(String, i32, i32)>,
 
   shell_ipc: Option<ShellIpc>,
   focused_client_fd: RawFd,
@@ -320,6 +333,8 @@ pub struct Server {
   wm_focus_outline: bool,
   /// Offset newly mapped windows by the traditional cascade amount.
   wm_cascade_windows: bool,
+  /// Initial-position rules/hints for clients that cannot place themselves.
+  placement: crate::placement::Placement,
   /// 0 = dynamic gradient chrome, 1 = original solid traffic-light chrome,
   /// 2 = flat retro titlebar (Win95-style).
   wm_titlebar_style: i32,
@@ -479,6 +494,7 @@ impl Server {
       kbd_group_count: xkb_layout_group_count(None),
       pressed_keys: HashSet::new(),
       active_text_input: None,
+      im_preedit: None,
 
       shell_ipc: ShellIpc::open(),
       focused_client_fd: -1,
@@ -514,6 +530,7 @@ impl Server {
       wm_titlebar_double_click: true,
       wm_focus_outline: true,
       wm_cascade_windows: true,
+      placement: crate::placement::Placement::new(),
       wm_titlebar_style: 0,
       wm_titlebar_controls_left: true,
       wm_ssd_bar_h: SSD_BAR_H_DEFAULT,
@@ -1624,8 +1641,15 @@ impl Server {
           client.objects.get(&id),
           Some(Object { role: Role::Surface(s), .. }) if s.x == 0 && s.y == 0
         );
+        let hinted = if needs_place && parent_geom.is_none() {
+          self.requested_placement(client, id, child_geom.2, child_geom.3, ssd_extra)
+        } else {
+          None
+        };
         let place = if needs_place {
-          if let Some((px, py, pw, ph)) = parent_geom {
+          if let Some((hx, hy)) = hinted {
+            Some((hx - child_geom.0, hy - child_geom.1))
+          } else if let Some((px, py, pw, ph)) = parent_geom {
             let (_, _, cw, ch) = child_geom;
             let min_y = uy + ssd_extra;
             let visible_x = (px + (pw - cw) / 2).clamp(ux, ux + (uw - cw).max(0));
@@ -1731,17 +1755,24 @@ impl Server {
             .unwrap_or((960, 640));
           let (ux, uy, uw, uh) = self.usable_area();
           let ssd_extra = self.ssd_chrome_height_in(client, parent_id);
+          let (gx, gy, gw, gh) = Self::surface_geometry_in(client, parent_id).unwrap_or((0, 0, buf_w, buf_h));
+          let hinted = self.requested_placement(client, parent_id, gw, gh, ssd_extra);
           if let Some(Object {
             role: Role::Surface(s),
             ..
           }) = client.objects.get_mut(&parent_id)
           {
             if s.x == 0 && s.y == 0 {
-              s.x = ux + ((uw - buf_w) / 2).max(0) + cascade;
-              s.y = uy
-                + ssd_extra
-                + ((uh - ssd_extra - buf_h) / 2).max(0)
-                + cascade;
+              if let Some((hx, hy)) = hinted {
+                s.x = hx - gx;
+                s.y = hy - gy;
+              } else {
+                s.x = ux + ((uw - buf_w) / 2).max(0) + cascade;
+                s.y = uy
+                  + ssd_extra
+                  + ((uh - ssd_extra - buf_h) / 2).max(0)
+                  + cascade;
+              }
             }
           }
           self.raise_surface(fd, parent_id);
@@ -1984,6 +2015,23 @@ impl Server {
     }
   }
 
+  /// Requested visible-geometry origin for a toplevel that is mapping for the
+  /// first time, clamped so the titlebar stays reachable.  `client` is the
+  /// in-hand client (request dispatch has removed it from `self.clients`).
+  fn requested_placement(&mut self, client: &Client, surface_id: u32, cw: i32, ch: i32, ssd_extra: i32) -> Option<(i32, i32)> {
+    let xdg = match client.objects.get(&surface_id) {
+      Some(Object { role: Role::Surface(s), .. }) => s.xdg_surface_id?,
+      _ => return None,
+    };
+    let (_, app_id, _, _, _) = crate::shell_ipc::toplevel_meta(client, xdg);
+    let (hx, hy) = self.placement.lookup(&app_id, client.pid)?;
+    let (ux, uy, uw, uh) = self.usable_area();
+    let min_y = uy + ssd_extra;
+    let x = hx.clamp(ux, ux + (uw - cw).max(0));
+    let y = hy.clamp(min_y, uy + (uh - ch).max(0).max(min_y));
+    Some((x, y))
+  }
+
   fn export_shell_state(&mut self, force: bool) {
     if let Some(ref mut ipc) = self.shell_ipc {
       ipc.export_state(
@@ -2067,6 +2115,15 @@ impl Server {
           if let (Some((fd, sid)), Some(xs), Some(ys)) = (self.shell_command_target(id), parts.next(), parts.next()) {
             if let (Ok(x), Ok(y)) = (xs.parse::<i32>(), ys.parse::<i32>()) {
               self.move_surface_for(fd, sid, x, y);
+            }
+          }
+        }
+        (Some("place_next"), Some(app_id)) => {
+          // place_next APP_ID X Y — next toplevel whose app_id contains APP_ID
+          // opens there (Wayland clients cannot ask for a position themselves).
+          if let (Some(xs), Some(ys)) = (parts.next(), parts.next()) {
+            if let (Ok(x), Ok(y)) = (xs.parse::<i32>(), ys.parse::<i32>()) {
+              self.placement.push_hint(app_id, x, y);
             }
           }
         }
@@ -6013,6 +6070,11 @@ impl Server {
     // text-input-v3: every client commit must be acknowledged with done(serial).
     // GTK/Firefox ignore preedit/commit_string until this handshake completes,
     // so omitting it makes the IM grab swallow keys with nothing reaching Gecko.
+    if self.active_text_input.map(|v| (v.0, v.1)) == Some((client.conn.fd, id)) {
+      if let Some((text, begin, end)) = self.im_preedit.clone() {
+        client.send(id, 2, &[Arg::Str(Some(text)), Arg::Int(begin), Arg::Int(end)]);
+      }
+    }
     client.send(id, 5, &[Arg::Uint(serial)]);
   }
 
@@ -6367,6 +6429,7 @@ impl Server {
     let Some((text, cursor, anchor, cause, hint, purpose, _)) = Self::text_input_state(target, target_id) else {
       return;
     };
+    self.im_preedit = None;
     for im in self.clients.values_mut() {
       let ids: Vec<u32> = im.objects.iter().filter_map(|(&oid, obj)| matches!(obj.role, Role::InputMethod { .. }).then_some(oid)).collect();
       for im_id in ids {
@@ -6395,6 +6458,7 @@ impl Server {
   }
 
   fn deactivate_input_methods(&mut self, _current: Option<&mut Client>) {
+    self.im_preedit = None;
     for im in self.clients.values_mut() {
       let ids: Vec<u32> = im.objects.iter().filter_map(|(&oid, obj)| matches!(obj.role, Role::InputMethod { .. }).then_some(oid)).collect();
       for id in ids {
@@ -6454,6 +6518,9 @@ impl Server {
     let Some((target_fd, target_id, surf_id)) = self.active_text_input else {
       return;
     };
+    if let Some((text, begin, end)) = &preedit {
+      self.im_preedit = if text.is_empty() { None } else { Some((text.clone(), *begin, *end)) };
+    }
     // Firefox binds a native text-input-v3 *and* GtkIMContextWayland may bind
     // a second object on the same seat.  Delivering IM commits to only one
     // of them leaves Gecko silent when GTK won the race.

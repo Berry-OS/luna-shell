@@ -13,6 +13,7 @@ mod cursor_aero;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod input;
 pub mod object;
+pub mod placement;
 pub mod protocol;
 pub mod render;
 pub mod server;
