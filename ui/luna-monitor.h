@@ -28,6 +28,7 @@ typedef struct LunaMonitorSnapshot {
     float cpu;
     int memory;
     int battery;
+    int cpu_temp;          /* degrees C, -1 when no sensor */
     char network[16];
     float disk_used;
     double disk_free_gb;
@@ -49,6 +50,8 @@ int  luna_monitor_init(const LunaMonitorConfig* config);
 void luna_monitor_shutdown(void);
 void luna_monitor_request_state(void);
 int  luna_monitor_consume_status(LunaMonitorSnapshot* out);
+/* Latest worker sample without consuming it (no notification involved). */
+int  luna_monitor_peek_status(LunaMonitorSnapshot* out);
 int  luna_monitor_consume_state(char* out, size_t out_n, size_t* len_out);
 unsigned long luna_monitor_memory_total_kb(void);
 
@@ -152,6 +155,38 @@ static struct timespec luna_monitor_wait_deadline(double monotonic_when) {
 static void luna_monitor_notify(void) {
     LunaMonitorNotifyFn fn = g_luna_monitor.notify;
     if (fn) fn(g_luna_monitor.notify_user);
+}
+
+/* CPU package temperature from the first coretemp/k10temp/zenpower/... hwmon. */
+static int luna_monitor_read_cpu_temp(void) {
+    static char path[160];
+    static int searched;
+    if (!searched) {
+        searched = 1;
+        DIR* d = opendir("/sys/class/hwmon");
+        struct dirent* de;
+        while (d && (de = readdir(d))) {
+            if (strncmp(de->d_name, "hwmon", 5)) continue;
+            char np[160], name[48] = "";
+            snprintf(np, sizeof(np), "/sys/class/hwmon/%s/name", de->d_name);
+            FILE* f = fopen(np, "r");
+            if (!f) continue;
+            if (fgets(name, sizeof(name), f)) name[strcspn(name, "\r\n")] = 0;
+            fclose(f);
+            if (strcmp(name, "coretemp") && strcmp(name, "k10temp") && strcmp(name, "zenpower") &&
+                strcmp(name, "cpu_thermal") && strcmp(name, "acpitz")) continue;
+            snprintf(np, sizeof(np), "/sys/class/hwmon/%s/temp1_input", de->d_name);
+            if (access(np, R_OK) == 0) { snprintf(path, sizeof(path), "%s", np); break; }
+        }
+        if (d) closedir(d);
+    }
+    if (!path[0]) return -1;
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    long v = 0;
+    int ok = fscanf(f, "%ld", &v) == 1;
+    fclose(f);
+    return ok ? (int)((v + 500) / 1000) : -1;
 }
 
 static float luna_monitor_read_cpu_percent(void) {
@@ -281,6 +316,9 @@ static int luna_monitor_visible_change(const LunaMonitorSnapshot* old,
                                        const LunaMonitorSnapshot* cur) {
     if (!old->generation) return 1;
     if (old->battery != cur->battery) return 1;
+    /* The temperature rides on the battery item; wake the UI only for a real move. */
+    if (old->cpu_temp != cur->cpu_temp && (old->cpu_temp < 0 || cur->cpu_temp < 0 ||
+        abs(old->cpu_temp - cur->cpu_temp) >= 2)) return 1;
     if (strcmp(old->network, cur->network)) return 1;
     if (strcmp(old->mb_clock, cur->mb_clock)) return 1;
     if (strcmp(old->widget_time, cur->widget_time)) return 1;
@@ -310,6 +348,7 @@ static void luna_monitor_publish_status(void) {
     double now = luna_monitor_now();
     snap.cpu = luna_monitor_read_cpu_percent();
     snap.memory = luna_monitor_read_memory(NULL);
+    snap.cpu_temp = luna_monitor_read_cpu_temp();
 
     if (g_luna_monitor.last_power_net <= 0.0 ||
         now - g_luna_monitor.last_power_net >= 5.0) {
@@ -514,6 +553,15 @@ void luna_monitor_request_state(void) {
     g_luna_monitor.state_requested = 1;
     pthread_cond_signal(&g_luna_monitor.cond);
     pthread_mutex_unlock(&g_luna_monitor.mutex);
+}
+
+int luna_monitor_peek_status(LunaMonitorSnapshot* out) {
+    if (!out || !g_luna_monitor.initialized) return 0;
+    pthread_mutex_lock(&g_luna_monitor.mutex);
+    int ok = g_luna_monitor.status.generation != 0;
+    if (ok) *out = g_luna_monitor.status;
+    pthread_mutex_unlock(&g_luna_monitor.mutex);
+    return ok;
 }
 
 int luna_monitor_consume_status(LunaMonitorSnapshot* out) {

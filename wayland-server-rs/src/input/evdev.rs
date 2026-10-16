@@ -204,13 +204,19 @@ fn input_loop(tx: Sender<InputEvent>, wake_fd: RawFd, stop_fd: RawFd, requested:
   let mut devices: HashMap<String, Device> = HashMap::new();
   let mut pressed = HashMap::<u16, u32>::new();
   let mut consumed_fn = HashSet::<u16>::new();
+  // Nodes already judged not to be a keyboard or pointer (sensors, lid and power
+  // buttons, ...).  Probing one means open, several ioctls and a close that can
+  // take tens of milliseconds, and the loop that does it is the one delivering
+  // pointer events: re-probing every node each second froze input for a few
+  // hundred ms once a second.
+  let mut rejected = HashSet::<String>::new();
   let mut last_scan = Instant::now() - Duration::from_secs(2);
   let mut active = true;
   let mut leds = requested_leds.load(Ordering::Acquire);
 
   loop {
     if last_scan.elapsed() >= Duration::from_secs(1) {
-      rescan(&mut devices, active, leds);
+      rescan(&mut devices, &mut rejected, active, leds);
       last_scan = Instant::now();
     }
 
@@ -499,15 +505,17 @@ fn close_device(dev: Device) {
   }
 }
 
-fn rescan(devices: &mut HashMap<String, Device>, active: bool, leds: u8) {
+fn rescan(devices: &mut HashMap<String, Device>, rejected: &mut HashSet<String>, active: bool, leds: u8) {
   let Ok(entries) = std::fs::read_dir("/dev/input") else { return };
+  let mut present = HashSet::new();
   for entry in entries.flatten() {
     let name = entry.file_name();
     if !name.to_string_lossy().starts_with("event") {
       continue;
     }
     let path = entry.path().to_string_lossy().into_owned();
-    if devices.contains_key(&path) {
+    present.insert(path.clone());
+    if devices.contains_key(&path) || rejected.contains(&path) {
       continue;
     }
     let Ok(cpath) = CString::new(path.as_bytes()) else { continue };
@@ -546,6 +554,7 @@ fn rescan(devices: &mut HashMap<String, Device>, active: bool, leds: u8) {
     let pointer = relative || (abs_x.is_some() && abs_y.is_some()) || has_bit(fd, EV_KEY as u32, BTN_LEFT as usize);
     if !keyboard && !pointer {
       unsafe { libc::close(fd) };
+      rejected.insert(path);
       continue;
     }
     // Grabbing prevents typed console input from being interpreted after Luna exits.
@@ -582,6 +591,7 @@ fn rescan(devices: &mut HashMap<String, Device>, active: bool, leds: u8) {
       },
     );
   }
+  rejected.retain(|p| present.contains(p));
 }
 
 fn set_devices_leds(devices: &HashMap<String, Device>, leds: u8) {
@@ -887,5 +897,34 @@ mod tests {
         if (dx - 0.2).abs() < 0.0001 && (dy - 0.1).abs() < 0.0001
     ));
     unsafe { libc::close(wake_fd) };
+  }
+}
+
+#[cfg(test)]
+mod rescan_tests {
+  use super::*;
+
+  /// Devices that are not keyboards/pointers are probed once, not every scan.
+  /// (active = false: nothing is grabbed, so this is safe beside a desktop.)
+  #[test]
+  fn rejected_nodes_are_not_probed_again() {
+    let mut devices = HashMap::new();
+    let mut rejected = HashSet::new();
+    let t0 = Instant::now();
+    rescan(&mut devices, &mut rejected, false, 0);
+    let first = t0.elapsed();
+    let t1 = Instant::now();
+    rescan(&mut devices, &mut rejected, false, 0);
+    let second = t1.elapsed();
+    eprintln!("rescan: first {:?}, second {:?}, rejected {}, accepted {}", first, second, rejected.len(), devices.len());
+    for d in devices.values() {
+      unsafe {
+        libc::close(d.fd);
+        if d.led_fd >= 0 {
+          libc::close(d.led_fd);
+        }
+      }
+    }
+    assert!(second <= first || second < Duration::from_millis(5));
   }
 }

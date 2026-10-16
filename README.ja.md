@@ -93,10 +93,15 @@ make desktop-soft-system
 直接 DRI セッションは現在、実際の Linux VT と直接の DRM/入力アクセスを想定しています。それが権限の昇格を必要とするマシンでは、まず通常ユーザーとしてビルドし、その後適切な権限で VT から既にビルドされたセッションを起動してください。例:
 
 ```bash
-sudo LUNA_TTY=/dev/tty2 PROFILE=release ./luna-session
+make build-desktop-system
+sudo env LUNA_REBUILD=0 ./luna-session --vt 2
 ```
 
-物理ハードウェアで新しいコンポジタをテストする際は、SSH などの復旧パスを確保しておいてください。
+`--vt 2` は未使用のVT 2へ切り替え、終了後に元のVTへ戻ります。
+Waybackとの切替にはCtrl+Alt+F2と、Wayback側のVTに対応するCtrl+Alt+Fnを使います。
+専用ソケット`wayland-luna-2`を使うため、Waybackのソケットを置き換えません。
+画面を切り替えずに実行できる位置復元・ウィンドウ操作テストと検証範囲は
+[wm-validation.md](docs/wm-validation.md)を参照してください。
 
 ## 🧩 デスクトップに実際に含まれるもの
 

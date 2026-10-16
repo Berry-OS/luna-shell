@@ -34,11 +34,21 @@ make -C "$ROOT" luna-shell LUNA_WAYLAND_CLIENT=system
 Xvfb "$DISPLAY_NUM" -screen 0 1440x900x24 +extension GLX +render -noreset >"$BUILD/xvfb.log" 2>&1 &
 XVFB_PID=$!
 
-for _ in $(seq 1 50); do
-  if DISPLAY="$DISPLAY_NUM" xdpyinfo >/dev/null 2>&1; then break; fi
-  sleep 0.1
-done
-DISPLAY="$DISPLAY_NUM" xdpyinfo >/dev/null
+if command -v xdpyinfo >/dev/null 2>&1; then
+  for _ in $(seq 1 50); do
+    if DISPLAY="$DISPLAY_NUM" xdpyinfo >/dev/null 2>&1; then break; fi
+    sleep 0.1
+  done
+  DISPLAY="$DISPLAY_NUM" xdpyinfo >/dev/null
+else
+  display_id="${DISPLAY_NUM#:}"
+  display_id="${display_id%%.*}"
+  for _ in $(seq 1 50); do
+    [[ -S "/tmp/.X11-unix/X${display_id}" ]] && break
+    sleep 0.1
+  done
+  [[ -S "/tmp/.X11-unix/X${display_id}" ]]
+fi
 
 for skin in "${SKINS[@]}"; do
   png="$OUT/luna-shell-skin-${skin}.png"
@@ -56,6 +66,7 @@ for skin in "${SKINS[@]}"; do
     XDG_DATA_HOME="$home/.local/share" \
     XDG_STATE_HOME="$home/.local/state" \
     XDG_CACHE_HOME="$home/.cache" \
+    LUNA_SKIN_PATH="$ROOT/skins" \
     LUNA_EGL_SOFTWARE=1 \
     LIBGL_ALWAYS_SOFTWARE=1 \
     "$ROOT/luna-shell" --desktop --skin "$skin" --screenshot "$png" \

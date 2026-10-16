@@ -11,6 +11,33 @@ use libc::{c_void, mmap, munmap, MAP_FAILED, MAP_SHARED, PROT_READ};
 use std::os::unix::io::RawFd;
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_CONTENT_SERIAL: AtomicU64 = AtomicU64::new(1);
+static NEXT_SURFACE_GPU_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Per-surface bookkeeping for incremental GPU uploads of wl_shm content.
+///
+/// A surface keeps one GPU texture no matter how many wl_buffers its client
+/// cycles through.  That texture always holds the previously committed
+/// content, so the damage a commit reports (the difference from the previous
+/// commit) is exactly what has to be re-uploaded -- not the whole buffer.
+/// `dirty` accumulates that damage until a GPU composite has consumed it, so
+/// commits that were never presented (or a composite that fell back to the CPU
+/// path) cannot leave the texture stale.
+pub struct SurfaceGpu {
+    pub id: u64,
+    pub dirty: Cell<crate::render::Rect>,
+}
+
+impl SurfaceGpu {
+    pub fn new() -> Rc<Self> {
+        Rc::new(SurfaceGpu {
+            id: NEXT_SURFACE_GPU_ID.fetch_add(1, Ordering::Relaxed),
+            dirty: Cell::new(crate::render::Rect::EMPTY),
+        })
+    }
+}
 
 pub const FORMAT_ARGB8888: u32 = 0;
 pub const FORMAT_XRGB8888: u32 = 1;
@@ -40,9 +67,27 @@ pub struct ShmPool {
     storage_ino: u64,
     /// dmabuf pools need DMA_BUF_IOCTL_SYNC around CPU access
     is_dmabuf: bool,
+    /// CPU-owned pixels (compositor-drawn chrome); `ptr` points into it and
+    /// there is no fd to unmap or close.
+    owned: Option<Vec<u32>>,
 }
 
 impl ShmPool {
+    /// A pool backed by compositor-owned ARGB pixels.
+    pub fn from_pixels(pixels: Vec<u32>) -> Rc<ShmPool> {
+        let size = pixels.len() * 4;
+        let ptr = pixels.as_ptr() as *mut c_void;
+        Rc::new(ShmPool {
+            ptr,
+            size,
+            fd: -1,
+            storage_dev: 0,
+            storage_ino: 0,
+            is_dmabuf: false,
+            owned: Some(pixels),
+        })
+    }
+
     pub fn map(fd: RawFd, size: usize) -> Option<Rc<ShmPool>> {
         Self::map_inner(fd, size, false, true)
     }
@@ -81,6 +126,7 @@ impl ShmPool {
             storage_dev: if have_identity { stat.st_dev as u64 } else { 0 },
             storage_ino: if have_identity { stat.st_ino as u64 } else { 0 },
             is_dmabuf,
+            owned: None,
         }))
     }
 
@@ -141,6 +187,9 @@ impl ShmPool {
 
 impl Drop for ShmPool {
     fn drop(&mut self) {
+        if self.owned.is_some() {
+            return;
+        }
         unsafe {
             if !self.ptr.is_null() {
                 munmap(self.ptr, self.size);
@@ -160,9 +209,11 @@ pub struct ShmBuffer {
     pub format: u32,
     /// DRM format modifier for dma-buf storage. wl_shm is always linear.
     pub modifier: u64,
-    /// Incremented whenever this wl_buffer is attached in a new commit. GPU
+    /// Assigned a unique serial whenever this wl_buffer is committed. GPU
     /// composition uses it to skip uploading unchanged SHM storage.
     pub content_serial: Rc<Cell<u64>>,
+    /// Set by the surface commit that makes this buffer current (wl_shm only).
+    pub surface_gpu: Option<Rc<SurfaceGpu>>,
 }
 
 impl ShmBuffer {
@@ -183,7 +234,7 @@ impl ShmBuffer {
     }
 
     pub fn mark_updated(&self) {
-        self.content_serial.set(self.content_serial.get().wrapping_add(1));
+        self.content_serial.set(NEXT_CONTENT_SERIAL.fetch_add(1, Ordering::Relaxed));
     }
 
     pub fn serial(&self) -> u64 {
@@ -222,5 +273,30 @@ impl ShmBuffer {
             FORMAT_XRGB8888 => Some(v | 0xff00_0000),
             _ => Some(v | 0xff00_0000),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn separate_buffers_reusing_storage_have_distinct_upload_serials() {
+        let fd = unsafe { libc::memfd_create(b"luna-serial-test\0".as_ptr().cast(), libc::MFD_CLOEXEC) };
+        assert!(fd >= 0);
+        assert_eq!(unsafe { libc::ftruncate(fd, 4) }, 0);
+        let pool = ShmPool::map(fd, 4).unwrap();
+        let first = ShmBuffer { pool, offset: 0, width: 1, height: 1, stride: 4,
+            format: FORMAT_XRGB8888, modifier: 0, content_serial: Rc::new(Cell::new(0)), surface_gpu: None };
+        let mut second = first.clone();
+        second.content_serial = Rc::new(Cell::new(0));
+        first.mark_updated();
+        second.mark_updated();
+        assert_eq!(first.upload_ptr(), second.upload_ptr());
+        assert_ne!(first.serial(), second.serial());
+        let retained = first.clone();
+        first.mark_updated();
+        assert_eq!(first.serial(), retained.serial());
+        assert_ne!(first.serial(), second.serial());
     }
 }

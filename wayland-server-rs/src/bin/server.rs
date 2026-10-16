@@ -29,6 +29,13 @@ fn main() {
       "--fbdev" => fbdev = args.next(),
       "--tty" => tty = args.next(),
       "--no-input" => with_input = false,
+      // Test aid: compose with the GPU on a card needing no DRM master (see
+      // tests/headless/run.sh); same as LUNA_HEADLESS_GPU=CARD.
+      "--headless-gpu" => {
+        if let Some(card) = args.next() {
+          unsafe { std::env::set_var("LUNA_HEADLESS_GPU", card) };
+        }
+      }
       "--port" => {
         if let Some(p) = args.next() {
           port = p.parse().unwrap_or(port);
@@ -108,6 +115,12 @@ fn main() {
 
 fn make_software(w: u32, h: u32, screenshot: Option<String>, fbdev: Option<String>) -> SoftwareBackend {
   let mut b = SoftwareBackend::new(w, h);
+  #[cfg(all(target_os = "linux", feature = "gpu"))]
+  if let Ok(card) = std::env::var("LUNA_HEADLESS_GPU") {
+    if !card.is_empty() {
+      b = b.with_headless_gpu(&card);
+    }
+  }
   if let Some(p) = screenshot {
     b = b.with_screenshot(p);
   }

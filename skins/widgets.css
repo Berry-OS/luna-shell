@@ -1,13 +1,166 @@
 /* Shared shell widgets. C injects markup and live data; CSS owns appearance. */
-#widget_clock,#widget_stats,#widget_weather{position:absolute;background:linear-gradient(135deg,rgba(18,19,42,.52) 0%,rgba(10,11,26,.65) 100%);backdrop-filter:blur(24px) saturate(1.6);border:1px solid rgba(255,255,255,.12);border-radius:22px;box-shadow:0 10px 28px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.08);padding:16px 18px}
+#widget_clock,#widget_stats,#widget_weather,#widget_airplay,#widget_airdrop{position:absolute;background:linear-gradient(135deg,rgba(18,19,42,.52) 0%,rgba(10,11,26,.65) 100%);backdrop-filter:blur(24px) saturate(1.6);border:1px solid rgba(255,255,255,.12);border-radius:22px;box-shadow:0 10px 28px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.08);padding:16px 18px}
 #widget_clock{right:24px;top:52px;width:220px;height:110px}#widget_clock.stopwatch_mode{height:160px;padding:14px 16px}
 #wg_clock_view{position:relative;width:100%;height:100%}#wg_time{color:#fff;font-size:46px;font-weight:800;line-height:1;width:calc(100% - 32px)}#wg_date{color:rgba(215,212,242,.75);font-size:12px;font-weight:500;margin-top:6px}
 #widget_clock .wg_clock_icon{display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:8px;color:rgba(215,212,242,.75);font-size:12px;cursor:pointer;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08)}#widget_clock .wg_clock_icon:hover{background:rgba(255,255,255,.14);color:#fff}#wg_stopwatch_open{position:absolute;right:0;top:0;z-index:20}
 #wg_stopwatch_view{width:100%;height:100%}#wg_stopwatch_head{display:flex;flex-direction:row;align-items:center;gap:8px;width:100%;height:24px}#wg_stopwatch_title{flex:1 1 auto;color:#f8f7ff;font-size:12px;font-weight:700}#wg_stopwatch_state{color:rgba(165,170,210,.60);font-size:10px}
 #wg_stopwatch_time{width:100%;margin-top:8px;color:#fff;font-size:34px;font-weight:800;line-height:1;text-align:center}#wg_stopwatch_actions{display:flex;flex-direction:row;gap:8px;width:100%;margin-top:12px}#wg_stopwatch_actions .dlg_btn{display:flex;align-items:center;justify-content:center;flex:1 1 0;min-width:0;height:30px;border-radius:7px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.16);color:#f8f7ff;font-size:12px;cursor:pointer}#wg_stopwatch_actions .dlg_btn.primary{background:linear-gradient(180deg,#a898ff,#8d7bff);color:#fff}
-#widget_stats.clock_below_stopwatch{top:226px}#widget_weather.clock_below_stopwatch{top:398px}#widget_stats{right:24px;top:176px;width:220px;height:156px}
+#widget_stats.clock_below_stopwatch{top:226px}#widget_weather.clock_below_stopwatch{top:412px}#widget_stats{right:24px;top:176px;width:220px;height:170px}
 #widget_stats .st_row,#widget_weather .st_row{display:flex;flex-direction:row;justify-content:space-between;margin-top:8px}.st_row.st_spaced{margin-top:12px}#widget_stats .st_label,#widget_weather .st_label{color:rgba(215,212,242,.75);font-size:11px;font-weight:500}#widget_stats .st_val,#widget_weather .st_val{color:#fff;font-size:11px;font-weight:700;text-align:right}
-#widget_stats .st_bar{height:4px;border-radius:2px;background:rgba(255,255,255,.10);margin-top:5px;position:relative;overflow:hidden}#widget_stats .st_fill{position:absolute;left:0;top:0;height:100%;width:0;border-radius:2px;background:linear-gradient(90deg,#c9a6ff,#8d7bff)}#widget_stats .st_fill.g_mem{background:linear-gradient(90deg,#bf5af2,#9b3fe0)}#widget_stats .st_fill.g_disk{background:linear-gradient(90deg,#30d158,#25a244)}
-#widget_weather{right:24px;top:348px;width:220px;height:168px}#wg_wx_main{display:flex;flex-direction:row;align-items:center;gap:8px;margin-top:8px;margin-bottom:10px}#wg_wx_icon{font-size:22px;color:#8d7bff;width:28px;text-align:center}#wg_wx_desc{color:rgba(215,212,242,.75);font-size:12px;font-weight:500}
+#widget_stats .st_bar{height:4px;border-radius:2px;background:rgba(255,255,255,.10);margin-top:5px;position:relative;overflow:hidden}#widget_stats .st_fill{position:absolute;left:0;top:0;height:100%;width:0;border-radius:2px;background:linear-gradient(90deg,#c9a6ff,#8d7bff)}#widget_stats .st_fill.g_mem{background:linear-gradient(90deg,#bf5af2,#9b3fe0)}#widget_stats .st_fill.g_temp{background:linear-gradient(90deg,#ffd60a,#ff9f0a 55%,#ff453a)}
+#widget_weather{right:24px;top:362px;width:220px;height:168px}#wg_wx_main{display:flex;flex-direction:row;align-items:center;gap:8px;margin-top:8px;margin-bottom:10px}#wg_wx_icon{font-size:22px;color:#8d7bff;width:28px;text-align:center}#wg_wx_desc{color:rgba(215,212,242,.75);font-size:12px;font-weight:500}
 #wg_wx_forecast{display:flex;flex-direction:row;gap:6px;justify-content:space-between}#widget_weather .wf_day{flex:1 1 0;text-align:center;font-size:11px;color:rgba(255,255,255,.55)}#widget_weather .wf_name{font-size:10px;opacity:.7;margin-bottom:2px}#widget_weather .wf_icon{font-size:16px;color:#c9a6ff;margin:4px 0}#widget_weather .wf_temp{font-weight:600;font-size:11px;color:#fff;margin-top:2px}
 .dock_dot{opacity:0}.dock_dot.running{opacity:1}.dock_dot.spacer{opacity:0}
+.st_graph{display:none;flex-direction:row;align-items:flex-end;width:176px;height:24px;margin-top:4px}
+#widget_stats.stats_graph .st_bar.gb{display:none}#widget_stats.stats_graph .st_graph{display:flex}
+.gc{width:4px;height:8%;background:rgba(141,123,255,.30);border-top:2px solid #c9a6ff}
+#st_mem_graph .gc{background:rgba(191,90,242,.30);border-top:2px solid #bf5af2}
+#st_temp_graph .gc{background:linear-gradient(180deg,rgba(255,159,10,.42),rgba(255,69,58,.10));border-top:2px solid #ff9f0a}
+#widget_stats.stats_graph{height:222px}
+#widget_weather.wx_g{top:414px}#widget_weather.wx_g_sw{top:464px}
+/* Menubar temperature severity (thresholds: temp_warm/temp_hot/temp_crit in settings.conf) */
+#mb_bat.temp_warm,#mb_bat.temp_warm .luna_icon{color:#ffd60a !important}
+#mb_bat.temp_hot,#mb_bat.temp_hot .luna_icon{color:#ff9f0a !important}
+#mb_bat.temp_crit,#mb_bat.temp_crit .luna_icon{color:#ff453a !important}
+/* Weather temperature severity (weather_cold/weather_hot/weather_crit in settings.conf) */
+.wx_cold{color:#64b5ff !important}
+.wx_hot{color:#ff9f0a !important}
+.wx_crit{color:#ff453a !important}
+/* Weather condition icon colour (follows the forecast code) */
+.wxi_clear{color:#ffb21e !important}
+.wxi_pcloud{color:#ffd166 !important}
+.wxi_cloud{color:#a9b4c6 !important}
+.wxi_fog{color:#b9c2cc !important}
+.wxi_rain{color:#4da3ff !important}
+.wxi_snow{color:#aee4ff !important}
+.wxi_storm{color:#c77dff !important}
+/* Image wallpaper: replaces the built-in scene */
+#wallpaper.photo{background-size:cover;background-position:center;background-repeat:no-repeat}
+#wallpaper.photo > *{display:none}
+/* Keep task icons inside the status bar for every skin. Status controls keep
+ * their natural widths; only the tray viewport and app label may shrink. */
+#mb_left { flex-shrink: 1 !important; }
+#mb_app { flex-shrink: 1 !important; min-width: 0 !important; }
+#mb_right { flex-shrink: 1 !important; min-width: 0 !important; }
+/* The tray never scrolls or clips: crowded trays group windows by app instead
+ * (see update_tray_ui), and tooltips hang outside the strip. */
+#tray_area {
+  flex: 0 0 auto !important; min-width: 0 !important;
+  overflow: visible;
+}
+.tray_item { flex: 0 0 auto !important; }
+/* HTML / GLSL wallpapers: replace the built-in scene. Author styles for an
+   HTML wallpaper should target #wp_custom and its children. */
+#wallpaper.wp_html > *,#wallpaper.wp_glsl > *{display:none}
+#wp_custom{display:none;position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden;z-index:-1}
+#wp_custom.active{display:block}
+#wallpaper.wp_html{background:none}
+#wallpaper.wp_glsl{background:none}
+#screensaver{position:absolute;left:0;top:0;width:100%;height:100%;background:none}
+
+/* Storage barely changes: one small line of numbers, not a meter. */
+#st_storage{display:flex;flex-direction:row;align-items:center;gap:8px;margin-top:10px;padding:5px 9px;border-radius:10px;background:rgba(48,209,88,.12);border:1px solid rgba(94,240,138,.18)}
+#st_storage .sg_icon{display:flex;align-items:center;justify-content:center;width:18px;height:18px;color:#6df59a;font-size:11px}
+#st_storage .sg_txt{display:flex;flex-direction:row;align-items:center;gap:8px;flex:1 1 auto}
+#st_disk_val{color:#fff;font-size:11px;font-weight:700}
+#st_disk_sub{color:rgba(215,242,222,.65);font-size:10px}
+
+/* Menubar CPU / temperature graph: two translucent gradient columns sets
+ * stacked in one 56x18 well (temperature behind, CPU in front). */
+#mb_graph{width:32px;min-width:32px;padding:0;background-color:rgba(255,255,255,.07);border-radius:5px}
+#mb_graph .mg_layer{position:absolute;left:2px;top:3px;width:28px;height:18px;display:flex;flex-direction:row;align-items:flex-end}
+#mb_graph .mg_c{width:2px;height:8%}
+#mg_temp .mg_c{background:linear-gradient(180deg,rgba(255,159,10,.80),rgba(255,69,58,.18))}
+#mg_cpu .mg_c{background:linear-gradient(180deg,rgba(125,211,252,.95),rgba(141,123,255,.35));border-top:1px solid rgba(220,240,255,.9)}
+#mb_graph.mg_only_cpu #mg_temp{display:none}
+#mb_graph.mg_only_temp #mg_cpu{display:none}
+#mb_graph.hidden{display:none !important}
+#mg_icon{display:none;font-size:13px}
+#mb_graph.mg_off{width:30px;min-width:30px}
+#mb_graph.mg_off .mg_layer{display:none}
+#mb_graph.mg_off #mg_icon{display:block}
+
+/* Wallpaper chooser: self-contained dark glass, identical in every skin. */
+#wpd_box{left:calc(50% - 340px);top:calc(42% - 280px);width:680px;height:560px;display:flex;flex-direction:column;background:linear-gradient(180deg,#2b2c40 0%,#1a1b2a 100%);border:1px solid rgba(255,255,255,.16);border-radius:18px;box-shadow:0 22px 60px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.12);overflow:hidden}
+#wpd_head{display:flex;flex-direction:row;align-items:center;gap:10px;height:54px;flex:0 0 54px;padding:0 16px 0 20px;border-bottom:1px solid rgba(255,255,255,.08)}
+#wpd_title_icon{color:#b9a8ff;font-size:16px}
+#wpd_title{color:#fff;font-size:15px;font-weight:700}
+#wpd_cur{flex:1 1 auto;color:rgba(215,212,242,.62);font-size:11px;text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wpd_x{display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:13px;background:rgba(255,255,255,.08);color:rgba(235,235,255,.85);font-size:12px;cursor:pointer}
+.wpd_x:hover{background:#ff5f57;color:#fff}
+#wpd_tabs{display:flex;flex-direction:row;gap:6px;padding:12px 20px 4px;flex:0 0 auto}
+.wpd_tab{flex:0 0 auto;justify-content:center;white-space:nowrap;display:flex;align-items:center;height:28px;padding:0 14px;border-radius:14px;background:rgba(255,255,255,.06);color:rgba(225,225,250,.78);font-size:12px;font-weight:600;cursor:pointer}
+.wpd_tab:hover{background:rgba(255,255,255,.13);color:#fff}
+.wpd_tab.selected{background:linear-gradient(180deg,#a898ff,#7967ed);color:#fff}
+#wpd_pathbar{display:flex;flex-direction:row;align-items:center;gap:8px;height:34px;flex:0 0 34px;padding:6px 20px 0}
+#wpd_pathbar.hidden{display:none}
+.wpd_btn{display:flex;align-items:center;justify-content:center;width:28px;height:26px;border-radius:8px;background:rgba(255,255,255,.08);color:rgba(235,235,255,.85);font-size:11px;cursor:pointer}
+.wpd_btn:hover{background:rgba(255,255,255,.18);color:#fff}
+#wpd_path{flex:1 1 auto;color:rgba(215,212,242,.72);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#wpd_grid{display:flex;flex-direction:row;flex-wrap:wrap;width:100%;flex:1 1 auto;padding:10px 0 0 20px}
+.wpd_tile{width:140px;height:112px;margin:0 20px 14px 0;cursor:pointer}
+.wpd_tile.hidden{display:none !important}
+.wpd_thumb{display:flex;align-items:center;justify-content:center;width:140px;height:82px;border-radius:11px;border:2px solid transparent;background-color:rgba(255,255,255,.07);background-size:cover;overflow:hidden}
+.wpd_tile:hover .wpd_thumb{border-color:rgba(255,255,255,.38)}
+.wpd_tile.selected .wpd_thumb{border-color:#b9a8ff;box-shadow:0 0 0 2px rgba(185,168,255,.35)}
+.wpd_glyph{color:rgba(255,255,255,.82);font-size:26px}
+.wpd_name{display:block;margin-top:6px;color:rgba(238,238,255,.88);font-size:11px;font-weight:500;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wpd_tile.selected .wpd_name{color:#fff;font-weight:700}
+.wpd_th_night{background:linear-gradient(135deg,#06071a 0%,#2e2472 55%,#833a94 100%)}
+.wpd_th_ocean{background:linear-gradient(135deg,#000b18 0%,#00326a 55%,#40c8f0 100%)}
+.wpd_th_forest{background:linear-gradient(135deg,#040b04 0%,#163418 55%,#58a84a 100%)}
+.wpd_th_sunset{background:linear-gradient(135deg,#0e0510 0%,#5a1c10 55%,#e87040 100%)}
+.wpd_th_dir{background:linear-gradient(135deg,#34364e,#232538)}
+.wpd_th_html{background:linear-gradient(135deg,#1d3b5a,#3a2a63)}
+.wpd_th_glsl{background:linear-gradient(135deg,#3b1f5e,#0f4a5c)}
+.wpd_th_plain{background:linear-gradient(135deg,#2b2d44,#1b1c2c)}
+#wpd_empty{width:100%;padding:60px 40px;text-align:center;color:rgba(215,212,242,.55);font-size:12px}
+#wpd_empty.hidden{display:none !important}
+#wpd_open_dir{min-width:112px}
+#wpd_clear{min-width:140px}
+#wpd_foot{display:flex;flex-direction:row;align-items:center;gap:10px;height:54px;flex:0 0 54px;padding:0 18px 0 20px;border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.2)}
+#wpd_page{color:rgba(225,225,250,.75);font-size:12px;min-width:48px;text-align:center}
+#wpd_status{flex:1 1 auto;color:rgba(215,212,242,.5);font-size:11px;padding-left:8px}
+
+/* The application name at the top left opens the window menu: make it look it. */
+#mb_app{cursor:pointer}
+#mb_app:hover{background-color:rgba(255,255,255,.14)}
+#wpd_tab_0{width:84px}#wpd_tab_1{width:88px}#wpd_tab_2{width:128px}#wpd_tab_3{width:104px}#wpd_tab_4{width:80px}
+
+
+/* Tooltips: frosted dark glass with a hairline edge; shown by plain :hover. */
+#menubar .tray_tip,#menubar .mb_tip{background:linear-gradient(180deg,rgba(38,40,64,.97),rgba(20,21,36,.97));border:1px solid rgba(255,255,255,.14);border-radius:10px;box-shadow:0 10px 28px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.08);color:#f1f0ff;font-weight:500;letter-spacing:.01em}
+#menubar .tray_tip{top:32px;padding:5px 14px;line-height:17px;text-align:center;white-space:normal;overflow:hidden}
+#menubar .tray_tip::before,#menubar .mb_tip::before{background:rgb(38,40,64);border-left:1px solid rgba(255,255,255,.14);border-top:1px solid rgba(255,255,255,.14)}
+
+/* AirPlay receiver card, stacked under the weather card (same layout classes). */
+/* Sharing cards form a second column, left of the clock/stats/weather stack. */
+#widget_airplay{right:256px;top:52px;width:220px;height:104px}
+#widget_airdrop{right:256px;top:172px;width:220px;height:158px}
+#widget_airplay .st_row,#widget_airdrop .st_row{display:flex;flex-direction:row;justify-content:space-between;align-items:center;margin-top:0}
+#widget_airplay .st_label,#widget_airdrop .st_label{color:rgba(215,212,242,.75);font-size:11px;font-weight:500}
+#ap_main{display:flex;flex-direction:row;align-items:center;gap:10px;margin-top:10px}
+#ap_icon{width:30px;height:30px;border-radius:10px;background:rgba(141,123,255,.20);color:#c9a6ff;font-size:14px;display:flex;align-items:center;justify-content:center}
+#widget_airplay.on #ap_icon{background:linear-gradient(135deg,#8d7bff,#5ac8fa);color:#fff}
+#widget_airplay.live #ap_icon{background:linear-gradient(135deg,#30d158,#5ac8fa);color:#fff}
+#ap_text{display:flex;flex-direction:column;flex:1 1 auto}
+#ap_status{color:#fff;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ap_hint{color:rgba(215,212,242,.60);font-size:10px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* AirDrop card */
+#ad_main{display:flex;flex-direction:row;align-items:center;gap:10px;margin-top:10px}
+#ad_icon{width:30px;height:30px;border-radius:10px;background:rgba(90,200,250,.18);color:#7fd8ff;font-size:14px;display:flex;align-items:center;justify-content:center}
+#widget_airdrop.on #ad_icon{background:linear-gradient(135deg,#5ac8fa,#8d7bff);color:#fff}
+#widget_airdrop.busy #ad_icon{background:linear-gradient(135deg,#30d158,#5ac8fa);color:#fff}
+#ad_text{display:flex;flex-direction:column;flex:1 1 auto}
+#ad_status{color:#fff;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ad_hint{color:rgba(215,212,242,.60);font-size:10px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#ad_peers{display:flex;flex-direction:column;gap:4px;margin-top:8px}
+.ad_peer{display:flex;flex-direction:row;align-items:center;justify-content:space-between;height:24px;padding:0 10px;border-radius:9px;background:rgba(255,255,255,.07);cursor:pointer}
+.ad_peer:hover{background:rgba(255,255,255,.16)}
+.ad_peer.hidden{display:none !important}
+.ad_pn{color:#fff;font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto}
+.ad_go{color:#7fd8ff;font-size:11px}
+
+/* Widgets are not text: no selection, no Copy menu on right-click. */
+#widget_clock,#widget_clock *,#widget_stats,#widget_stats *,#widget_weather,#widget_weather *,#widget_airplay,#widget_airplay *,#widget_airdrop,#widget_airdrop *{user-select:none}

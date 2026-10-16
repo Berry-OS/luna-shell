@@ -17,15 +17,22 @@ use std::collections::VecDeque;
 use std::env;
 use std::ffi::CString;
 use std::io;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::RawFd;
 
 pub struct Listener {
     pub fd: RawFd,
     path: CString,
+    _lock: std::fs::File,
+    lock_path: std::path::PathBuf,
 }
 
 impl Listener {
     pub fn bind(name: &str) -> io::Result<Self> {
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid socket name"));
+        }
         let runtime = env::var("XDG_RUNTIME_DIR").map_err(|_| {
             io::Error::new(io::ErrorKind::NotFound, "XDG_RUNTIME_DIR not set")
         })?;
@@ -38,6 +45,15 @@ impl Listener {
                 io::ErrorKind::InvalidInput,
                 "socket path too long",
             ));
+        }
+
+        // Match libwayland's socket ownership: acquire the standard lock
+        // before unlinking a stale endpoint. Never steal a running display.
+        let lock_path = std::path::PathBuf::from(format!("{}.lock", path));
+        let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
+            .mode(0o600).open(&lock_path)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(io::Error::new(io::ErrorKind::AddrInUse, "Wayland socket is already locked"));
         }
 
         // Remove stale socket file.
@@ -73,7 +89,7 @@ impl Listener {
             }
         }
 
-        Ok(Listener { fd, path: path_c })
+        Ok(Listener { fd, path: path_c, _lock: lock, lock_path })
     }
 
     pub fn accept(&self) -> io::Result<Option<RawFd>> {
@@ -102,6 +118,8 @@ impl Drop for Listener {
             close(self.fd);
             unlink(self.path.as_ptr());
         }
+        let _ = std::fs::remove_file(&self.lock_path);
+        // _lock stays alive until both paths have been removed.
     }
 }
 

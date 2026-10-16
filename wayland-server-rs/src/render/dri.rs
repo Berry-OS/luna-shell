@@ -373,7 +373,7 @@ impl ScanoutBuf {
 /// `/sys/dev/char/<major>:<minor>/device/drm/` lists every node of the physical
 /// device, so the render sibling is found there and then verified by opening it
 /// — an unopenable node is worse than no node at all.
-fn render_node_of(card_fd: i32) -> Option<u64> {
+pub(crate) fn render_node_of(card_fd: i32) -> Option<u64> {
   let mut st: libc::stat = unsafe { std::mem::zeroed() };
   if unsafe { libc::fstat(card_fd, &mut st) } != 0 {
     return None;
@@ -398,6 +398,13 @@ fn render_node_of(card_fd: i32) -> Option<u64> {
 
 impl DriBackend {
   pub fn open_any(tty: Option<&str>, with_input: bool) -> Option<Self> {
+    // `LUNA_DRM_CARD=/dev/dri/card0` pins the card (a second GPU, or a test
+    // instance next to a running desktop); no fallback to the others then.
+    if let Ok(path) = std::env::var("LUNA_DRM_CARD") {
+      if !path.is_empty() {
+        return Self::open(&path, tty, with_input);
+      }
+    }
     for n in 0..4 {
       let path = format!("/dev/dri/card{}", n);
       if let Some(b) = Self::open(&path, tty, with_input) {
@@ -713,6 +720,24 @@ impl Backend for DriBackend {
     }
   }
 
+  fn blit_buffer(&mut self, fb: &mut Framebuffer, buf: &ShmBuffer, x: i32, y: i32) {
+    if buf.is_cpu_linear() && buf.upload_ptr().is_some() {
+      fb.blit_shm(buf, x, y);
+      return;
+    }
+    #[cfg(feature = "gpu")]
+    {
+      // Only the part of the surface that lands inside the active clip is
+      // read back; a damage-limited frame no longer pulls the whole buffer.
+      let clip = fb.clip();
+      let need = super::Rect::new(clip.x0 - x, clip.y0 - y, clip.x1 - x, clip.y1 - y)
+        .intersect(&super::Rect::new(0, 0, buf.width, buf.height));
+      if let Some(pixels) = self.gpu.as_mut().and_then(|g| g.readback(buf, need)) {
+        fb.blit_pixels_region(pixels, buf.width, buf.height, x, y, buf.format == FORMAT_XRGB8888, need);
+      }
+    }
+  }
+
   fn present_dmabuf(&mut self, buf: &ShmBuffer) -> bool {
     // Direct scanout would require another blocking SetCrtc when page flips
     // are unavailable. Fall back to software composition into the persistent
@@ -751,7 +776,7 @@ impl Backend for DriBackend {
     #[cfg(feature = "gpu")]
     {
       let Some(output) = self.gpu.as_mut().and_then(|g| g.render_dmabufs(surfaces, extra_surface, bitmap)) else { return false };
-      return self.commit_gpu_output(output.1, output.2);
+      return self.commit_gpu_output(output);
     }
     #[cfg(not(feature = "gpu"))]
     {
@@ -888,6 +913,8 @@ impl Backend for DriBackend {
     eprintln!("[luna-compositor] VT released");
   }
 
+  fn is_active(&self) -> bool { self.active }
+
   fn activate(&mut self) {
     if self.active {
       return;
@@ -954,22 +981,15 @@ impl DriBackend {
   #[cfg(feature = "gpu")]
   #[allow(dead_code)] // Kept for experiments; software presents use copy_damaged.
   fn present_gpu(&mut self, fb: &Framebuffer) -> bool {
-    let Some((_, handle, stride)) = self.gpu.as_mut().and_then(|g| g.render(fb)) else { return false };
-    self.commit_gpu_output(handle, stride)
+    let Some(output) = self.gpu.as_mut().and_then(|g| g.render(fb)) else { return false };
+    self.commit_gpu_output(output)
   }
 
   #[cfg(feature = "gpu")]
-  fn commit_gpu_output(&mut self, handle: u32, stride: u32) -> bool {
-    let mut cmd = ModeFbCmd {
-      fb_id: 0,
-      width: self.width,
-      height: self.height,
-      pitch: stride,
-      bpp: 32,
-      depth: 24,
-      handle,
-    };
-    if unsafe { ioctl(self.fd, iowr::<ModeFbCmd>(0xAE), &mut cmd) } != 0 {
+  fn commit_gpu_output(&mut self, output: super::gpu::Output) -> bool {
+    let mut cmd = gpu_framebuffer_cmd(self.width, self.height, &output);
+    if unsafe { ioctl(self.fd, iowr::<ModeFbCmd2>(0xB8), &mut cmd) } != 0 {
+      eprintln!("[luna-compositor] GPU framebuffer registration failed: {}", std::io::Error::last_os_error());
       if let Some(g) = self.gpu.as_mut() {
         g.discard();
       }
@@ -1200,7 +1220,11 @@ impl Drop for DriBackend {
         direct.release(self.fd);
       }
       #[cfg(feature = "gpu")]
-      remove_fb(self.fd, self.gpu_fb);
+      {
+        remove_fb(self.fd, self.gpu_fb);
+        // GBM/EGL owns BOs on this DRM file. Destroy it before closing fd.
+        self.gpu.take();
+      }
       if self.master {
         ioctl(self.fd, io(0x1f));
         self.master = false;
@@ -1211,6 +1235,24 @@ impl Drop for DriBackend {
       libc::close(self.fd);
     }
   }
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_framebuffer_cmd(width: u32, height: u32, output: &super::gpu::Output) -> ModeFbCmd2 {
+  let mut cmd = ModeFbCmd2::default();
+  cmd.width = width;
+  cmd.height = height;
+  cmd.pixel_format = output.fourcc;
+  cmd.handles[0] = output.handle;
+  cmd.pitches[0] = output.stride;
+  cmd.offsets[0] = output.offset;
+  // LINEAR is valid with legacy implicit registration too. INVALID denotes
+  // implicit layout and must never be passed as an explicit modifier.
+  if output.modifier != 0 && output.modifier != 0x00ff_ffff_ffff_ffff {
+    cmd.flags = DRM_MODE_FB_MODIFIERS;
+    cmd.modifier[0] = output.modifier;
+  }
+  cmd
 }
 
 unsafe fn remove_fb(fd: RawFd, fb_id: u32) {
@@ -1275,8 +1317,10 @@ unsafe fn import_scanout(card_fd: RawFd, dma_fd: RawFd, buf: &ShmBuffer, key: Im
   fb.handles[0] = prime.handle;
   fb.pitches[0] = key.stride;
   fb.offsets[0] = key.offset;
-  fb.flags = DRM_MODE_FB_MODIFIERS;
-  fb.modifier[0] = key.modifier;
+  if key.modifier != 0 && key.modifier != 0x00ff_ffff_ffff_ffff {
+    fb.flags = DRM_MODE_FB_MODIFIERS;
+    fb.modifier[0] = key.modifier;
+  }
   if ioctl(card_fd, iowr::<ModeFbCmd2>(0xB8), &mut fb) != 0 {
     close_gem(card_fd, prime.handle);
     return None;
@@ -1292,6 +1336,31 @@ unsafe fn import_scanout(card_fd: RawFd, dma_fd: RawFd, buf: &ShmBuffer, key: Im
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(feature = "gpu")]
+  #[test]
+  fn gpu_framebuffer_preserves_allocation_layout() {
+    let mut output = super::super::gpu::Output::default();
+    output.handle = 7;
+    output.stride = 8192;
+    output.fourcc = 0x3432_5258;
+    output.offset = 4096;
+    output.modifier = 0x0200_0000_0000_0001;
+    let cmd = gpu_framebuffer_cmd(1920, 1200, &output);
+    assert_eq!(cmd.pixel_format, output.fourcc);
+    assert_eq!(cmd.handles[0], 7);
+    assert_eq!(cmd.pitches[0], 8192);
+    assert_eq!(cmd.offsets[0], 4096);
+    assert_eq!(cmd.flags, DRM_MODE_FB_MODIFIERS);
+    assert_eq!(cmd.modifier[0], output.modifier);
+    for modifier in [0, 0x00ff_ffff_ffff_ffff] {
+      output.modifier = modifier;
+      let cmd = gpu_framebuffer_cmd(1920, 1200, &output);
+      assert_eq!(cmd.flags, 0);
+      assert_eq!(cmd.modifier[0], 0);
+    }
+    assert_eq!(std::mem::size_of::<super::super::gpu::Output>(), 32);
+  }
 
   #[test]
   fn drm_abi_layouts_match_linux() {

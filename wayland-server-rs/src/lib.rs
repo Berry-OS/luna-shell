@@ -22,6 +22,7 @@ pub mod shm;
 pub mod socket;
 pub mod types;
 pub mod wire;
+pub mod xwm;
 
 pub use render::{software::SoftwareBackend, Backend, Framebuffer};
 pub use server::Server;

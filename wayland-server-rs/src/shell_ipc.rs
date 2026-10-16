@@ -58,6 +58,16 @@ pub struct ShellIpc {
   runtime_dir: PathBuf,
   extra_tray: Vec<TrayItem>,
   last_export: u64,
+  /// Hash of everything except window titles and positions.  A change here
+  /// (window opened/closed, focus, minimize/maximize, tray) is written at once;
+  /// a title/position-only change waits for `cosmetic_interval`.
+  last_struct: u64,
+  last_write: Option<std::time::Instant>,
+  /// Minimum time between writes that only carry title/position changes.
+  /// `LUNA_STATE_INTERVAL` (seconds) or the shell command `state_interval N`.
+  pub cosmetic_interval: std::time::Duration,
+  /// One task icon per application (`app:ID`) instead of one per window.
+  pub group_tray: bool,
   state_dir_ready: bool,
   /// Reused across exports.  The snapshot is rebuilt on every window title,
   /// focus or map change; churning a fresh String for each of the dozens of
@@ -115,6 +125,12 @@ impl ShellIpc {
       runtime_dir: PathBuf::from(runtime),
       extra_tray: Vec::new(),
       last_export: 0,
+      last_struct: 0,
+      group_tray: false,
+      last_write: None,
+      cosmetic_interval: std::time::Duration::from_secs(
+        std::env::var("LUNA_STATE_INTERVAL").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(10),
+      ),
       state_dir_ready: false,
       out: String::new(),
       key_scratch: String::new(),
@@ -342,7 +358,7 @@ impl ShellIpc {
         // Built in a scratch buffer; only the keys that survive the dedup are
         // promoted to owned strings.
         self.key_scratch.clear();
-        if app_id.is_empty() {
+        if app_id.is_empty() || !self.group_tray {
           let _ = write!(self.key_scratch, "win:{}", window_id(fd, surface_id));
         } else {
           let _ = write!(self.key_scratch, "app:{}", app_id);
@@ -369,10 +385,19 @@ impl ShellIpc {
     }
 
     if focused_surface != 0 && focused_fd >= 0 {
-      self.key_scratch.clear();
-      let _ = write!(self.key_scratch, "win:{}", window_id(focused_fd, focused_surface));
+      // The focused window is highlighted whether it has its own task icon
+      // (`win:`) or is represented by its application's grouped one (`app:`).
+      let win_key = format!("win:{}", window_id(focused_fd, focused_surface));
+      let app_key = clients
+        .get(&focused_fd)
+        .and_then(|c| match &c.objects.get(&focused_surface)?.role {
+          Role::Surface(s) => s.xdg_surface_id.map(|x| toplevel_meta(c, x).1),
+          _ => None,
+        })
+        .filter(|a| self.group_tray && !a.is_empty())
+        .map(|a| format!("app:{}", a));
       for t in tray.iter_mut() {
-        if t.id == self.key_scratch {
+        if t.id == win_key || app_key.as_deref() == Some(t.id.as_str()) {
           t.icon.push_str("_active");
         }
       }
@@ -387,7 +412,7 @@ impl ShellIpc {
     force: bool,
     pending_menu: &mut Option<(RawFd, u32, i32, i32)>,
     switcher: &Option<(usize, Vec<(RawFd, u32)>)>,
-  ) {
+  ) -> Option<std::time::Duration> {
     let mut windows = std::mem::take(&mut self.windows_scratch);
     let mut tray = std::mem::take(&mut self.tray_scratch);
     Self::collect_windows_into(clients, focused_fd, focused_surface, &mut windows);
@@ -408,9 +433,25 @@ impl ShellIpc {
     if !force && hash == self.last_export {
       self.windows_scratch = windows;
       self.tray_scratch = tray;
-      return;
+      return None;
+    }
+    let structural = structure_hash(&windows, &tray) ^ (hash ^ simple_hash(&windows, &tray));
+    if !force && structural == self.last_struct {
+      // Only titles/positions moved (a terminal spinner rewrites its title
+      // ten times a second).  Coalesce: write at most once per interval and
+      // tell the caller when to come back so the final value is not lost.
+      if let Some(t) = self.last_write {
+        let since = t.elapsed();
+        if since < self.cosmetic_interval {
+          self.windows_scratch = windows;
+          self.tray_scratch = tray;
+          return Some(self.cosmetic_interval - since);
+        }
+      }
     }
     self.last_export = hash;
+    self.last_struct = structural;
+    self.last_write = Some(std::time::Instant::now());
 
     let path = self.runtime_dir.join(STATE_FILE);
     if !self.state_dir_ready {
@@ -484,6 +525,7 @@ impl ShellIpc {
     self.out = out;
     self.windows_scratch = windows;
     self.tray_scratch = tray;
+    None
   }
 }
 
@@ -527,7 +569,10 @@ pub fn is_shell_surface(title: &str, app_id: &str) -> bool {
   // GLFW identifies a client toolkit, not the desktop shell. Treating its
   // app_id as the shell hides ordinary clients from taskbar/Alt+Tab and
   // prevents focus restoration after another window closes.
-  t.contains("luna desktop") || t.contains("luna-shell") || a.contains("luna-shell")
+  // Exact matches only.  A substring test hid every ordinary window whose
+  // title merely mentioned the shell — an editor on luna-shell.c, a file
+  // manager open in a luna-shell folder — from the task list and Alt+Tab.
+  t == "luna desktop" || a == "luna-shell"
 }
 
 /// Layer-shell namespace used by luna-shell for modeless dialogs that should
@@ -605,6 +650,33 @@ fn tray_icon_for(app_id: &str) -> String {
   }
 }
 
+/// Like `simple_hash` but blind to window titles and positions.
+fn structure_hash(windows: &[WindowInfo], tray: &[TrayItem]) -> u64 {
+  let mut h: u64 = 0xcbf29ce484222325;
+  for w in windows {
+    for v in [w.id, w.focused as u64, w.minimized as u64, w.maximized as u64, w.fullscreen as u64] {
+      h = h.wrapping_mul(0x100000001b3);
+      h ^= v;
+    }
+    for b in w.app_id.as_bytes() {
+      h = h.wrapping_mul(0x100000001b3);
+      h ^= *b as u64;
+    }
+  }
+  for t in tray {
+    // `app:*` entries are derived from windows and carry the window title as
+    // their tooltip: cosmetic, like the title itself.
+    let fields: &[&String] = if t.id.starts_with("app:") { &[&t.id, &t.label, &t.icon] } else { &[&t.id, &t.label, &t.icon, &t.tooltip] };
+    for field in fields {
+      for b in field.as_bytes() {
+        h = h.wrapping_mul(0x100000001b3);
+        h ^= *b as u64;
+      }
+    }
+  }
+  h
+}
+
 fn simple_hash(windows: &[WindowInfo], tray: &[TrayItem]) -> u64 {
   let mut h: u64 = 0xcbf29ce484222325;
   for w in windows {
@@ -653,6 +725,9 @@ mod tests {
     assert!(!is_shell_surface("Luna Memo", ""));
     assert!(is_shell_surface("Luna Desktop", "glfw-application"));
     assert!(is_shell_surface("", "luna-shell"));
+    // Ordinary windows that merely mention the shell stay visible.
+    assert!(!is_shell_surface("luna-shell.c - Editor", "org.example.editor"));
+    assert!(!is_shell_surface("luna-shell", "pcmanfm"));
   }
 
   #[test]

@@ -289,6 +289,58 @@ pub static ZWP_VIRTUAL_KEYBOARD_V1: Interface = Interface {
   events: &[],
 };
 
+// xx-session-management-v1 (wayland-protocols, experimental): Chromium and
+// Firefox use it to have the compositor remember and restore window state.
+pub static XX_SESSION_MANAGER_V1: Interface = Interface {
+  name: "xx_session_manager_v1",
+  version: 1,
+  requests: &[m!("destroy", ""), m!("get_session", "nu?s")],
+  events: &[],
+};
+
+pub static XX_SESSION_V1: Interface = Interface {
+  name: "xx_session_v1",
+  version: 1,
+  requests: &[m!("destroy", ""), m!("remove", ""), m!("add_toplevel", "nos"), m!("restore_toplevel", "nos")],
+  events: &[m!("created", "s"), m!("restored", ""), m!("replaced", "")],
+};
+
+pub static XX_TOPLEVEL_SESSION_V1: Interface = Interface {
+  name: "xx_toplevel_session_v1",
+  version: 1,
+  requests: &[m!("destroy", ""), m!("remove", "")],
+  events: &[m!("restored", "o")],
+};
+
+// xdg-session-management-v1 (wayland-protocols staging): the stable successor
+// of the xx- protocol above; newer Firefox and Chromium use it.
+pub static XDG_SESSION_MANAGER_V1: Interface = Interface {
+  name: "xdg_session_manager_v1",
+  version: 1,
+  requests: &[m!("destroy", ""), m!("get_session", "nu?s")],
+  events: &[],
+};
+
+pub static XDG_SESSION_V1: Interface = Interface {
+  name: "xdg_session_v1",
+  version: 1,
+  requests: &[
+    m!("destroy", ""),
+    m!("remove", ""),
+    m!("add_toplevel", "nos"),
+    m!("restore_toplevel", "nos"),
+    m!("remove_toplevel", "s"),
+  ],
+  events: &[m!("created", "s"), m!("restored", ""), m!("replaced", "")],
+};
+
+pub static XDG_TOPLEVEL_SESSION_V1: Interface = Interface {
+  name: "xdg_toplevel_session_v1",
+  version: 1,
+  requests: &[m!("destroy", ""), m!("rename", "s")],
+  events: &[m!("restored", "")],
+};
+
 pub static XDG_WM_BASE: Interface = Interface {
   name: "xdg_wm_base",
   version: 5,
@@ -465,6 +517,12 @@ pub fn by_name(name: &str) -> Option<&'static Interface> {
     &ZWP_INPUT_METHOD_KEYBOARD_GRAB_V2,
     &ZWP_VIRTUAL_KEYBOARD_MANAGER_V1,
     &ZWP_VIRTUAL_KEYBOARD_V1,
+    &XDG_SESSION_MANAGER_V1,
+    &XDG_SESSION_V1,
+    &XDG_TOPLEVEL_SESSION_V1,
+    &XX_SESSION_MANAGER_V1,
+    &XX_SESSION_V1,
+    &XX_TOPLEVEL_SESSION_V1,
     &XDG_WM_BASE,
     &XDG_POSITIONER,
     &XDG_SURFACE,

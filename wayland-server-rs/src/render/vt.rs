@@ -6,8 +6,13 @@ const VT_SETMODE: libc::c_ulong = 0x5602;
 const VT_RELDISP: libc::c_ulong = 0x5605;
 const VT_ACTIVATE: libc::c_ulong = 0x5606;
 const VT_PROCESS: u8 = 1;
-const VT_AUTO: u8 = 0;
 const VT_ACKACQ: libc::c_int = 2;
+const KDGETMODE: libc::c_ulong = 0x4b3b;
+const KDSETMODE: libc::c_ulong = 0x4b3a;
+const KDGKBMODE: libc::c_ulong = 0x4b44;
+const KDSKBMODE: libc::c_ulong = 0x4b45;
+const KD_GRAPHICS: libc::c_int = 1;
+const K_OFF: libc::c_int = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -22,6 +27,8 @@ struct VtMode {
 pub struct VtSession {
   fd: RawFd,
   saved_mode: VtMode,
+  saved_display: libc::c_int,
+  saved_keyboard: libc::c_int,
   restored: bool,
 }
 
@@ -52,16 +59,35 @@ impl VtSession {
       acqsig: libc::SIGUSR2 as i16,
       frsig: 0,
     };
+    let mut saved_display = 0;
+    let mut saved_keyboard = 0;
+    if unsafe { libc::ioctl(fd, KDGETMODE, &mut saved_display) } != 0
+      || unsafe { libc::ioctl(fd, KDGKBMODE, &mut saved_keyboard) } != 0 {
+      let error = std::io::Error::last_os_error();
+      unsafe { libc::close(fd) };
+      return Err(error);
+    }
     if unsafe { libc::ioctl(fd, VT_SETMODE, &process_mode) } != 0 {
       let error = std::io::Error::last_os_error();
       unsafe { libc::close(fd) };
       return Err(error);
     }
-    Ok(Self {
+    let mut session = Self {
       fd,
       saved_mode,
+      saved_display,
+      saved_keyboard,
       restored: false,
-    })
+    };
+    // evdev owns input; the console must neither echo keys nor repaint its
+    // text/cursor over KMS. Restore both modes even if initialization fails.
+    if unsafe { libc::ioctl(fd, KDSETMODE, KD_GRAPHICS) } != 0
+      || unsafe { libc::ioctl(fd, KDSKBMODE, K_OFF) } != 0 {
+      let error = std::io::Error::last_os_error();
+      session.restore();
+      return Err(error);
+    }
+    Ok(session)
   }
 
   pub fn switch_to(&self, vt: u8) -> std::io::Result<()> {
@@ -83,12 +109,9 @@ impl VtSession {
       return;
     }
     unsafe {
-      let mut auto = self.saved_mode;
-      auto.mode = VT_AUTO;
-      auto.relsig = 0;
-      auto.acqsig = 0;
-      auto.frsig = 0;
-      libc::ioctl(self.fd, VT_SETMODE, &auto);
+      libc::ioctl(self.fd, KDSKBMODE, self.saved_keyboard);
+      libc::ioctl(self.fd, KDSETMODE, self.saved_display);
+      libc::ioctl(self.fd, VT_SETMODE, &self.saved_mode);
     }
     self.restored = true;
   }

@@ -8,6 +8,8 @@
 
 
 pub mod software;
+#[cfg(target_os = "linux")]
+pub mod title_font;
 
 #[cfg(all(target_os = "linux", feature = "dri"))]
 pub mod dri;
@@ -292,6 +294,38 @@ impl Framebuffer {
         buf.end_cpu_read();
     }
 
+    /// Composite tightly packed premultiplied ARGB pixels obtained through
+    /// GPU readback, with the same clipping and blending as SHM surfaces.
+    pub fn blit_pixels(&mut self, pixels: &[u32], width: i32, height: i32,
+                       dx: i32, dy: i32, opaque: bool) {
+        self.blit_pixels_region(pixels, width, height, dx, dy, opaque, Rect::new(0, 0, width, height));
+    }
+
+    /// Like `blit_pixels`, but `pixels` holds only `region` (buffer
+    /// coordinates, tightly packed) of a `width` x `height` surface.
+    pub fn blit_pixels_region(&mut self, pixels: &[u32], width: i32, height: i32,
+                              dx: i32, dy: i32, opaque: bool, region: Rect) {
+        if width <= 0 || height <= 0 || region.is_empty() { return; }
+        let rw = (region.x1 - region.x0) as usize;
+        let rh = (region.y1 - region.y0) as usize;
+        if rw.checked_mul(rh).map_or(true, |n| n > pixels.len()) { return; }
+        let dst = Rect::new(dx.saturating_add(region.x0), dy.saturating_add(region.y0),
+                            dx.saturating_add(region.x1), dy.saturating_add(region.y1))
+            .intersect(&self.clip).intersect(&self.full_rect());
+        if dst.is_empty() { return; }
+        let fbw = self.width as usize;
+        for y in dst.y0..dst.y1 {
+            let sy = (y - dy - region.y0) as usize;
+            let src = &pixels[sy * rw + (dst.x0 - dx - region.x0) as usize..][..(dst.x1 - dst.x0) as usize];
+            let out = &mut self.pixels[y as usize * fbw + dst.x0 as usize..][..src.len()];
+            if opaque {
+                for (t, &s) in out.iter_mut().zip(src) { *t = s | 0xff00_0000; }
+            } else {
+                for (t, &s) in out.iter_mut().zip(src) { *t = blend(*t, s); }
+            }
+        }
+    }
+
     /// Draw the embedded Aero arrow when no client cursor is available.
     pub fn blit_default_cursor(&mut self, x: i32, y: i32) {
         crate::cursor_aero::blit_default_cursor(self, x, y);
@@ -322,6 +356,21 @@ fn blend(dst: u32, src: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{blend, Framebuffer, Rect};
+
+    #[test]
+    fn gpu_readback_blit_preserves_clipping_and_premultiplied_alpha() {
+        let mut fb = Framebuffer::new(3, 3);
+        fb.clear(0xff00_00ff);
+        fb.set_clip(Rect::new(1, 1, 3, 3));
+        fb.blit_pixels(&[0x8080_0000, 0x0000_0000, 0xff00_ff00, 0xffff_ffff],
+            2, 2, 1, 1, false);
+        assert_eq!(fb.pixels[4], 0xff80_007f);
+        assert_eq!(fb.pixels[5], 0xff00_00ff);
+        assert_eq!(fb.pixels[7], 0xff00_ff00);
+        assert_eq!(fb.pixels[0], 0xff00_00ff);
+        fb.blit_pixels(&[0x0012_3456], 1, 1, 1, 1, true);
+        assert_eq!(fb.pixels[4], 0xff12_3456);
+    }
 
     #[test]
     fn premultiplied_source_over_preserves_channels() {
@@ -440,6 +489,11 @@ pub trait Backend {
 
     fn present(&mut self, fb: &Framebuffer);
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn blit_buffer(&mut self, fb: &mut Framebuffer, buf: &ShmBuffer, x: i32, y: i32) {
+        fb.blit_shm(buf, x, y);
+    }
+
     /// Present a framebuffer whose changed pixels are bounded by `damage`.
     /// Backends that cannot make use of the hint retain the old behaviour.
     fn present_damage(&mut self, fb: &Framebuffer, _damage: Rect) {
@@ -520,6 +574,11 @@ pub trait Backend {
     fn present_busy(&self) -> bool {
         false
     }
+
+    /// Inactive VTs keep servicing sockets, but stop drawing and scheduling
+    /// client animation frames until the display has been acquired again.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn is_active(&self) -> bool { true }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn deactivate(&mut self) {}

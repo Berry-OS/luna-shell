@@ -38,6 +38,10 @@ impl Drop for DmabufParams {
 pub struct Surface {
   pub pending_buffer: Option<u32>,
   pub pending_attach: bool,
+  /// wl_surface.attach(x, y): where the new buffer's origin sits relative to the
+  /// old one.  Cumulative `off` is what a drag icon uses as its hotspot.
+  pub pending_off: (i32, i32),
+  pub off: (i32, i32),
   pub current_buffer: Option<ShmBuffer>,
   /// Object id of `current_buffer`.  The compositor must retain this wl_buffer
   /// until it has stopped reading the shared storage.
@@ -65,6 +69,11 @@ pub struct Surface {
   /// xdg_surface.set_window_geometry — content box relative to buffer origin.
   /// None → whole buffer. GTK CSD uses this to exclude drop-shadow padding.
   pub window_geom: Option<(i32, i32, i32, i32)>,
+  /// The toplevel was placed from its subsurface tree alone (own buffer not
+  /// mapped yet, so `window_geom` was still unknown) with the default
+  /// centring.  The first real map of the surface places it again with the
+  /// final geometry; hinted/restored positions are never provisional.
+  pub placement_provisional: bool,
   /// When this surface is a wl_subsurface child, parent wl_surface id.
   /// Firefox / WebRender put content on subsurfaces of an empty toplevel.
   pub subsurface_parent: Option<u32>,
@@ -76,6 +85,8 @@ pub struct Surface {
   /// This is what lets the compositor repaint a blinking terminal cursor
   /// instead of the entire desktop underneath it.
   pub damage: crate::render::Rect,
+  /// Incremental-upload state for this surface's GPU texture (wl_shm only).
+  pub gpu: std::rc::Rc<crate::shm::SurfaceGpu>,
 }
 
 /// Pending `wl_surface.set_input_region` until the next commit.
@@ -89,6 +100,8 @@ pub enum PendingInputRegion {
 }
 
 pub enum Role {
+  /// A retired session handle remains a valid protocol object until destroyed.
+  Inert,
   Display,
   Registry,
   Callback,
@@ -142,6 +155,25 @@ pub enum Role {
     input_method_id: u32,
   },
   VirtualKeyboardManager,
+  /// xx_session_manager_v1 / xdg_session_manager_v1 global (`xdg` = the
+  /// stable protocol rather than the experimental xx one).
+  SessionManager {
+    xdg: bool,
+  },
+  /// xx_session_v1: `id` is the persistent session string.
+  Session {
+    id: String,
+    xdg: bool,
+  },
+  /// xx_toplevel_session_v1: one named window of a session.  `restore` is the
+  /// saved visible-geometry origin to apply when the window first maps.
+  ToplevelSession {
+    session_id: String,
+    toplevel_id: u32,
+    name: String,
+    restore: Option<(i32, i32)>,
+    xdg: bool,
+  },
   VirtualKeyboard {
     seat_id: u32,
     keymap_set: bool,
@@ -254,6 +286,7 @@ pub enum Role {
   },
   XdgPopup {
     xdg_surface_id: u32,
+    parent_xdg_id: u32,
   },
   DecorationManager,
   ToplevelDecoration {
@@ -285,6 +318,8 @@ impl Default for Surface {
     Surface {
       pending_buffer: None,
       pending_attach: false,
+      pending_off: (0, 0),
+      off: (0, 0),
       current_buffer: None,
       current_buffer_id: None,
       x: 0,
@@ -299,9 +334,11 @@ impl Default for Surface {
       input_region: None,
       pending_input_region: None,
       window_geom: None,
+      placement_provisional: false,
       subsurface_parent: None,
       pending_damage: crate::render::Rect::EMPTY,
       damage: crate::render::Rect::EMPTY,
+      gpu: crate::shm::SurfaceGpu::new(),
     }
   }
 }

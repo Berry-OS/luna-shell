@@ -11,9 +11,10 @@
   </div>
 </div>
 <div id="widget_stats" class="widget">
-  <div class="st_row"><span class="st_label">CPU Usage</span><span class="st_val" id="st_cpu_val">0%</span></div><div class="st_bar"><div class="st_fill" id="st_cpu_fill"></div></div>
-  <div class="st_row st_spaced"><span class="st_label">Memory</span><span class="st_val" id="st_mem_val">—</span></div><div class="st_bar"><div class="st_fill g_mem" id="st_mem_fill"></div></div>
-  <div class="st_row st_spaced"><span class="st_label">Storage</span><span class="st_val" id="st_disk_val">—</span></div><div class="st_bar"><div class="st_fill g_disk" id="st_disk_fill"></div></div>
+  <div class="st_row"><span class="st_label">CPU Usage</span><span class="st_val" id="st_cpu_val">0%</span></div><div class="st_bar gb"><div class="st_fill" id="st_cpu_fill"></div></div><div class="st_graph" id="st_cpu_graph"><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div></div>
+  <div class="st_row st_spaced"><span class="st_label">Memory</span><span class="st_val" id="st_mem_val">—</span></div><div class="st_bar gb"><div class="st_fill g_mem" id="st_mem_fill"></div></div><div class="st_graph" id="st_mem_graph"><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div></div>
+  <div class="st_row st_spaced"><span class="st_label">Temperature</span><span class="st_val" id="st_temp_val">—</span></div><div class="st_bar gb"><div class="st_fill g_temp" id="st_temp_fill"></div></div><div class="st_graph" id="st_temp_graph"><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div><div class="gc"></div></div>
+  <div id="st_storage"><div class="sg_icon luna_icon">&#xf0a0;</div><div class="sg_txt"><span id="st_disk_val">—</span><span id="st_disk_sub">Storage</span></div></div>
 </div>
 <div id="widget_weather" class="widget">
   <div class="st_row"><span class="st_label" id="wg_wx_city">Weather</span><span class="st_val" id="wg_wx_temp">—</span></div>
@@ -24,5 +25,18 @@
     <div id="wg_wf_2" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
     <div id="wg_wf_3" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
     <div id="wg_wf_4" class="wf_day"><div class="wf_name">—</div><div class="wf_icon luna_icon">&#xf2c9;</div><div class="wf_temp">—</div></div>
+  </div>
+</div>
+<div id="widget_airplay" class="widget">
+  <div class="st_row"><span class="st_label" id="ap_title">AirPlay</span><div class="cc_toggle" id="ap_toggle" role="switch" tabindex="0" aria-label="AirPlay receiver"><div class="cc_knob"></div></div></div>
+  <div id="ap_main"><span class="luna_icon" id="ap_icon">&#xf26c;</span><div id="ap_text"><div id="ap_status">Off</div><div id="ap_hint">Receive from iPhone, iPad, Mac.</div></div></div>
+</div>
+<div id="widget_airdrop" class="widget">
+  <div class="st_row"><span class="st_label" id="ad_title">AirDrop</span><div class="cc_toggle" id="ad_toggle" role="switch" tabindex="0" aria-label="AirDrop receiver"><div class="cc_knob"></div></div></div>
+  <div id="ad_main"><span class="luna_icon" id="ad_icon">&#xf1d8;</span><div id="ad_text"><div id="ad_status">Off</div><div id="ad_hint">Share files with nearby devices.</div></div></div>
+  <div id="ad_peers">
+    <div id="ad_peer_0" class="ad_peer hidden"><span class="ad_pn">Device</span><span class="ad_go luna_icon">&#xf1d8;</span></div>
+    <div id="ad_peer_1" class="ad_peer hidden"><span class="ad_pn">Device</span><span class="ad_go luna_icon">&#xf1d8;</span></div>
+    <div id="ad_peer_2" class="ad_peer hidden"><span class="ad_pn">Device</span><span class="ad_go luna_icon">&#xf1d8;</span></div>
   </div>
 </div>

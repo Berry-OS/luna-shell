@@ -358,11 +358,11 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 
 /* ── Control Center ── */
 #control_center { right: 8px; width: 324px; height: auto; padding: 16px; }
-#wifi_menu, #bt_menu { right: 150px; width: 310px; height: auto; padding: 10px; }
-#wifi_head, #bt_head { display: flex; flex-direction: row; align-items: center; min-height: 34px; padding: 0 8px; }
-#wifi_title, #bt_title { flex: 1 1 auto; color: var(--luna-text); font-size: 14px; font-weight: 700; }
+#wifi_menu, #bt_menu, #power_menu { right: 150px; width: 310px; height: auto; padding: 10px; }
+#wifi_head, #bt_head, #pw_head { display: flex; flex-direction: row; align-items: center; min-height: 34px; padding: 0 8px; }
+#wifi_title, #bt_title, #pw_title { flex: 1 1 auto; color: var(--luna-text); font-size: 14px; font-weight: 700; }
 #wifi_power, #bt_power { flex: 0 0 46px; }
-#wifi_status, #eth_status, #bt_status { display: block; color: var(--luna-text-muted); font-size: 11px; padding: 2px 8px 7px; }
+#wifi_status, #eth_status, #bt_status, #fan_status, #pw_status { display: block; color: var(--luna-text-muted); font-size: 11px; padding: 2px 8px 7px; }
 #eth_section { display: block; padding: 6px 8px 2px; }
 .wifi_network .mi_label, .eth_link .mi_label, .bt_device .mi_label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wifi_network.connected, .eth_link.connected, .bt_device.connected { background: rgba(var(--luna-accent-rgb), 0.20); }
@@ -1533,3 +1533,6 @@ body { position: relative; min-width: 1024px; min-height: 720px; overflow: hidde
 }
 .dock_xdg_icon { background-color: transparent; }
 #dock_xdg_sep.hidden { display: none !important; }
+#desk_menu { width: 240px; height: auto; padding: 8px; }
+#tray_menu { width: 300px; height: auto; padding: 8px; }
+#tray_menu .mi_label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

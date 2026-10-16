@@ -25,6 +25,8 @@ const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258; // 'XR24'
 const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 const SERVER_ID_BASE: u32 = 0xff00_0000;
 
+mod xwayland;
+
 type SurfacePlacement = (RawFd, u32, i32, i32);
 type SubsurfacePlacement = (RawFd, u32, i32, u32, i32, i32);
 
@@ -98,6 +100,8 @@ struct DragState {
   source_id: u32,
   button: u32,
   target: Option<DragTarget>,
+  /// wl_surface the source client supplied as the drag icon (0 = none).
+  icon_id: u32,
 }
 
 struct Global {
@@ -122,6 +126,12 @@ pub struct Client {
   /// Client bound `luna_wm_v1` — it will drive absolute placement itself, so
   /// compositor-side CSD title-strip move promotion must not also grab.
   has_luna_wm: bool,
+  /// Client holds an xx_session_v1 (its windows are tracked for restore).
+  has_session: bool,
+  /// xdg_toplevel id -> origin to apply at first map (xx_session restore).
+  /// Kept apart from the toplevel-session object: clients drop that one
+  /// (remove + add under a new name) before the window maps.
+  restore_pos: HashMap<u32, (i32, i32, i32, i32)>,
   /// Peer process id (SO_PEERCRED), 0 when unknown.  Used to read the client's
   /// own `--window-position` flag, which Wayland gives it no way to send.
   pid: i32,
@@ -143,6 +153,8 @@ impl Client {
       request_args: Vec::with_capacity(8),
       has_input_popups: false,
       has_luna_wm: false,
+      has_session: false,
+      restore_pos: HashMap::new(),
       pid: if ok { cred.pid } else { 0 },
     }
   }
@@ -154,6 +166,10 @@ impl Client {
   }
 
   pub fn send(&mut self, object_id: u32, opcode: u16, args: &[Arg]) {
+    // Synthetic Xwayland window objects exist only on our side.
+    if (xwayland::SYNTH_BASE..SERVER_ID_BASE).contains(&object_id) {
+      return;
+    }
     wire::append_message(
       object_id,
       opcode,
@@ -218,9 +234,16 @@ pub struct Server {
   cur_toplevel_rects: Vec<(RawFd, u32, Rect)>,
   /// `LUNA_FRAME_TRACE=1`: log per-frame composite time and clip rectangle.
   frame_trace: bool,
+  /// Commits per (client fd, surface id) since the last traced frame.
+  commit_trace: Vec<(RawFd, u32, u32)>,
   /// False whenever `self.fb` no longer matches what is on screen (first
   /// frame, resize, direct/GPU scanout, VT switch), forcing a full composite.
   fb_valid: bool,
+  /// `screenshot_out PATH` request: the next frame is composed on the CPU
+  /// (never scanned out directly / GPU-composed) and saved as PNG.
+  pending_screenshot: Option<String>,
+  /// True while that capture frame is being composed.
+  capturing: bool,
   frame_done: Vec<(RawFd, u32)>,
   buffer_release: Vec<(RawFd, u32)>,
   /// Side effects belonging to the frame currently owned by KMS.  These are
@@ -277,6 +300,19 @@ pub struct Server {
   focused_client_fd: RawFd,
   focused_surface_id: u32,
   shell_state_dirty: bool,
+  /// When a coalesced (title/position-only) state.json write is due.
+  state_flush_at: Option<std::time::Instant>,
+  /// Rootless Xwayland for X11 clients (None when disabled / not installed).
+  xwl: Option<xwayland::Xwl>,
+  /// Window-title rasteriser for server-side titlebars.
+  title_fonts: crate::render::title_font::TitleFonts,
+  xwl_trace: bool,
+  /// Screensaver: the shell asks for `idle_timeout SECS`; once no physical
+  /// input arrived for that long the shell gets `idle_start`, and `idle_stop`
+  /// with the next input event.
+  idle_timeout: Option<std::time::Duration>,
+  last_input: std::time::Instant,
+  idle_active: bool,
   /// Set by Ctrl+Alt+Backspace (session Zap) so run() exits cleanly.
   session_quit: bool,
   /// Bottom→top stacking order of mapped xdg_toplevel surfaces.
@@ -302,6 +338,7 @@ pub struct Server {
   /// Stored as (fd, surface) so luna-shell layer-dialog ids do not collide
   /// with another client's low-numbered xdg_toplevel.
   pending_activate: Option<(RawFd, u32)>,
+  pending_minimize: Option<(RawFd, u32)>,
   pending_resize_configure: Option<(RawFd, u32, i32, i32)>,
   pending_configure: Vec<(RawFd, u32, Option<(i32, i32)>, bool)>,
   /// set_cursor arrived before the cursor surface had a buffer.
@@ -326,7 +363,11 @@ pub struct Server {
   /// Runtime WM preferences supplied by luna-shell over the existing IPC.
   wm_window_gap: i32,
   wm_edge_snap: bool,
+  /// Magnetic snapping stops at the dock's top edge (true) or at the screen bottom (false).
+  wm_dock_snap: bool,
   wm_edge_tile: bool,
+  /// Drop a dragged window at a screen corner to fill that quarter.
+  wm_corner_snap: bool,
   wm_top_edge_maximize: bool,
   wm_titlebar_double_click: bool,
   /// Draw the focused/active color around the outside resize frame.
@@ -374,6 +415,17 @@ pub struct Server {
   /// client's entire object map.  One shared index answers all of them.
   compose_toplevel_index: Vec<(RawFd, u32, ToplevelFlags)>,
   compose_gpu_surfaces: Vec<(i32, i32, ShmBuffer)>,
+  /// Server-side window chrome rendered once into small ARGB strips and fed to
+  /// the GPU compositor as planes: (client fd, surface, part) -> (fingerprint,
+  /// screen origin, pixels, last frame used).
+  chrome_cache: HashMap<(RawFd, u32, u8), (u64, (i32, i32), ShmBuffer, u64)>,
+  chrome_epoch: u64,
+  /// xx-session-management: session id -> window name -> saved visible
+  /// geometry (x, y, w, h).  Persisted so browsers get their windows back.
+  xdg_sessions: HashMap<String, HashMap<String, (i32, i32, i32, i32)>>,
+  xdg_sessions_path: Option<std::path::PathBuf>,
+  session_snap_at: std::time::Instant,
+  compose_chrome: Vec<(i32, i32, ShmBuffer)>,
   /// Scratch list for the ordered nonblocking client pass after input edges.
   /// Keeping its capacity avoids allocator churn during click/drag bursts.
   poll_client_fds: Vec<RawFd>,
@@ -456,7 +508,10 @@ impl Server {
       prev_toplevel_rects: Vec::new(),
       cur_toplevel_rects: Vec::new(),
       frame_trace: env_flag("LUNA_FRAME_TRACE"),
+      commit_trace: Vec::new(),
       fb_valid: false,
+      pending_screenshot: None,
+      capturing: false,
       frame_done: Vec::new(),
       buffer_release: Vec::new(),
       in_flight_frame_done: Vec::new(),
@@ -500,6 +555,13 @@ impl Server {
       focused_client_fd: -1,
       focused_surface_id: 0,
       shell_state_dirty: true,
+      state_flush_at: None,
+      xwl: None,
+      title_fonts: Default::default(),
+      xwl_trace: env_flag("LUNA_XWL_TRACE"),
+      idle_timeout: None,
+      last_input: std::time::Instant::now(),
+      idle_active: false,
       session_quit: false,
       window_stack: Vec::new(),
       popup_stack: Vec::new(),
@@ -511,6 +573,7 @@ impl Server {
       popup_grab: None,
       wm_grab: WmGrab::None,
       pending_activate: None,
+      pending_minimize: None,
       pending_resize_configure: None,
       pending_configure: Vec::new(),
       pending_cursor: None,
@@ -525,7 +588,9 @@ impl Server {
       show_desktop_ids: Vec::new(),
       wm_window_gap: 8,
       wm_edge_snap: true,
+      wm_dock_snap: false,
       wm_edge_tile: false,
+      wm_corner_snap: true,
       wm_top_edge_maximize: false,
       wm_titlebar_double_click: true,
       wm_focus_outline: true,
@@ -546,6 +611,12 @@ impl Server {
       compose_layer_index: Vec::new(),
       compose_toplevel_index: Vec::new(),
       compose_gpu_surfaces: Vec::new(),
+      chrome_cache: HashMap::new(),
+      chrome_epoch: 0,
+      xdg_sessions: HashMap::new(),
+      xdg_sessions_path: None,
+      session_snap_at: std::time::Instant::now(),
+      compose_chrome: Vec::new(),
       poll_client_fds: Vec::new(),
     };
 
@@ -565,6 +636,7 @@ impl Server {
     }
 
     server.sync_keyboard_leds();
+    server.xwl_start(socket_name);
 
     server.epoll_add(server.listener.fd);
     server.epoll_add(server.signal_fd);
@@ -584,6 +656,8 @@ impl Server {
       (&protocol::ZWP_TEXT_INPUT_MANAGER_V3, 1),
       (&protocol::ZWP_INPUT_METHOD_MANAGER_V2, 1),
       (&protocol::ZWP_VIRTUAL_KEYBOARD_MANAGER_V1, 1),
+      (&protocol::XX_SESSION_MANAGER_V1, 1),
+      (&protocol::XDG_SESSION_MANAGER_V1, 1),
       (&protocol::XDG_WM_BASE, 5),
       (&protocol::ZWLR_LAYER_SHELL_V1, 4),
       (&protocol::LUNA_WM_V1, 1),
@@ -641,7 +715,7 @@ impl Server {
 
       let pending_side_effects =
         !self.frame_done.is_empty() || !self.buffer_release.is_empty();
-      let work = self.dirty || self.cursor_dirty || pending_side_effects;
+      let work = self.backend.is_active() && (self.dirty || self.cursor_dirty || pending_side_effects);
       // IMPORTANT: a pending flip itself is work.  The previous ordering used
       // epoll_wait(-1) when no client work remained, which meant a *lost* DRM
       // event also prevented the watchdog from ever waking up.
@@ -650,13 +724,27 @@ impl Server {
       /* Match DriBackend::flip_event_grace_ms: poll_presentation only recovers
        * after two nominal refresh periods, so waking epoll sooner just spins. */
       let present_watchdog_ms = (20).max((frame_ms * 2) as i32).min(100);
-      let timeout = if self.backend.present_busy() {
+      let mut timeout = if self.backend.present_busy() {
         present_watchdog_ms
       } else if work {
         0
       } else {
         -1
       };
+      // A coalesced state.json write is pending: sleep no longer than that.
+      if let (Some(limit), false) = (self.idle_timeout, self.idle_active) {
+        let at = self.last_input + limit;
+        let ms = at.saturating_duration_since(std::time::Instant::now()).as_millis().min(i32::MAX as u128 - 1) as i32 + 1;
+        if timeout < 0 || ms < timeout {
+          timeout = ms;
+        }
+      }
+      if let Some(at) = self.state_flush_at {
+        let ms = at.saturating_duration_since(std::time::Instant::now()).as_millis().min(i32::MAX as u128 - 1) as i32 + 1;
+        if timeout < 0 || ms < timeout {
+          timeout = ms;
+        }
+      }
       let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), events.len() as i32, timeout) };
       if n < 0 {
         let e = std::io::Error::last_os_error();
@@ -664,6 +752,16 @@ impl Server {
           continue;
         }
         break;
+      }
+
+      if let (Some(limit), false) = (self.idle_timeout, self.idle_active) {
+        if self.last_input.elapsed() >= limit {
+          self.idle_active = true;
+          if let Some(ipc) = self.shell_ipc.as_ref() {
+            eprintln!("[luna-compositor] idle for {:?}: screensaver", limit);
+            ipc.send_shell_action("idle_start");
+          }
+        }
       }
 
       // Prefer client sockets over the input wake fd so xdg_toplevel.move /
@@ -674,6 +772,8 @@ impl Server {
         let fd = ev.u64 as RawFd;
         if fd == self.listener.fd {
           self.accept_clients();
+        } else if self.xwl_owns_fd(fd) {
+          self.xwl_ready(fd);
         } else if fd == self.signal_fd {
           running = self.process_signals();
           if !running {
@@ -707,7 +807,10 @@ impl Server {
       // Holding the frame back until the scanout is free paces clients to the
       // display instead of letting them queue work that is thrown away, and it
       // keeps frame callbacks aligned with vblank.
-      if !self.backend.present_busy() {
+      if let Some(path) = self.pending_screenshot.take() {
+        self.capture_screenshot(&path);
+      }
+      if self.backend.is_active() && !self.backend.present_busy() {
         // Interactive resize stores only the newest size while a flip is in
         // flight.  Flush it here, at display cadence.  Previously it was
         // flushed only as a side effect of receiving another client request,
@@ -720,14 +823,13 @@ impl Server {
           self.cursor_dirty = false;
         } else if self.cursor_dirty {
           // Nothing on screen changed except the pointer position / glyph.
-          // Never escalate to a full desktop rebuild: that was a regular
-          // 100–200 ms hitch whenever the cursor fast path missed a frame
-          // (animated cursors, SSD scenes, transient GPU retain clears).
+          // Reuse the retained scene normally. If it is unavailable, rebuild
+          // once instead of losing the new glyph until some window redraws.
           if self.repaint_cursor_only() {
             self.cursor_dirty = false;
             self.finish_or_defer_presentation_side_effects();
           } else {
-            self.cursor_dirty = false;
+            self.dirty = true;
           }
         } else if !self.frame_done.is_empty() || !self.buffer_release.is_empty() {
           // Clients often commit solely to receive a frame callback.  Deliver
@@ -736,6 +838,11 @@ impl Server {
           // whenever a client paced itself to vblank with no new pixels.
           self.flush_presentation_side_effects();
         }
+      }
+      if !self.backend.is_active() && !self.buffer_release.is_empty() {
+        // Replaced buffers are no longer displayed. Return them while keeping
+        // frame callbacks paused, so hidden applications stop animating.
+        Self::flush_presentation_queues(&mut self.clients, &mut self.buffer_release, &mut Vec::new(), now_ms());
       }
 
       // Never rewrite state.json mid-drag: the shell was re-parsing geometry
@@ -748,6 +855,7 @@ impl Server {
         c.conn.flush();
       }
     }
+    self.snapshot_sessions(true);
   }
 
   fn accept_clients(&mut self) {
@@ -800,6 +908,10 @@ impl Server {
     client.conn.recv_buf = recv_buf;
 
     if drop_client || client.conn.closed {
+      if client.has_session {
+        let recs = Self::session_records_in(&client);
+        self.merge_session_records(recs);
+      }
       self.epoll_del(fd);
       eprintln!("[luna-compositor] client disconnected (fd={})", fd);
       self.dirty = true;
@@ -855,6 +967,9 @@ impl Server {
     } else {
       client.conn.flush();
       self.clients.insert(fd, client);
+      if self.xwl_has_pending() {
+        self.xwl_retry_pending();
+      }
       self.flush_wm_actions();
       self.flush_selection_broadcast();
       self.flush_primary_broadcast();
@@ -866,6 +981,9 @@ impl Server {
   }
 
   fn flush_wm_actions(&mut self) {
+    if let Some((fd, sid)) = self.pending_minimize.take() {
+      self.minimize_surface_for(fd, sid);
+    }
     if let Some((fd, sid)) = self.pending_activate.take() {
       self.activate_surface_for(fd, sid);
     }
@@ -879,6 +997,10 @@ impl Server {
   }
 
   fn handle_request(&mut self, client: &mut Client, msg: wire::RawMessage<'_>) {
+    if matches!(client.objects.get(&msg.object_id), Some(Object { role: Role::Inert, .. })) {
+      if msg.opcode == 0 { client.objects.remove(&msg.object_id); }
+      return;
+    }
     let iface = match client.objects.get(&msg.object_id) {
       Some(o) => o.interface,
       None => {
@@ -923,6 +1045,11 @@ impl Server {
       "zwp_input_method_keyboard_grab_v2" => self.req_input_method_keyboard_grab(client, id, msg.opcode),
       "zwp_virtual_keyboard_manager_v1" => self.req_virtual_keyboard_manager(client, id, msg.opcode, &args),
       "zwp_virtual_keyboard_v1" => self.req_virtual_keyboard(client, id, msg.opcode, &args),
+      "xx_session_manager_v1" => self.req_session_manager(client, id, msg.opcode, &args),
+      "xx_session_v1" => self.req_session(client, id, msg.opcode, &args),
+      "xx_toplevel_session_v1" | "xdg_toplevel_session_v1" => self.req_toplevel_session(client, id, msg.opcode, &args),
+      "xdg_session_manager_v1" => self.req_session_manager(client, id, msg.opcode, &args),
+      "xdg_session_v1" => self.req_session(client, id, msg.opcode, &args),
       "xdg_wm_base" => self.req_wm_base(client, id, msg.opcode, &args),
       "xdg_positioner" => self.req_positioner(client, id, msg.opcode, &args),
       "xdg_surface" => self.req_xdg_surface(client, id, msg.opcode, &args),
@@ -1302,6 +1429,7 @@ impl Server {
             format,
             modifier: DRM_FORMAT_MOD_LINEAR,
             content_serial: std::rc::Rc::new(std::cell::Cell::new(0)),
+            surface_gpu: None,
           };
           client.objects.insert(nid, Object::new(&protocol::WL_BUFFER, 1, Role::Buffer(buf)));
         }
@@ -1391,6 +1519,10 @@ impl Server {
         {
           s.pending_buffer = if buf == 0 { None } else { Some(buf) };
           s.pending_attach = true;
+          s.pending_off = (
+            args.get(1).map(|a| a.as_int()).unwrap_or(0),
+            args.get(2).map(|a| a.as_int()).unwrap_or(0),
+          );
         }
       }
       // damage (surface coords) / damage_buffer (buffer coords).  We do not
@@ -1440,7 +1572,142 @@ impl Server {
     }
   }
 
+  /// First map of a toplevel: place it in the usable area, raise, activate.
+  /// Shared by the xdg path (first buffer commit) and Xwayland windows, whose
+  /// role is only known once the X11 window is matched to its surface.
+  /// Place a toplevel that just gained visible content.  `provisional` means
+  /// the content so far is only subsurfaces of a still buffer-less toplevel
+  /// (libdecor decorations, Firefox): the visible geometry is not final, so a
+  /// default-centred result is redone when the surface itself maps.
+  fn place_first_map(&mut self, client: &mut Client, fd: RawFd, id: u32, provisional: bool) {
+      let cascade = if self.wm_cascade_windows {
+        (self.window_stack.len().saturating_sub(1) as i32) * 28
+      } else {
+        0
+      };
+      let mut child_geom = Self::surface_geometry_in(client, id).unwrap_or((0, 0, 640, 480));
+      // The placement maths below works in surface-local terms (origin 0,0):
+      // strip any position left by an earlier, provisional placement.
+      if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&id) {
+        if s.placement_provisional {
+          child_geom.0 -= s.x;
+          child_geom.1 -= s.y;
+        }
+      }
+      let parent_geom = Self::toplevel_parent_surface_in(client, id)
+        .and_then(|parent| Self::surface_geometry_in(client, parent));
+      let (ux, uy, uw, uh) = self.usable_area();
+      // Reserve room only when this surface already negotiated SSD.  Using
+      // `prefer_ssd` here shifted GTK CSD windows down by a phantom titlebar
+      // before set_mode(1) arrived.  `ensure_ssd_titlebar_clearance` nudges
+      // windows later if decoration flips to server mode.
+      // Use the in-hand `client` — request dispatch has removed it from
+      // `self.clients`, so fd-based lookups would miss the decoration mode.
+      let ssd_extra = self.ssd_chrome_height_in(client, id);
+      // Resolve sibling placement before mutably borrowing the new surface.
+      let sibling_geom = self
+        .window_stack
+        .iter()
+        .rev()
+        .find(|&&(f, s)| f == fd && s != id)
+        .and_then(|&(_, s)| Self::surface_geometry_in(client, s));
+      let needs_place = matches!(
+        client.objects.get(&id),
+        Some(Object { role: Role::Surface(s), .. }) if (s.x == 0 && s.y == 0) || s.placement_provisional
+      );
+      let hinted = if needs_place && parent_geom.is_none() {
+        self.requested_placement(client, id, child_geom.2, child_geom.3, ssd_extra)
+      } else {
+        None
+      };
+      let place = if needs_place {
+        if let Some((hx, hy)) = hinted {
+          Some((hx - child_geom.0, hy - child_geom.1))
+        } else if let Some((px, py, pw, ph)) = parent_geom {
+          let (_, _, cw, ch) = child_geom;
+          let min_y = uy + ssd_extra;
+          let visible_x = (px + (pw - cw) / 2).clamp(ux, ux + (uw - cw).max(0));
+          let visible_y = (py + (ph - ch) / 2)
+            .clamp(min_y, uy + (uh - ch).max(0).max(min_y));
+          Some((visible_x - child_geom.0, visible_y - child_geom.1))
+        } else if let Some((sx, sy, _sw, sh)) = sibling_geom {
+          // Stack under the newest same-client sibling (aplay main→EQ→playlist).
+          let min_y = uy + ssd_extra;
+          let visible_x = sx.clamp(ux, ux + (uw - child_geom.2).max(0));
+          let visible_y = (sy + sh).clamp(min_y, uy + (uh - child_geom.3).max(0).max(min_y));
+          Some((visible_x - child_geom.0, visible_y - child_geom.1))
+        } else {
+          let visible_x = ux + ((uw - child_geom.2) / 2).max(0) + cascade;
+          let visible_y = uy
+            + ssd_extra
+            + ((uh - ssd_extra - child_geom.3) / 2).max(0)
+            + cascade;
+          Some((visible_x - child_geom.0, visible_y - child_geom.1))
+        }
+      } else {
+        None
+      };
+      if let Some((nx, ny)) = place {
+        if let Some(Object {
+          role: Role::Surface(s),
+          ..
+        }) = client.objects.get_mut(&id)
+        {
+          s.x = nx;
+          s.y = ny;
+          s.placement_provisional = provisional && hinted.is_none();
+        }
+      }
+      self.raise_surface(fd, id);
+      self.pending_activate = Some((fd, id));
+      self.shell_state_dirty = true;
+      let restored_tid = client.restore_pos.keys().copied().find(|tid| Self::toplevel_surface_in(client, *tid) == Some(id));
+      if let Some(tid) = restored_tid { client.restore_pos.remove(&tid); }
+  }
+
   fn surface_commit(&mut self, client: &mut Client, id: u32) {
+    if self.frame_trace {
+      let fd = client.conn.fd;
+      match self.commit_trace.iter_mut().find(|e| e.0 == fd && e.1 == id) {
+        Some(e) => e.2 += 1,
+        None => self.commit_trace.push((fd, id, 1)),
+      }
+    }
+    // Persist before a NULL attachment erases the last visible geometry.
+    if client.has_session && matches!(client.objects.get(&id),
+      Some(Object { role: Role::Surface(s), .. }) if s.mapped && s.pending_attach && s.pending_buffer.is_none()) {
+      self.merge_session_records(Self::session_records_in(client));
+    }
+    // xdg-shell's initial configure belongs after the first empty commit,
+    // when app_id, decoration and session restore requests have all arrived.
+    let initial_xdg = match client.objects.get(&id) {
+      Some(Object { role: Role::Surface(s), .. }) if !s.popup => s.xdg_surface_id,
+      _ => None,
+    };
+    if let Some(xdg) = initial_xdg {
+      let initial = matches!(client.objects.get(&xdg),
+        Some(Object { role: Role::XdgSurface { configured: false, .. }, .. }));
+      if initial {
+        if let Some(tid) = client.objects.iter().find_map(|(&tid, o)|
+          matches!(o.role, Role::XdgToplevel { xdg_surface_id, .. } if xdg_surface_id == xdg).then_some(tid)) {
+          let restored = client.restore_pos.get(&tid).copied();
+          let handles: Vec<_> = client.objects.iter().filter_map(|(&oid, o)| match &o.role {
+            Role::ToplevelSession { toplevel_id, restore: Some(_), xdg, .. } if *toplevel_id == tid => Some((oid, *xdg)),
+            _ => None,
+          }).collect();
+          for (oid, stable) in handles {
+            client.send(oid, 0, &if stable { Vec::new() } else { vec![Arg::Object(tid)] });
+            if let Some(Object { role: Role::ToplevelSession { restore, .. }, .. }) = client.objects.get_mut(&oid) {
+              *restore = None;
+            }
+          }
+          if let Some(Object { role: Role::XdgSurface { configured, .. }, .. }) = client.objects.get_mut(&xdg) {
+            *configured = true;
+          }
+          self.pending_configure.push((client.conn.fd, id, restored.map(|g| (g.2, g.3)), false));
+        }
+      }
+    }
     let (attach, pending_buf, frames) = match client.objects.get_mut(&id) {
       Some(Object {
         role: Role::Surface(s),
@@ -1496,6 +1763,26 @@ impl Server {
       // always-full-composite behaviour implemented for everybody.
       let posted = std::mem::replace(&mut s.pending_damage, Rect::EMPTY);
       visual_change |= !posted.is_empty();
+      // A client may redraw into the buffer that is already attached and only
+      // post damage (no new attach).  The GPU compositor re-uploads wl_shm
+      // content when the buffer's serial moves, so the damaged content must
+      // count as a new revision or the texture stays stale (an IME candidate
+      // window redrawn in place never changed on screen).
+      if !attach && !posted.is_empty() {
+        if let Some(buf) = s.current_buffer.as_ref() {
+          buf.mark_updated();
+        }
+      }
+      // GPU texture damage: same reading as below (no damage on an attach
+      // means everything), but kept separately because it is consumed by the
+      // GPU composite rather than by the software one.
+      let mut gpu_posted = posted;
+      if attach && posted.is_empty() {
+        gpu_posted = Rect::new(0, 0, i32::MAX, i32::MAX);
+      }
+      if !gpu_posted.is_empty() {
+        s.gpu.dirty.set(s.gpu.dirty.get().union(&gpu_posted));
+      }
       if attach && posted.is_empty() {
         // Size of whichever buffer the surface ends up showing — the incoming
         // one, or the outgoing one when this commit unmaps the surface.
@@ -1521,7 +1808,8 @@ impl Server {
         // Atomic buffer swap: never clear before installing the replacement.
         // `new_buffer == None` is an intentional unmap (attach NULL).
         s.mapped = new_buffer.is_some();
-        if let Some((bid, buf)) = new_buffer {
+        if let Some((bid, mut buf)) = new_buffer {
+          buf.surface_gpu = Some(s.gpu.clone());
           s.current_buffer = Some(buf);
           s.current_buffer_id = Some(bid);
         } else {
@@ -1529,6 +1817,11 @@ impl Server {
           s.current_buffer_id = None;
         }
       }
+      if attach {
+        s.off.0 += s.pending_off.0;
+        s.off.1 += s.pending_off.1;
+      }
+      s.pending_off = (0, 0);
       s.pending_attach = false;
       s.pending_buffer = None;
     }
@@ -1614,79 +1907,15 @@ impl Server {
       self.track_mapped_toplevel(fd, id, mapped);
       // First map of a toplevel — raise, place in usable area, activate.
       if mapped && attach && !was_mapped {
-        let cascade = if self.wm_cascade_windows {
-          (self.window_stack.len().saturating_sub(1) as i32) * 28
-        } else {
-          0
-        };
-        let child_geom = Self::surface_geometry_in(client, id).unwrap_or((0, 0, 640, 480));
-        let parent_geom = Self::toplevel_parent_surface_in(client, id)
-          .and_then(|parent| Self::surface_geometry_in(client, parent));
-        let (ux, uy, uw, uh) = self.usable_area();
-        // Reserve room only when this surface already negotiated SSD.  Using
-        // `prefer_ssd` here shifted GTK CSD windows down by a phantom titlebar
-        // before set_mode(1) arrived.  `ensure_ssd_titlebar_clearance` nudges
-        // windows later if decoration flips to server mode.
-        // Use the in-hand `client` — request dispatch has removed it from
-        // `self.clients`, so fd-based lookups would miss the decoration mode.
-        let ssd_extra = self.ssd_chrome_height_in(client, id);
-        // Resolve sibling placement before mutably borrowing the new surface.
-        let sibling_geom = self
-          .window_stack
-          .iter()
-          .rev()
-          .find(|&&(f, s)| f == fd && s != id)
-          .and_then(|&(_, s)| Self::surface_geometry_in(client, s));
-        let needs_place = matches!(
-          client.objects.get(&id),
-          Some(Object { role: Role::Surface(s), .. }) if s.x == 0 && s.y == 0
-        );
-        let hinted = if needs_place && parent_geom.is_none() {
-          self.requested_placement(client, id, child_geom.2, child_geom.3, ssd_extra)
-        } else {
-          None
-        };
-        let place = if needs_place {
-          if let Some((hx, hy)) = hinted {
-            Some((hx - child_geom.0, hy - child_geom.1))
-          } else if let Some((px, py, pw, ph)) = parent_geom {
-            let (_, _, cw, ch) = child_geom;
-            let min_y = uy + ssd_extra;
-            let visible_x = (px + (pw - cw) / 2).clamp(ux, ux + (uw - cw).max(0));
-            let visible_y = (py + (ph - ch) / 2)
-              .clamp(min_y, uy + (uh - ch).max(0).max(min_y));
-            Some((visible_x - child_geom.0, visible_y - child_geom.1))
-          } else if let Some((sx, sy, _sw, sh)) = sibling_geom {
-            // Stack under the newest same-client sibling (aplay main→EQ→playlist).
-            let min_y = uy + ssd_extra;
-            let visible_x = sx.clamp(ux, ux + (uw - child_geom.2).max(0));
-            let visible_y = (sy + sh).clamp(min_y, uy + (uh - child_geom.3).max(0).max(min_y));
-            Some((visible_x - child_geom.0, visible_y - child_geom.1))
-          } else {
-            let visible_x = ux + ((uw - child_geom.2) / 2).max(0) + cascade;
-            let visible_y = uy
-              + ssd_extra
-              + ((uh - ssd_extra - child_geom.3) / 2).max(0)
-              + cascade;
-            Some((visible_x - child_geom.0, visible_y - child_geom.1))
-          }
-        } else {
-          None
-        };
-        if let Some((nx, ny)) = place {
-          if let Some(Object {
-            role: Role::Surface(s),
-            ..
-          }) = client.objects.get_mut(&id)
-          {
-            s.x = nx;
-            s.y = ny;
-          }
-        }
-        self.raise_surface(fd, id);
-        self.pending_activate = Some((fd, id));
-        self.shell_state_dirty = true;
+        self.place_first_map(client, fd, id, false);
       } else if was_mapped && !mapped {
+        let xdg = match client.objects.get(&id) {
+          Some(Object { role: Role::Surface(s), .. }) => s.xdg_surface_id,
+          _ => None,
+        };
+        if let Some(Object { role: Role::XdgSurface { configured, .. }, .. }) = xdg.and_then(|x| client.objects.get_mut(&x)) {
+          *configured = false;
+        }
         if self.focused_client_fd == fd && self.focused_surface_id == id {
           if let Some(parent) = Self::toplevel_parent_surface_in(client, id) {
             self.window_stack.retain(|&(f, s)| !(f == fd && s == parent));
@@ -1746,38 +1975,14 @@ impl Server {
         let parent_was = self.window_stack.iter().any(|&(f, s)| f == fd && s == parent_id);
         self.track_mapped_toplevel(fd, parent_id, true);
         if !parent_was {
-          let cascade = if self.wm_cascade_windows {
-            (self.window_stack.len().saturating_sub(1) as i32) * 28
-          } else {
-            0
-          };
-          let (buf_w, buf_h) = Self::surface_tree_size(client, parent_id)
-            .unwrap_or((960, 640));
-          let (ux, uy, uw, uh) = self.usable_area();
-          let ssd_extra = self.ssd_chrome_height_in(client, parent_id);
-          let (gx, gy, gw, gh) = Self::surface_geometry_in(client, parent_id).unwrap_or((0, 0, buf_w, buf_h));
-          let hinted = self.requested_placement(client, parent_id, gw, gh, ssd_extra);
-          if let Some(Object {
-            role: Role::Surface(s),
-            ..
-          }) = client.objects.get_mut(&parent_id)
-          {
-            if s.x == 0 && s.y == 0 {
-              if let Some((hx, hy)) = hinted {
-                s.x = hx - gx;
-                s.y = hy - gy;
-              } else {
-                s.x = ux + ((uw - buf_w) / 2).max(0) + cascade;
-                s.y = uy
-                  + ssd_extra
-                  + ((uh - ssd_extra - buf_h) / 2).max(0)
-                  + cascade;
-              }
-            }
-          }
-          self.raise_surface(fd, parent_id);
-          self.pending_activate = Some((fd, parent_id));
-          self.shell_state_dirty = true;
+          // Same placement as a toplevel with its own buffer: one policy, so
+          // the result does not depend on whether the decoration subsurfaces
+          // or the main surface happened to commit first.
+          let own_unmapped = matches!(
+            client.objects.get(&parent_id),
+            Some(Object { role: Role::Surface(s), .. }) if s.current_buffer.is_none()
+          );
+          self.place_first_map(client, fd, parent_id, own_unmapped);
         }
       }
     }
@@ -1973,6 +2178,7 @@ impl Server {
     subs: &[SubsurfacePlacement],
     fd: RawFd,
     fb: &mut Framebuffer,
+    backend: &mut dyn Backend,
     surface_id: u32,
     ox: i32,
     oy: i32,
@@ -1983,15 +2189,15 @@ impl Server {
     }
     let children = Self::subsurface_children(subs, fd, surface_id);
     for &(_, _, _, child, x, y) in children.iter().take_while(|(_, _, z, _, _, _)| *z < 0) {
-      Self::blit_surface_tree(client, subs, fd, fb, child, ox + x, oy + y, depth + 1);
+      Self::blit_surface_tree(client, subs, fd, fb, backend, child, ox + x, oy + y, depth + 1);
     }
     if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&surface_id) {
       if s.mapped {
-        if let Some(buf) = &s.current_buffer { fb.blit_shm(buf, ox, oy); }
+        if let Some(buf) = &s.current_buffer { backend.blit_buffer(fb, buf, ox, oy); }
       }
     }
     for &(_, _, _, child, x, y) in children.iter().skip_while(|(_, _, z, _, _, _)| *z < 0) {
-      Self::blit_surface_tree(client, subs, fd, fb, child, ox + x, oy + y, depth + 1);
+      Self::blit_surface_tree(client, subs, fd, fb, backend, child, ox + x, oy + y, depth + 1);
     }
   }
 
@@ -2024,7 +2230,17 @@ impl Server {
       _ => return None,
     };
     let (_, app_id, _, _, _) = crate::shell_ipc::toplevel_meta(client, xdg);
-    let (hx, hy) = self.placement.lookup(&app_id, client.pid)?;
+    // A window the client asked us to restore (xx_session_v1.restore_toplevel)
+    // goes back to where it was; that beats any guess from app_id or argv.
+    let restored = client
+      .restore_pos
+      .iter()
+      .find(|(tid, _)| Self::toplevel_surface_in(client, **tid) == Some(surface_id))
+      .map(|(_, p)| (p.0, p.1));
+    let (hx, hy) = match restored {
+      Some(p) => p,
+      None => self.placement.lookup(&app_id, client.pid)?,
+    };
     let (ux, uy, uw, uh) = self.usable_area();
     let min_y = uy + ssd_extra;
     let x = hx.clamp(ux, ux + (uw - cw).max(0));
@@ -2033,8 +2249,9 @@ impl Server {
   }
 
   fn export_shell_state(&mut self, force: bool) {
+    let mut deferred = None;
     if let Some(ref mut ipc) = self.shell_ipc {
-      ipc.export_state(
+      deferred = ipc.export_state(
         &self.clients,
         self.focused_client_fd,
         self.focused_surface_id,
@@ -2043,7 +2260,17 @@ impl Server {
         &self.switcher,
       );
     }
-    self.shell_state_dirty = false;
+    match deferred {
+      // Coalesced: stay dirty and wake up when the write is due.
+      Some(wait) => {
+        self.state_flush_at = Some(std::time::Instant::now() + wait);
+        self.shell_state_dirty = true;
+      }
+      None => {
+        self.state_flush_at = None;
+        self.shell_state_dirty = false;
+      }
+    }
   }
 
   fn handle_shell_commands(&mut self) {
@@ -2157,7 +2384,15 @@ impl Server {
                   match key {
                     "gap" => self.wm_window_gap = value.clamp(0, 32),
                     "edge_snap" => self.wm_edge_snap = value != 0,
+                    "dock_snap" => self.wm_dock_snap = value != 0,
                     "edge_tile" => self.wm_edge_tile = value != 0,
+                    "corner_snap" => self.wm_corner_snap = value != 0,
+                    "tray_group" => {
+                      if let Some(ipc) = self.shell_ipc.as_mut() {
+                        ipc.group_tray = value != 0;
+                      }
+                      self.shell_state_dirty = true;
+                    }
                     "top_edge_maximize" => self.wm_top_edge_maximize = value != 0,
                     "titlebar_double_click" => self.wm_titlebar_double_click = value != 0,
                     "titlebar_style" => {
@@ -2188,6 +2423,68 @@ impl Server {
                 }
               }
             }
+          }
+        }
+        (Some("dump_windows"), _) => self.dump_windows(),
+        (Some("screenshot_out"), Some(_)) => {
+          // `screenshot_out PATH`: save the composed screen (cursor included)
+          // as PNG.  The path is the rest of the line, so it may hold spaces.
+          let path = cmd.trim_start_matches("screenshot_out").trim();
+          if !path.is_empty() {
+            self.pending_screenshot = Some(path.to_string());
+            self.dirty = true;
+          }
+        }
+        (Some("inject_key"), Some(code)) if std::env::var_os("LUNA_TEST_INPUT").is_some() => {
+          // Test aid (off unless LUNA_TEST_INPUT is set): feed an evdev key
+          // through the same path as a physical keyboard, e.g. to drive an IME
+          // on a headless compositor.  `inject_key CODE 1|0` (press|release).
+          if let Ok(code) = code.parse::<u32>() {
+            let pressed = parts.next().map(|v| v != "0").unwrap_or(true);
+            self.inject_key(code, pressed);
+          }
+        }
+        (Some("inject_motion"), Some(xs)) if std::env::var_os("LUNA_TEST_INPUT").is_some() => {
+          // `inject_motion X Y` in output pixels (test aid, see inject_key).
+          if let (Ok(x), Some(Ok(y))) = (xs.parse::<f32>(), parts.next().map(|v| v.parse::<f32>())) {
+            let (w, h) = self.backend.size();
+            self.ptr_x = (x / w as f32).clamp(0.0, 1.0);
+            self.ptr_y = (y / h as f32).clamp(0.0, 1.0);
+            self.cursor_dirty = true;
+            self.inject_ptr_motion(self.ptr_x, self.ptr_y);
+          }
+        }
+        (Some("inject_button"), Some(code)) if std::env::var_os("LUNA_TEST_INPUT").is_some() => {
+          // `inject_button CODE 1|0` with an evdev code (0x110 left, 0x111 right).
+          if let Ok(code) = code.parse::<u32>() {
+            let pressed = parts.next().map(|v| v != "0").unwrap_or(true);
+            self.inject_ptr_button(code, pressed);
+          }
+        }
+        (Some("idle_timeout"), Some(secs)) => {
+          // 0 disables the screensaver trigger.
+          eprintln!("[luna-compositor] idle_timeout {}s", secs);
+          self.idle_timeout = secs.parse::<u64>().ok().filter(|&n| n > 0)
+            .map(|n| std::time::Duration::from_secs(n.min(86_400)));
+          self.last_input = std::time::Instant::now();
+          self.idle_active = false;
+        }
+        (Some("x11_tray_bg"), Some(rgb)) => {
+          if let Ok(v) = u32::from_str_radix(rgb.trim_start_matches("0x"), 16) {
+            self.xwl_tray_bg(v);
+          }
+        }
+        (Some("x11_tray_pos"), Some(icon)) => {
+          let v: Vec<i32> = parts.filter_map(|p| p.parse().ok()).collect();
+          if let (Ok(icon), [x, y, w, h]) = (icon.parse::<u32>(), v.as_slice()) {
+            self.xwl_tray_pos(icon, *x, *y, (*w).max(0) as u32, (*h).max(0) as u32);
+          }
+        }
+        (Some("state_interval"), Some(secs)) => {
+          // Minimum seconds between state.json writes that only carry window
+          // title/position changes (0 = write every change).
+          if let (Ok(n), Some(ipc)) = (secs.parse::<u64>(), self.shell_ipc.as_mut()) {
+            ipc.cosmetic_interval = std::time::Duration::from_secs(n.min(3600));
           }
         }
         (Some("keymap"), layout) => {
@@ -2674,9 +2971,10 @@ impl Server {
       if fullscreen {
         states.push(TOPLEVEL_STATE_FULLSCREEN);
       }
-      if tiled == 1 {
+      // 1/2 = left/right half; 3..6 = top-left, top-right, bottom-left, bottom-right.
+      if matches!(tiled, 1 | 3 | 5) {
         states.push(TOPLEVEL_STATE_TILED_LEFT);
-      } else if tiled == 2 {
+      } else if matches!(tiled, 2 | 4 | 6) {
         states.push(TOPLEVEL_STATE_TILED_RIGHT);
       }
     }
@@ -2801,6 +3099,18 @@ impl Server {
       width = uw;
       height = (uh - ssd_extra).max(64);
       self.set_surface_screen_pos(fd, surface_id, ux, uy + ssd_extra, width, height);
+    } else if (3..=6).contains(&tiled) {
+      // A quarter of the usable area, one titlebar of headroom per row.
+      let ssd_extra = self.ssd_chrome_height(fd, surface_id);
+      let gap = self.wm_window_gap.clamp(0, 32);
+      width = ((uw - gap * 3) / 2).max(64);
+      let cell = ((uh - gap * 3) / 2).max(64 + ssd_extra);
+      height = (cell - ssd_extra).max(64);
+      let right = matches!(tiled, 4 | 6);
+      let bottom = matches!(tiled, 5 | 6);
+      let tx = if right { ux + uw - width - gap } else { ux + gap };
+      let row_top = if bottom { uy + gap * 2 + cell } else { uy + gap };
+      self.set_surface_screen_pos(fd, surface_id, tx, row_top + ssd_extra, width, height);
     } else if tiled == 1 || tiled == 2 {
       let ssd_extra = self.ssd_chrome_height(fd, surface_id);
       let gap = self.wm_window_gap.clamp(0, 32);
@@ -2811,6 +3121,10 @@ impl Server {
     } else if size_override.is_none() && cur_w > 0 && cur_h > 0 {
       width = 0;
       height = 0;
+    }
+    if let Some(win) = self.xwl_window_of(fd, surface_id) {
+      self.xwl_resize(win, width, height);
+      return;
     }
     let states = Self::encode_states(&self.toplevel_states_for(fd, surface_id, resizing));
     let serial = self.next_serial();
@@ -3077,6 +3391,16 @@ impl Server {
       if geom.2 < 8 || geom.3 < 8 {
         continue;
       }
+      // The desktop shell's own surfaces (widgets, panels) are not windows to
+      // snap against; only applications and the shell's dialogs are.
+      if let Some(Object { role: Role::Surface(os), .. }) = client.objects.get(&osid) {
+        if let Some(xdg) = os.xdg_surface_id {
+          let (title, app_id, _, _, _) = crate::shell_ipc::toplevel_meta(client, xdg);
+          if crate::shell_ipc::is_shell_surface(&title, &app_id) {
+            continue;
+          }
+        }
+      }
       others.push(geom);
     }
 
@@ -3095,7 +3419,11 @@ impl Server {
     consider(&mut best_x, cx, ux);
     consider(&mut best_x, cx, ux + uw - cw);
     consider(&mut best_y, cy, uy);
-    consider(&mut best_y, cy, uy + uh - ch);
+    // The dock reserves the bottom of the usable area; unless the user asks to
+    // snap above it, windows stick to the real bottom edge of the screen.
+    let bottom_edge = if self.wm_dock_snap { uy + uh } else { self.backend.size().1 as i32 };
+    consider(&mut best_y, cy, bottom_edge - ch);
+    let others_dbg = others.clone();
     for (ox, oy, ow, oh) in others {
       let y_overlap = cy < oy + oh && oy < cy + ch;
       let x_overlap = cx < ox + ow && ox < cx + cw;
@@ -3111,6 +3439,9 @@ impl Server {
         consider(&mut best_y, cy, oy);
         consider(&mut best_y, cy, oy + oh - ch);
       }
+    }
+    if std::env::var_os("LUNA_TEST_INPUT").is_some() {
+      eprintln!("[luna-test] magnet cur=({cx},{cy},{cw},{ch}) usable=({ux},{uy},{uw},{uh}) best_x={best_x:?} best_y={best_y:?} others={:?}", others_dbg);
     }
     let adj_x = best_x.map(|(_, a)| a).unwrap_or(0);
     let adj_y = best_y.map(|(_, a)| a).unwrap_or(0);
@@ -3223,10 +3554,6 @@ impl Server {
       } => {
         let dx = px - grab_px;
         let dy = py - grab_py;
-        // Ignore sub-pixel / click jitter so a bare frame click never resizes.
-        if dx.abs() < 3 && dy.abs() < 3 {
-          return;
-        }
         let mut new_w = orig_w;
         let mut new_h = orig_h;
         let mut new_x = orig_x;
@@ -3342,8 +3669,11 @@ impl Server {
     let grab = std::mem::replace(&mut self.wm_grab, WmGrab::None);
     match grab {
       WmGrab::None => {}
-      WmGrab::Move { fd, surface_id, siblings, .. } => {
+      WmGrab::Move { fd, surface_id, siblings, grab_px, grab_py, .. } => {
         let (px, py) = self.screen_ptr();
+        if (px, py) == (grab_px, grab_py) {
+          return;
+        }
         let (ux, uy, uw, uh) = self.usable_area();
         let edge = 24i32;
         let (cx, cy, cw, _) = self
@@ -3354,7 +3684,20 @@ impl Server {
         let near_left = px <= ux + edge || (win_left && !win_right);
         let near_right = px >= ux + uw - edge || (win_right && !win_left);
         let near_top = py <= uy + edge || cy <= uy + edge;
-        if self.wm_top_edge_maximize && near_top && !near_left && !near_right {
+        // Screen corners: fill that quarter (checked before the edge actions).
+        let px_l = px <= ux + edge;
+        let px_r = px >= ux + uw - edge;
+        let px_t = py <= uy + edge;
+        let px_b = py >= uy + uh - edge;
+        if self.wm_corner_snap && (px_l || px_r) && (px_t || px_b) {
+          let side = match (px_r, px_b) {
+            (false, false) => 3,
+            (true, false) => 4,
+            (false, true) => 5,
+            (true, true) => 6,
+          };
+          self.tile_surface_for(fd, surface_id, side);
+        } else if self.wm_top_edge_maximize && near_top && !near_left && !near_right {
           self.maximize_surface_for(fd, surface_id, true);
         } else if self.wm_edge_tile && near_left {
           // Use the grab's fd — surface ids are per-client and looking them up
@@ -3460,8 +3803,10 @@ impl Server {
           Some((pfd, psid, ..)) if pfd == fd && psid == surface_id
         );
         let size = self
-          .surface_geometry(fd, surface_id)
+          .pending_resize_configure
+          .filter(|&(pfd, psid, ..)| pfd == fd && psid == surface_id)
           .map(|(_, _, w, h)| (w, h))
+          .or_else(|| self.surface_geometry(fd, surface_id).map(|(_, _, w, h)| (w, h)))
           .unwrap_or((orig_w, orig_h));
         if moved || size != (orig_w, orig_h) {
           // Final configure without RESIZING bit.
@@ -3946,6 +4291,11 @@ impl Server {
     if !self.clients.get(&fd).map(|c| Self::surface_is_xdg_toplevel_in(c, surface_id)).unwrap_or(false) {
       return;
     }
+    if let Some(win) = self.xwl_window_of(fd, surface_id) {
+      self.xwl_close(win);
+      self.shell_state_dirty = true;
+      return;
+    }
     let toplevel_id = {
       let client = match self.clients.get(&fd) {
         Some(c) => c,
@@ -4331,7 +4681,7 @@ impl Server {
         // start_drag(source?, origin, icon?, serial)
         let source_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
         let origin = args.get(1).map(|a| a.as_object()).unwrap_or(0);
-        let _icon = args.get(2).map(|a| a.as_object()).unwrap_or(0);
+        let icon_id = args.get(2).map(|a| a.as_object()).unwrap_or(0);
         let serial = args.get(3).map(|a| a.as_uint()).unwrap_or(0);
         let fd = client.conn.fd;
 
@@ -4355,6 +4705,7 @@ impl Server {
           source_id,
           button: self.last_button_code,
           target: None,
+          icon_id,
         });
         self.pointer_grab = None;
         self.cursor_client_fd = -1;
@@ -4593,6 +4944,9 @@ impl Server {
 
   fn update_drag_motion(&mut self, nx: f32, ny: f32) {
     let Some(drag) = self.drag else { return; };
+    if drag.icon_id != 0 {
+      self.dirty = true;           // the icon follows the pointer
+    }
 
     let hit = self.find_input_target().and_then(
       |(fd, surface_id, _, _, _, _, ox, oy)| {
@@ -5367,7 +5721,191 @@ impl Server {
       .find_map(|(center, action)| ((x - center).abs() <= 8).then_some(action))
   }
 
-  fn draw_ssd_titlebar(&mut self, win_x: i32, win_y: i32, win_w: i32, focused: bool) {
+  /// Render a window's server-side chrome (SSD titlebar, frame or focus ring)
+  /// into cached ARGB strips and append them as GPU planes, so windows with
+  /// server decorations no longer force the whole frame onto the CPU.
+  /// Strips are redrawn only when their fingerprint changes.
+  fn push_gpu_chrome(
+    &mut self,
+    key: (RawFd, u32),
+    geom: (i32, i32, i32, i32),
+    ssd: bool,
+    focused: bool,
+    maxed_or_full: bool,
+    out: &mut Vec<(i32, i32, ShmBuffer)>,
+  ) {
+    const FRAME: i32 = 3;
+    let (fx, fy, fw, fh) = geom;
+    let draw_frame = if ssd { !maxed_or_full } else { focused && self.wm_focus_outline && !maxed_or_full };
+    if !ssd && !draw_frame {
+      return;
+    }
+    let bar = self.wm_ssd_bar_h;
+    let top = if ssd { fy - bar } else { fy };
+    let (left, right, bottom) = (fx - FRAME, fx + fw + FRAME, fy + fh + FRAME);
+    let mut parts: Vec<(u8, Rect)> = Vec::with_capacity(5);
+    if ssd {
+      parts.push((0, Rect::new(fx, fy - bar, fx + fw, fy)));
+    }
+    if draw_frame {
+      parts.push((1, Rect::new(left, top - FRAME, right, top)));
+      parts.push((2, Rect::new(left, bottom - FRAME, right, bottom)));
+      parts.push((3, Rect::new(left, top, left + FRAME, bottom)));
+      parts.push((4, Rect::new(right - FRAME, top, right, bottom)));
+    }
+    let screen = self.fb.full_rect();
+    let frame_focused = focused && self.wm_focus_outline;
+    let mut style = 0xcbf2_9ce4_8422_2325u64;
+    for v in [
+      self.wm_titlebar_style as u64,
+      self.wm_titlebar_controls_left as u64,
+      self.wm_titlebar_active as u64,
+      self.wm_titlebar_inactive as u64,
+      self.wm_titlebar_frame as u64,
+      bar as u64,
+      focused as u64,
+      frame_focused as u64,
+      ssd as u64,
+      fw as u64,
+      fh as u64,
+    ] {
+      style = Self::sig_mix(style, v);
+    }
+    // The title is part of the bar's pixels.
+    let title_hash = self.toplevel_title(key.0, key.1).bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| Self::sig_mix(h, b as u64));
+    let style = Self::sig_mix(style, title_hash);
+    let epoch = self.chrome_epoch;
+    for (part, r) in parts {
+      let r = r.intersect(&screen);
+      if r.is_empty() {
+        continue;
+      }
+      let sig = Self::sig_mix(
+        Self::sig_mix(style, ((r.x0 as u32 as u64) << 32) | r.y0 as u32 as u64),
+        ((r.x1 as u32 as u64) << 32) | r.y1 as u32 as u64,
+      );
+      let ck = (key.0, key.1, part);
+      if let Some(e) = self.chrome_cache.get_mut(&ck) {
+        if e.0 == sig {
+          e.3 = epoch;
+          out.push((e.1 .0, e.1 .1, e.2.clone()));
+          continue;
+        }
+      }
+      // Paint through the normal CPU chrome code into the (otherwise idle in
+      // GPU mode) framebuffer, clipped to this strip, then lift the strip out.
+      let (w, h) = ((r.x1 - r.x0) as usize, (r.y1 - r.y0) as usize);
+      let saved = self.fb.clip();
+      self.fb.set_clip(r);
+      for y in r.y0..r.y1 {
+        for x in r.x0..r.x1 {
+          self.fb.put(x, y, 0);
+        }
+      }
+      match part {
+        0 => { let title = self.toplevel_title(key.0, key.1); self.draw_ssd_titlebar(fx, fy, fw, focused, &title) }
+        _ => self.draw_window_frame(fx, fy, fw, fh, ssd, focused),
+      }
+      let mut px = Vec::with_capacity(w * h);
+      let fbw = self.fb.width as usize;
+      for y in r.y0..r.y1 {
+        let row = y as usize * fbw;
+        px.extend_from_slice(&self.fb.pixels[row + r.x0 as usize..row + r.x1 as usize]);
+      }
+      self.fb.set_clip(saved);
+      let buf = ShmBuffer {
+        pool: ShmPool::from_pixels(px),
+        offset: 0,
+        width: w as i32,
+        height: h as i32,
+        stride: (w * 4) as i32,
+        format: FORMAT_ARGB8888,
+        modifier: 0,
+        content_serial: std::rc::Rc::new(std::cell::Cell::new(0)),
+        surface_gpu: None,
+      };
+      buf.mark_updated();
+      out.push((r.x0, r.y0, buf.clone()));
+      self.chrome_cache.insert(ck, (sig, (r.x0, r.y0), buf, epoch));
+    }
+  }
+
+  /// Title of the toplevel that owns `surface_id` ("" when it has none).
+  fn toplevel_title(&self, fd: RawFd, surface_id: u32) -> String {
+    let Some(client) = self.clients.get(&fd) else { return String::new() };
+    let xdg = match client.objects.get(&surface_id) {
+      Some(Object { role: Role::Surface(s), .. }) => s.xdg_surface_id,
+      _ => None,
+    };
+    client.objects.values().find_map(|o| match &o.role {
+      Role::XdgToplevel { xdg_surface_id, title, .. } if Some(*xdg_surface_id) == xdg => Some(title.clone()),
+      _ => None,
+    }).unwrap_or_default()
+  }
+
+  /// Centre `title` in the bar, white like the Settings dialog's title, between
+  /// the window controls and the far edge.  Over-long titles end in "…".
+  fn draw_ssd_title_text(&mut self, win_x: i32, bar_y: i32, win_w: i32, title: &str, focused: bool) {
+    if title.is_empty() {
+      return;
+    }
+    let px = if self.wm_ssd_bar_h >= 30 { 13 } else { 11 };
+    let controls = Self::ssd_control_centers(self.wm_titlebar_style, self.wm_titlebar_controls_left, win_w);
+    let (lo, hi) = (*controls.iter().min().unwrap(), *controls.iter().max().unwrap());
+    let (left, right) = if self.wm_titlebar_controls_left { (hi + 16, win_w - 16) } else { (16, lo - 16) };
+    let avail = (right - left).max(0);
+    if avail < 24 {
+      return;
+    }
+    let mut text = title.to_string();
+    let mut mask = self.title_fonts.render(&text, px);
+    for _ in 0..4 {
+      let Some(m) = &mask else { return };
+      if m.w <= avail {
+        break;
+      }
+      let keep = (text.chars().count() as i64 * avail as i64 / m.w as i64 - 1).max(1) as usize;
+      text = text.chars().take(keep).collect::<String>().trim_end().to_string() + "…";
+      mask = self.title_fonts.render(&text, px);
+    }
+    let Some(m) = mask else { return };
+    if m.w > avail {
+      return;
+    }
+    let tx = (win_x + (win_w - m.w) / 2).max(win_x + left);
+    let ty = bar_y + (self.wm_ssd_bar_h - m.h) / 2 + 1;
+    let (fw, fh) = (self.fb.width as i32, self.fb.height as i32);
+    let clip = self.fb.clip();
+    let ink: u32 = if focused { 0xffff_ffff } else { 0xffa9_aab9 };
+    for row in 0..m.h {
+      let y = ty + row;
+      if y < 0 || y >= fh || y < clip.y0 || y >= clip.y1 {
+        continue;
+      }
+      for col in 0..m.w {
+        let a = m.alpha[(row * m.w + col) as usize] as u32;
+        let x = tx + col;
+        if a == 0 || x < 0 || x >= fw || x < clip.x0 || x >= clip.x1 {
+          continue;
+        }
+        let dst = self.fb.pixels[(y * fw + x) as usize];
+        let mix = |s: u32, d: u32| (s * a + d * (255 - a)) / 255;
+        let c = 0xff00_0000
+          | (mix((ink >> 16) & 255, (dst >> 16) & 255) << 16)
+          | (mix((ink >> 8) & 255, (dst >> 8) & 255) << 8)
+          | mix(ink & 255, dst & 255);
+        self.fb.put(x, y, c);
+      }
+    }
+  }
+
+  fn draw_ssd_titlebar(&mut self, win_x: i32, win_y: i32, win_w: i32, focused: bool, title: &str) {
+    self.draw_ssd_titlebar_chrome(win_x, win_y, win_w, focused);
+    let bar_y = win_y - self.wm_ssd_bar_h;
+    self.draw_ssd_title_text(win_x, bar_y, win_w, title, focused);
+  }
+
+  fn draw_ssd_titlebar_chrome(&mut self, win_x: i32, win_y: i32, win_w: i32, focused: bool) {
     let bar_y = win_y - self.wm_ssd_bar_h;
     let [close_x, min_x, max_x] = Self::ssd_control_centers(
       self.wm_titlebar_style, self.wm_titlebar_controls_left, win_w,
@@ -5666,8 +6204,11 @@ impl Server {
   /// Must NEVER steal clicks inside the client buffer — that turned ordinary
   /// clicks into resize grabs and broke drag-to-select / copy.
   fn hit_resize_edge(&self, px: i32, py: i32) -> Option<(RawFd, u32, u32)> {
-    // Match draw_window_frame FRAME (3) with a little grab slack.
-    const BORDER: i32 = 5;
+    // The grab zone is exactly the frame draw_window_frame paints (FRAME = 3),
+    // as in any window manager: the border belongs to the framed window and
+    // nothing invisible reaches over its neighbours.  Clients without a frame
+    // of ours (CSD) resize through xdg_toplevel.resize from their own edges.
+    const BORDER: i32 = 3;
     for &(fd, sid) in self.window_stack.iter().rev() {
       let Some(client) = self.clients.get(&fd) else { continue };
       if self.surface_is_minimized(client, sid) {
@@ -5695,9 +6236,6 @@ impl Server {
         Some(f) => f,
         None => continue,
       };
-      if maxed || full {
-        continue;
-      }
       let ssd = Self::uses_ssd(self.toplevel_decoration_mode(fd, sid));
       // The visible window edges are described by window_geometry.  The full
       // wl_buffer commonly includes transparent CSD shadow padding, especially
@@ -5707,6 +6245,27 @@ impl Server {
       let Some((ox, oy, w, h)) = self.surface_geometry(fd, sid) else { continue };
       // SSD titlebar sits above the buffer — treat it as part of the window.
       let top_extra = if ssd { self.wm_ssd_bar_h } else { 0 };
+      // Foreground content occludes the borders of all windows behind it,
+      // even if the foreground window is maximized or fullscreen.
+      if px >= ox && px < ox + w && py >= oy - top_extra && py < oy + h {
+        return None;
+      }
+      if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&sid) {
+        if let Some((bw, bh)) = Self::surface_tree_size(client, sid) {
+          if px >= s.x && px < s.x + bw && py >= s.y && py < s.y + bh
+            && Self::surface_input_hit(s, px - s.x, py - s.y)
+          {
+            return None;
+          }
+        }
+      }
+      if maxed || full {
+        continue;
+      }
+      let focused = self.focused_client_fd == fd && self.focused_surface_id == sid;
+      if !ssd && !(focused && self.wm_focus_outline) {
+        continue; // no frame of ours is drawn around this window
+      }
       let inner_l = ox;
       let inner_r = ox + w;
       let inner_t = oy - top_extra;
@@ -5716,10 +6275,6 @@ impl Server {
       let outer_t = inner_t - BORDER;
       let outer_b = inner_b + BORDER;
       if px < outer_l || px >= outer_r || py < outer_t || py >= outer_b {
-        continue;
-      }
-      // Strictly inside the window (buffer + SSD titlebar) → client / SSD hit.
-      if px >= inner_l && px < inner_r && py >= inner_t && py < inner_b {
         continue;
       }
       let mut edges = 0u32;
@@ -6242,6 +6797,316 @@ impl Server {
     if opcode == 0 {
       client.objects.remove(&id);
     }
+  }
+
+  // ── xx-session-management-v1 ─────────────────────────────────────────────
+
+  /// wl_surface id of an xdg_toplevel object.
+  fn toplevel_surface_in(client: &Client, toplevel_id: u32) -> Option<u32> {
+    let xdg = match client.objects.get(&toplevel_id) {
+      Some(Object { role: Role::XdgToplevel { xdg_surface_id, .. }, .. }) => *xdg_surface_id,
+      _ => return None,
+    };
+    match client.objects.get(&xdg) {
+      Some(Object { role: Role::XdgSurface { surface_id, .. }, .. }) => Some(*surface_id),
+      _ => None,
+    }
+  }
+
+  fn session_state_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+      .map(std::path::PathBuf::from)
+      .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")))?;
+    Some(base.join("luna-shell").join("xdg-sessions.tsv"))
+  }
+
+  fn load_sessions(&mut self) {
+    if self.xdg_sessions_path.is_some() {
+      return;
+    }
+    self.xdg_sessions_path = Self::session_state_path();
+    let Some(path) = &self.xdg_sessions_path else { return };
+    let Ok(text) = std::fs::read_to_string(path) else { return };
+    for line in text.lines() {
+      let f: Vec<&str> = line.split('\t').collect();
+      if f.len() == 1 && !f[0].is_empty() {
+        self.xdg_sessions.entry(f[0].to_string()).or_default();
+        continue;
+      }
+      if f.len() != 6 {
+        continue;
+      }
+      let n: Vec<i32> = f[2..].iter().filter_map(|v| v.parse().ok()).collect();
+      if n.len() == 4 {
+        self.xdg_sessions.entry(f[0].to_string()).or_default().insert(f[1].to_string(), (n[0], n[1], n[2], n[3]));
+      }
+    }
+  }
+
+  fn save_sessions(&self) {
+    let Some(path) = &self.xdg_sessions_path else { return };
+    let mut out = String::new();
+    for (sid, wins) in &self.xdg_sessions {
+      out.push_str(&format!("{}\n", sid));
+      for (name, (x, y, w, h)) in wins {
+        out.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\n", sid, name.replace(['\t', '\n'], " "), x, y, w, h));
+      }
+    }
+    if let Some(dir) = path.parent() {
+      let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, out).is_ok() {
+      let _ = std::fs::rename(&tmp, path);
+    }
+  }
+
+  /// Current visible geometry of every window this client keeps in a session.
+  fn session_records_in(client: &Client) -> Vec<(String, String, (i32, i32, i32, i32))> {
+    let mut out = Vec::new();
+    for o in client.objects.values() {
+      let Role::ToplevelSession { session_id, toplevel_id, name, .. } = &o.role else { continue };
+      let Some(Object { role: Role::XdgToplevel { maximized, fullscreen, saved_geom, .. }, .. }) =
+        client.objects.get(toplevel_id)
+      else {
+        continue;
+      };
+      let Some(sid) = Self::toplevel_surface_in(client, *toplevel_id) else { continue };
+      let geom = if *maximized || *fullscreen {
+        // Remember the normal geometry, not the maximized one.
+        *saved_geom
+      } else {
+        Self::surface_geometry_in(client, sid)
+      };
+      let mapped = matches!(client.objects.get(&sid), Some(Object { role: Role::Surface(s), .. }) if s.mapped)
+        || Self::surface_tree_has_content(client, sid);
+      if let (Some(g), true) = (geom, mapped) {
+        out.push((session_id.clone(), name.clone(), g));
+      }
+    }
+    out
+  }
+
+  fn merge_session_records(&mut self, recs: Vec<(String, String, (i32, i32, i32, i32))>) {
+    let mut changed = false;
+    for (sid, name, g) in recs {
+      let slot = self.xdg_sessions.entry(sid).or_default();
+      if slot.get(&name) != Some(&g) {
+        slot.insert(name, g);
+        changed = true;
+      }
+    }
+    if changed {
+      self.save_sessions();
+    }
+  }
+
+  /// Throttled: positions change under the compositor's own move/resize, so
+  /// the clients never report them.
+  fn snapshot_sessions(&mut self, force: bool) {
+    if !force && self.session_snap_at.elapsed() < std::time::Duration::from_secs(2) {
+      return;
+    }
+    self.session_snap_at = std::time::Instant::now();
+    let recs: Vec<_> = self.clients.values().filter(|c| c.has_session).flat_map(|c| Self::session_records_in(c)).collect();
+    if !recs.is_empty() {
+      self.merge_session_records(recs);
+    }
+  }
+
+  fn new_session_id() -> String {
+    let mut b = [0u8; 12];
+    let ok = unsafe { libc::getrandom(b.as_mut_ptr().cast(), b.len(), 0) } == b.len() as isize;
+    if !ok {
+      let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+      b.copy_from_slice(&t.to_ne_bytes()[..12]);
+    }
+    b.iter().map(|v| format!("{:02x}", v)).collect()
+  }
+
+  fn req_session_manager(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
+    match opcode {
+      0 => {
+        client.objects.remove(&id);
+      }
+      1 => {
+        let new_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
+        let requested = args.get(2).and_then(|a| a.as_str()).filter(|s| !s.is_empty()).map(str::to_string);
+        if new_id == 0 {
+          return;
+        }
+        let xdg = matches!(client.objects.get(&id), Some(Object { role: Role::SessionManager { xdg: true }, .. }));
+        if xdg && !matches!(args.get(1).map(|a| a.as_uint()), Some(1..=3)) {
+          client.post_error(id, 3, "invalid session reason");
+          return;
+        }
+        self.load_sessions();
+        let known = requested.filter(|s| self.xdg_sessions.contains_key(s));
+        let in_use = known.as_ref().is_some_and(|s| {
+          client.objects.values().any(|o| matches!(&o.role, Role::Session { id, .. } if id == s))
+        });
+        if in_use {
+          client.post_error(id, 1, "session is already in use by this client");
+          return;
+        }
+        // A session still open in another client is taken over by this one.
+        if let Some(s) = &known {
+          for c in self.clients.values_mut() {
+            let olds: Vec<u32> = c
+              .objects
+              .iter()
+              .filter_map(|(oid, o)| matches!(&o.role, Role::Session { id, .. } if id == s).then_some(*oid))
+              .collect();
+            for (sid, name, g) in Self::session_records_in(c) {
+              self.xdg_sessions.entry(sid).or_default().insert(name, g);
+            }
+            for oid in olds {
+              c.send(oid, 2, &[]);
+              if let Some(o) = c.objects.get_mut(&oid) { o.role = Role::Inert; }
+            }
+            for o in c.objects.values_mut() {
+              if matches!(&o.role, Role::ToplevelSession { session_id, .. } if session_id == s) {
+                o.role = Role::Inert;
+              }
+            }
+          }
+        }
+        let sid = known.clone().unwrap_or_else(Self::new_session_id);
+        client.has_session = true;
+        let iface = if xdg { &protocol::XDG_SESSION_V1 } else { &protocol::XX_SESSION_V1 };
+        client.objects.insert(new_id, Object::new(iface, 1, Role::Session { id: sid.clone(), xdg }));
+        if known.is_some() {
+          client.send(new_id, 1, &[]);
+        } else {
+          self.xdg_sessions.entry(sid.clone()).or_default();
+          client.send(new_id, 0, &[Arg::Str(Some(sid))]);
+        }
+        self.save_sessions();
+      }
+      _ => {}
+    }
+  }
+
+  fn req_session(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
+    let Some(Object { role: Role::Session { id: session_id, xdg }, .. }) = client.objects.get(&id) else { return };
+    let (session_id, xdg) = (session_id.clone(), *xdg);
+    match opcode {
+      0 => {
+        // Keep the stored state; the toplevel session objects go inert.
+        let recs = Self::session_records_in(client);
+        self.merge_session_records(recs);
+        client.objects.remove(&id);
+        Self::retire_session_handles(client, &session_id, None);
+      }
+      1 => {
+        self.xdg_sessions.remove(&session_id);
+        self.save_sessions();
+        client.objects.remove(&id);
+        Self::retire_session_handles(client, &session_id, None);
+      }
+      2 | 3 => {
+        let new_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
+        let toplevel_id = args.get(1).map(|a| a.as_object()).unwrap_or(0);
+        let name = args.get(2).and_then(|a| a.as_str()).unwrap_or("").to_string();
+        if new_id == 0 || !matches!(client.objects.get(&toplevel_id), Some(Object { role: Role::XdgToplevel { .. }, .. })) {
+          return;
+        }
+        if client.objects.values().any(|o| matches!(&o.role,
+          Role::ToplevelSession { toplevel_id: tid, .. } if *tid == toplevel_id)) {
+          client.post_error(id, if xdg { 4 } else { 2 }, "toplevel already added");
+          return;
+        }
+        if client.objects.values().any(|o| matches!(&o.role,
+          Role::ToplevelSession { session_id: s, name: n, .. } if *s == session_id && *n == name))
+          || (opcode == 2 && self.xdg_sessions.get(&session_id).is_some_and(|w| w.contains_key(&name))) {
+          // name_in_use: 2 (xx) / 1 (xdg)
+          client.post_error(id, if xdg { 1 } else { 2 }, "toplevel name already in use");
+          return;
+        }
+        let saved = (opcode == 3).then(|| self.xdg_sessions.get(&session_id).and_then(|w| w.get(&name)).copied()).flatten();
+        if opcode == 3 {
+          let mapped = Self::toplevel_surface_in(client, toplevel_id).is_some_and(|sid| {
+            matches!(client.objects.get(&sid), Some(Object { role: Role::Surface(s), .. }) if s.mapped)
+              || (xdg && matches!(client.objects.get(&sid).and_then(|o| match &o.role {
+                Role::Surface(s) => s.xdg_surface_id.and_then(|x| client.objects.get(&x)), _ => None,
+              }), Some(Object { role: Role::XdgSurface { configured: true, .. }, .. })))
+          });
+          if mapped {
+            // already_mapped: 3 (xx) / 2 (xdg)
+            client.post_error(id, if xdg { 2 } else { 3 }, "restore_toplevel after the surface was mapped");
+            return;
+          }
+        }
+        let iface = if xdg { &protocol::XDG_TOPLEVEL_SESSION_V1 } else { &protocol::XX_TOPLEVEL_SESSION_V1 };
+        client.objects.insert(
+          new_id,
+          Object::new(
+            iface,
+            1,
+            Role::ToplevelSession { session_id: session_id.clone(), toplevel_id, name, restore: saved.map(|g| (g.0, g.1)), xdg },
+          ),
+        );
+        if let Some(g) = saved {
+          client.restore_pos.insert(toplevel_id, g);
+        }
+
+      }
+      4 if xdg => {
+        // remove_toplevel(name): forget that window's saved state.
+        let name = args.get(0).and_then(|a| a.as_str()).unwrap_or("").to_string();
+        if let Some(w) = self.xdg_sessions.get_mut(&session_id) {
+          w.remove(&name);
+        }
+        self.save_sessions();
+        Self::retire_session_handles(client, &session_id, Some(&name));
+      }
+      _ => {}
+    }
+  }
+
+  fn retire_session_handles(client: &mut Client, session: &str, name: Option<&str>) {
+    for o in client.objects.values_mut() {
+      if matches!(&o.role, Role::ToplevelSession { session_id, name: n, .. }
+        if session_id == session && name.is_none_or(|name| name == n)) {
+        o.role = Role::Inert;
+      }
+    }
+  }
+
+  fn req_toplevel_session(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
+    self.merge_session_records(Self::session_records_in(client));
+    let xdg = matches!(client.objects.get(&id), Some(Object { role: Role::ToplevelSession { xdg: true, .. }, .. }));
+    if xdg && opcode == 1 {
+      // rename(name): the saved state follows the window to its new name.
+      let new_name = args.get(0).and_then(|a| a.as_str()).unwrap_or("").to_string();
+      if let Some(Object { role: Role::ToplevelSession { session_id, name, .. }, .. }) = client.objects.get(&id) {
+        if new_name != *name && (self.xdg_sessions.get(session_id).is_some_and(|w| w.contains_key(&new_name))
+          || client.objects.values().any(|o| matches!(&o.role,
+            Role::ToplevelSession { session_id: s, name: n, .. } if s == session_id && n == &new_name))) {
+          client.post_error(id, 1, "toplevel name already in use");
+          return;
+        }
+      }
+      if let Some(Object { role: Role::ToplevelSession { session_id, name, .. }, .. }) = client.objects.get_mut(&id) {
+        if let Some(w) = self.xdg_sessions.get_mut(session_id.as_str()) {
+          if let Some(g) = w.remove(name.as_str()) {
+            w.insert(new_name.clone(), g);
+          }
+        }
+        *name = new_name;
+      }
+      self.save_sessions();
+      return;
+    }
+    if !xdg && opcode == 1 {
+      if let Some(Object { role: Role::ToplevelSession { session_id, name, .. }, .. }) = client.objects.get(&id) {
+        if let Some(w) = self.xdg_sessions.get_mut(session_id) {
+          w.remove(name);
+        }
+        self.save_sessions();
+      }
+    }
+    client.objects.remove(&id);
   }
 
   fn req_virtual_keyboard_manager(&mut self, client: &mut Client, id: u32, opcode: u16, args: &[Arg]) {
@@ -6775,17 +7640,7 @@ impl Server {
             let (_, _, uw, uh) = self.usable_area();
             client.send(nid, 2, &[Arg::Int(uw), Arg::Int(uh)]); // configure_bounds
           }
-          // width/height 0 = client picks its own size (xdg-shell).  Forcing a
-          // usable-area fraction made every newly mapped app the wrong size.
-          let states: Vec<u8> = Vec::new();
-          client.send(
-            nid,
-            0, // xdg_toplevel.configure(width, height, states)
-            &[Arg::Int(0), Arg::Int(0), Arg::Array(states)],
-          );
-          let serial = self.next_serial();
-          client.send(id, 0, &[Arg::Uint(serial)]);
-          client.conn.flush();
+
         }
       }
       2 => {
@@ -6815,39 +7670,14 @@ impl Server {
 
         let (bw, bh) = self.backend.size();
 
-        // On-screen top-left of the parent surface. A popup parent is already
-        // stored in absolute coordinates; a toplevel parent is centered.
-        let (parent_screen_x, parent_screen_y) = if parent_xdg_id != 0 {
-          let parent_surf_id = match client.objects.get(&parent_xdg_id) {
-            Some(Object {
-              role: Role::XdgSurface { surface_id, .. },
-              ..
-            }) => *surface_id,
-            _ => 0,
-          };
-          if parent_surf_id != 0 {
-            match client.objects.get(&parent_surf_id) {
-              Some(Object {
-                role: Role::Surface(s),
-                ..
-              }) => {
-                if s.popup {
-                  (s.x, s.y)
-                } else if let Some(buf) = &s.current_buffer {
-                  let _ = buf;
-                  (s.x, s.y)
-                } else {
-                  (s.x, s.y)
-                }
-              }
-              _ => (0, 0),
-            }
-          } else {
-            (0, 0)
-          }
-        } else {
-          (0, 0)
+        // Positioner coordinates are relative to the parent's window
+        // geometry, excluding its CSD shadow padding.
+        let parent_surf_id = match client.objects.get(&parent_xdg_id) {
+          Some(Object { role: Role::XdgSurface { surface_id, .. }, .. }) => *surface_id,
+          _ => 0,
         };
+        let (parent_screen_x, parent_screen_y, _, _) =
+          Self::surface_geometry_in(client, parent_surf_id).unwrap_or((0, 0, 0, 0));
 
         let (rel_x, rel_y) = popup_rel_position(
           a_x, a_y, a_w, a_h, off_x, off_y, pop_w, pop_h,
@@ -6859,7 +7689,8 @@ impl Server {
         let abs_y = parent_screen_y + rel_y;
 
         if nid != 0 {
-          client.objects.insert(nid, Object::new(&protocol::XDG_POPUP, 5, Role::XdgPopup { xdg_surface_id: id }));
+          let version = client.objects.get(&id).map(|o| o.version).unwrap_or(1);
+          client.objects.insert(nid, Object::new(&protocol::XDG_POPUP, version, Role::XdgPopup { xdg_surface_id: id, parent_xdg_id }));
 
           let surf_id = match client.objects.get(&id) {
             Some(Object {
@@ -6929,6 +7760,11 @@ impl Server {
     match opcode {
       0 => {
         // destroy — drop stack entry for the underlying surface
+        if client.has_session {
+          // Last chance to keep where this window was for the next run.
+          let recs = Self::session_records_in(client);
+          self.merge_session_records(recs);
+        }
         let surface_id = client.objects.get(&id).and_then(|obj| match &obj.role {
           Role::XdgToplevel { xdg_surface_id, .. } => client.objects.get(xdg_surface_id).and_then(|o| match &o.role {
             Role::XdgSurface { surface_id, .. } => Some(*surface_id),
@@ -6992,6 +7828,7 @@ impl Server {
           if *t != title {
             *t = title;
             self.shell_state_dirty = true;
+            self.dirty = true;
           }
         }
       }
@@ -7041,10 +7878,18 @@ impl Server {
         // down here because left-button release is deferred until after this
         // drain; once the button is up the serial is cleared so a client that
         // never saw the release cannot restart the move.
+        if std::env::var_os("LUNA_TEST_INPUT").is_some() {
+          eprintln!("[luna-test] xdg_toplevel.move serial={} last_serial={} pressed={} grab={:?}", serial, self.last_button_serial, self.last_button_pressed, self.pointer_grab.map(|g| (g.0, g.1)));
+        }
         if serial == 0 || serial != self.last_button_serial || !self.last_button_pressed {
           return;
         }
         let Some(surface_id) = self.toplevel_surface_id(client, id) else { return };
+        if !self.pointer_grab.is_some_and(|(fd, sid, ..)|
+          fd == client.conn.fd && Self::toplevel_root_of(client, sid) == Some(surface_id))
+        {
+          return;
+        }
         let (orig_x, orig_y) = match client.objects.get(&surface_id) {
           Some(Object { role: Role::Surface(s), .. }) => (s.x, s.y),
           _ => return,
@@ -7076,20 +7921,21 @@ impl Server {
         // resize(seat, serial, edges)
         let serial = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
         let edges = args.get(2).map(|a| a.as_uint()).unwrap_or(0);
-        if serial == 0 || serial != self.last_button_serial || !self.last_button_pressed || edges == 0 {
+        if serial == 0 || serial != self.last_button_serial || !self.last_button_pressed
+          || !matches!(edges, 1 | 2 | 4 | 5 | 6 | 8 | 9 | 10)
+        {
           return;
         }
         let Some(surface_id) = self.toplevel_surface_id(client, id) else { return };
-        let (bw, bh) = self.backend.size();
-        let (orig_x, orig_y, orig_w, orig_h) = match client.objects.get(&surface_id) {
-          Some(Object { role: Role::Surface(s), .. }) => {
-            let (w, h) = s.current_buffer.as_ref().map(|b| (b.width, b.height)).unwrap_or((0, 0));
-            if w <= 0 || h <= 0 {
-              return;
-            }
-            let _ = (bw, bh);
-            (s.x, s.y, w, h)
-          }
+        if !self.pointer_grab.is_some_and(|(fd, sid, ..)|
+          fd == client.conn.fd && Self::toplevel_root_of(client, sid) == Some(surface_id))
+        {
+          return;
+        }
+        // Configure sizes exclude the client's shadow padding.
+        let Some((_, _, orig_w, orig_h)) = Self::surface_geometry_in(client, surface_id) else { return };
+        let (orig_x, orig_y) = match client.objects.get(&surface_id) {
+          Some(Object { role: Role::Surface(s), .. }) => (s.x, s.y),
           _ => return,
         };
         let fd = client.conn.fd;
@@ -7319,10 +8165,9 @@ impl Server {
             *minimized = true;
           }
           if self.focused_client_fd == fd && self.focused_surface_id == sid {
-            self.focused_client_fd = -1;
-            self.focused_surface_id = 0;
-            self.ptr_entered = false;
-            self.kbd_entered = false;
+            // Use the same keyboard-leave/refocus path as shell shortcuts,
+            // after dispatch has put this client back into self.clients.
+            self.pending_minimize = Some((fd, sid));
           }
           self.dirty = true;
           self.shell_state_dirty = true;
@@ -7434,7 +8279,7 @@ impl Server {
     match opcode {
       0 => {
         if let Some(Object {
-          role: Role::XdgPopup { xdg_surface_id },
+            role: Role::XdgPopup { xdg_surface_id, .. },
           ..
         }) = client.objects.get(&id)
         {
@@ -7469,7 +8314,7 @@ impl Server {
         let serial = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
         if serial != 0 && serial == self.last_button_serial {
           let surface_id = client.objects.get(&id).and_then(|obj| match obj.role {
-            Role::XdgPopup { xdg_surface_id } => client.objects.get(&xdg_surface_id).and_then(|o| match o.role {
+            Role::XdgPopup { xdg_surface_id, .. } => client.objects.get(&xdg_surface_id).and_then(|o| match o.role {
               Role::XdgSurface { surface_id, .. } => Some(surface_id),
               _ => None,
             }),
@@ -7480,7 +8325,43 @@ impl Server {
           }
         }
       }
-      2 => {}
+      2 => { // reposition(positioner, token), xdg_popup v3
+        let (xdg, parent) = match client.objects.get(&id) {
+          Some(Object { role: Role::XdgPopup { xdg_surface_id, parent_xdg_id }, .. }) => (*xdg_surface_id, *parent_xdg_id),
+          _ => return,
+        };
+        let pos_id = args.get(0).map(|a| a.as_object()).unwrap_or(0);
+        let token = args.get(1).map(|a| a.as_uint()).unwrap_or(0);
+        let (ax, ay, aw, ah, ox, oy, pw, ph, anchor, gravity, constraint) = match client.objects.get(&pos_id) {
+          Some(Object { role: Role::Positioner { size_w, size_h, anchor_x, anchor_y, anchor_w, anchor_h,
+            offset_x, offset_y, anchor, gravity, constraint_adjustment }, .. }) =>
+            (*anchor_x, *anchor_y, *anchor_w, *anchor_h, *offset_x, *offset_y,
+             *size_w, *size_h, *anchor, *gravity, *constraint_adjustment),
+          _ => return,
+        };
+        if pw <= 0 || ph <= 0 { client.post_error(id, 0, "invalid positioner size"); return; }
+        let parent_sid = match client.objects.get(&parent) {
+          Some(Object { role: Role::XdgSurface { surface_id, .. }, .. }) => *surface_id,
+          _ => return,
+        };
+        let (px, py, _, _) = Self::surface_geometry_in(client, parent_sid).unwrap_or((0,0,0,0));
+        let (bw, bh) = self.backend.size();
+        let (rx, ry) = popup_rel_position(ax,ay,aw,ah,ox,oy,pw,ph,anchor,gravity,constraint,px,py,bw as i32,bh as i32);
+        let sid = match client.objects.get(&xdg) {
+          Some(Object { role: Role::XdgSurface { surface_id, .. }, .. }) => *surface_id,
+          _ => return,
+        };
+        if let Some(Object { role: Role::Surface(s), .. }) = client.objects.get_mut(&sid) {
+          let (gx, gy, _, _) = s.window_geom.unwrap_or((0,0,pw,ph));
+          s.x = px + rx - gx;
+          s.y = py + ry - gy;
+        }
+        client.send(id, 2, &[Arg::Uint(token)]);
+        client.send(id, 0, &[Arg::Int(rx),Arg::Int(ry),Arg::Int(pw),Arg::Int(ph)]);
+        let serial = self.next_serial();
+        client.send(xdg, 0, &[Arg::Uint(serial)]);
+        self.dirty = true;
+      }
       _ => {}
     }
   }
@@ -7513,13 +8394,13 @@ impl Server {
           }
         }
       }
-      2 => { // subtract — drop exact matching rects; good enough for empty/add clients
+      2 => { // subtract a rectangle, preserving the remaining input area
         let x = args.get(0).map(|a| a.as_int()).unwrap_or(0);
         let y = args.get(1).map(|a| a.as_int()).unwrap_or(0);
         let w = args.get(2).map(|a| a.as_int()).unwrap_or(0);
         let h = args.get(3).map(|a| a.as_int()).unwrap_or(0);
         if let Some(Object { role: Role::Region { rects }, .. }) = client.objects.get_mut(&id) {
-          rects.retain(|&r| r != (x, y, w, h));
+          subtract_region(rects, Rect::new(x, y, x.saturating_add(w.max(0)), y.saturating_add(h.max(0))));
         }
       }
       _ => {}
@@ -8054,6 +8935,7 @@ impl Server {
       format: internal.unwrap(),
       modifier,
       content_serial: std::rc::Rc::new(std::cell::Cell::new(0)),
+      surface_gpu: None,
     })
   }
 
@@ -8298,14 +9180,9 @@ impl Server {
   /// Repaint only the cursor over the last composited scene.  Returns false
   /// when the previous frame cannot be reused and a full composite is needed.
   fn repaint_cursor_only(&mut self) -> bool {
-    if self.input_rx.is_none() {
-      return false;
-    }
     if !self.last_present_software {
-      // GPU path: re-submit the retained plane list.  If that fails, leave
-      // cursor_dirty set and retry after the next full frame — forcing
-      // dirty=true here turned every animated cursor tick (~100 ms) into a
-      // whole-desktop rebuild whenever the retained list was momentarily empty.
+      // GPU path: re-submit the retained scene. If it is no longer usable,
+      // the caller rebuilds once so the requested glyph is still presented.
       return self.repaint_cursor_gpu();
     }
     let (w, h) = self.backend.size();
@@ -8348,7 +9225,7 @@ impl Server {
           _ => None,
         });
       match cursor {
-        Some(buf) if buf.dmabuf_fd().is_some() || buf.stride == buf.width * 4 => {
+        Some(buf) if buf.dmabuf_fd().is_some() || (buf.stride % 4 == 0 && buf.stride >= buf.width * 4) => {
           extra_surface = Some((px - self.cursor_hot_x, py - self.cursor_hot_y, buf));
         }
         _ => {
@@ -8379,7 +9256,58 @@ impl Server {
     }
   }
 
+  /// Diagnostic: one log line per toplevel with every number that decides
+  /// where and how large it is drawn (`dump_windows` on the shell socket).
+  fn dump_windows(&self) {
+    let (bw, bh) = self.backend.size();
+    let (ux, uy, uw, uh) = self.usable_area();
+    eprintln!("[luna-dump] output={}x{} usable=({},{} {}x{}) stack={}", bw, bh, ux, uy, uw, uh, self.window_stack.len());
+    for &(fd, sid) in &self.window_stack {
+      let Some(client) = self.clients.get(&fd) else { continue };
+      let Some(Object { role: Role::Surface(s), .. }) = client.objects.get(&sid) else { continue };
+      let (xdg, tl) = match s.xdg_surface_id {
+        Some(x) => (
+          x,
+          client.objects.values().find_map(|o| match &o.role {
+            Role::XdgToplevel { xdg_surface_id, title, app_id, maximized, fullscreen, tiled, decoration_mode, min_w, min_h, max_w, max_h, .. }
+              if *xdg_surface_id == x =>
+            {
+              Some(format!(
+                "title={:?} app_id={:?} max={} full={} tiled={} deco={} min={}x{} max={}x{}",
+                title, app_id, maximized, fullscreen, tiled, decoration_mode, min_w, min_h, max_w, max_h
+              ))
+            }
+            _ => None,
+          }),
+        ),
+        None => (0, None),
+      };
+      let buf = s.current_buffer.as_ref().map(|b| (b.width, b.height));
+      eprintln!(
+        "[luna-dump] fd={} surf={} xdg={} origin=({},{}) window_geom={:?} buffer={:?} tree={:?} visible={:?} mapped={} {}",
+        fd, sid, xdg, s.x, s.y, s.window_geom, buf, Self::surface_tree_size(client, sid),
+        Self::surface_geometry_in(client, sid), s.mapped, tl.unwrap_or_default()
+      );
+    }
+  }
+
+  /// Compose the current scene on the CPU and write it as PNG.  Works on any
+  /// backend, including DRI with GPU composition, and while this VT is not the
+  /// active one (the display is then left untouched).
+  fn capture_screenshot(&mut self, path: &str) {
+    self.capturing = true;
+    self.composite_and_present();
+    self.capturing = false;
+    self.fb_valid = false;
+    self.dirty = true;
+    match write_png_rgb(path, self.fb.width, self.fb.height, &self.fb.pixels) {
+      Ok(()) => eprintln!("[luna-compositor] screenshot: {}", path),
+      Err(e) => eprintln!("[luna-compositor] screenshot {} failed: {}", path, e),
+    }
+  }
+
   fn composite_and_present(&mut self) {
+    self.xwl_sync();
     // `LUNA_FRAME_TRACE=1` prints one line per composited frame: how long the
     // frame took and how much of the screen it had to redraw.  A drag that
     // still reports `full` on every frame is doing whole-desktop work and will
@@ -8403,6 +9331,20 @@ impl Server {
     let mut layers = std::mem::take(&mut self.compose_layers);
     let mut toplevels = std::mem::take(&mut self.compose_toplevels);
     let mut popups = std::mem::take(&mut self.compose_popups);
+    // A drag-and-drop icon supplied by the source client rides on the pointer,
+    // above everything except the cursor.
+    let drag_icon: Option<(RawFd, u32, i32, i32)> = self.drag.and_then(|d| {
+      if d.icon_id == 0 {
+        return None;
+      }
+      let client = self.clients.get(&d.source_fd)?;
+      let Object { role: Role::Surface(s), .. } = client.objects.get(&d.icon_id)? else { return None };
+      if !s.mapped || s.current_buffer.is_none() {
+        return None;
+      }
+      let (px, py) = self.screen_ptr();
+      Some((d.source_fd, d.icon_id, px + s.off.0, py + s.off.1))
+    });
     let mut subs = std::mem::take(&mut self.compose_subsurfaces);
     let mut layer_index = std::mem::take(&mut self.compose_layer_index);
     let mut toplevel_index = std::mem::take(&mut self.compose_toplevel_index);
@@ -8534,7 +9476,7 @@ impl Server {
     // A single opaque, screen-sized dma-buf can become the KMS framebuffer
     // itself. With no input channel there is no software cursor to compose,
     // so this path performs no CPU pixel reads or copies at all.
-    let direct_buffer = if self.input_rx.is_none()
+    let direct_buffer = if self.input_rx.is_none() && !self.capturing
       && layers.iter().all(Vec::is_empty)
       && popups.is_empty()
       && toplevels.len() == 1
@@ -8573,7 +9515,8 @@ impl Server {
     // visible buffer handle for a present_dmabufs call that always fails.
     let mut gpu_surfaces = std::mem::take(&mut self.compose_gpu_surfaces);
     gpu_surfaces.clear();
-    let mut gpu_allowed = self.backend.can_gpu_compose();
+    let gpu_allowed = self.backend.can_gpu_compose() && !self.capturing;
+    self.chrome_epoch = self.chrome_epoch.wrapping_add(1);
     let mut gpu_cursor_surface = None;
     let mut gpu_cursor_bitmap = None;
     let mut gpu_cursor_pos = (0, 0, 0, 0);
@@ -8584,17 +9527,34 @@ impl Server {
         }
       }
       for (fd, sid, x, y) in &toplevels {
-        // Server-side titlebars are CPU-drawn into `self.fb`.  Mixing them with
-        // a pure dmabuf scanout would hide the chrome, so fall back to the
-        // software compositor for the whole frame when any SSD window is up.
-        let ssd = Self::uses_ssd(flags_of(&self.clients, *fd, *sid).decoration_mode);
-        if ssd { gpu_allowed = false; }
         if let Some(c) = self.clients.get(fd) { Self::collect_gpu_surface_tree(c, &subs, *fd, *sid, *x, *y, 0, &mut gpu_surfaces); }
+        // Server-side chrome rides along as cached GPU planes just above its
+        // window, so SSD no longer drops the frame to CPU composition.
+        let windowed = self.clients.get(fd).map(|c| Self::surface_is_windowed_layer_in(c, *sid)).unwrap_or(false);
+        if !windowed {
+          let tl = flags_of(&self.clients, *fd, *sid);
+          let ssd = Self::uses_ssd(tl.decoration_mode);
+          let focused = self.focused_client_fd == *fd && self.focused_surface_id == *sid;
+          if ssd || (focused && self.wm_focus_outline) {
+            let geom = self.surface_geometry(*fd, *sid).unwrap_or_else(|| {
+              let (tw, th) = self.clients.get(fd).and_then(|c| Self::surface_tree_size(c, *sid)).unwrap_or((640, 480));
+              (*x, *y, tw, th)
+            });
+            let mut chrome = std::mem::take(&mut self.compose_chrome);
+            chrome.clear();
+            self.push_gpu_chrome((*fd, *sid), geom, ssd, focused, tl.maximized || tl.fullscreen, &mut chrome);
+            gpu_surfaces.extend(chrome.drain(..));
+            self.compose_chrome = chrome;
+          }
+        }
       }
       for group in [&layers[2], &popups, &layers[3]] {
         for (fd, sid, x, y) in group {
           if let Some(c) = self.clients.get(fd) { Self::collect_gpu_surface_tree(c, &subs, *fd, *sid, *x, *y, 0, &mut gpu_surfaces); }
         }
+      }
+      if let Some((ifd, isid, ix, iy)) = drag_icon {
+        if let Some(c) = self.clients.get(&ifd) { Self::collect_gpu_surface_tree(c, &subs, ifd, isid, ix, iy, 0, &mut gpu_surfaces); }
       }
       if self.input_rx.is_some() {
         let px = (self.ptr_x * w as f32) as i32;
@@ -8610,7 +9570,7 @@ impl Server {
             .flatten()
             .and_then(|c| c.objects.get(&self.cursor_surface_id))
             .and_then(|o| match &o.role { Role::Surface(s) => s.current_buffer.as_ref(), _ => None })
-            .map(|buf| buf.dmabuf_fd().is_some() || buf.stride == buf.width * 4)
+            .map(|buf| buf.dmabuf_fd().is_some() || (buf.stride % 4 == 0 && buf.stride >= buf.width * 4))
             .unwrap_or(false);
           if cursor_compatible {
             gpu_cursor_surface = Some((
@@ -8629,6 +9589,10 @@ impl Server {
         }
       }
     }
+    if self.chrome_cache.len() > 48 {
+      let epoch = self.chrome_epoch;
+      self.chrome_cache.retain(|_, e| e.3 == epoch);
+    }
     let bitmap = gpu_cursor_bitmap.as_ref().map(|pixels| crate::render::GpuBitmap {
       x:gpu_cursor_pos.0,y:gpu_cursor_pos.1,width:gpu_cursor_pos.2,height:gpu_cursor_pos.3,pixels,
     });
@@ -8643,8 +9607,52 @@ impl Server {
           _ => None,
         })
     });
+    let gpu_try_at = (self.frame_trace && gpu_allowed && !direct_scanout && !gpu_surfaces.is_empty())
+      .then(std::time::Instant::now);
     let gpu_scanout = gpu_allowed && !direct_scanout && !gpu_surfaces.is_empty()
       && self.backend.present_dmabufs(&gpu_surfaces, extra_surface, bitmap);
+    if self.frame_trace {
+      // Which compositor path produced this frame, and why the GPU one was
+      // not used.  A session that keeps printing `sw` here is paying for CPU
+      // composition and dma-buf readback on every frame.
+      let path = if direct_scanout {
+        "direct"
+      } else if gpu_scanout {
+        "gpu"
+      } else if !self.backend.can_gpu_compose() {
+        "sw(no-gpu-composer)"
+      } else if !gpu_allowed {
+        "sw(no-gpu)"
+      } else if gpu_surfaces.is_empty() {
+        "sw(no-planes)"
+      } else {
+        "sw(gpu-render-failed)"
+      };
+      if std::env::var_os("LUNA_FRAME_TRACE_PLANES").is_some() {
+        for (x, y, b) in &gpu_surfaces {
+          eprintln!(
+            "[luna-plane] {:>5},{:>5} {}x{} fmt={} dmabuf={} mod={:?} serial={} opaque_px={}",
+            x, y, b.width, b.height, b.format, b.dmabuf_fd().is_some(), b.dmabuf_modifier(), b.serial(),
+            {
+              // Count visible pixels, reading GPU-only buffers back as the
+              // software path would.
+              let mut tmp = Framebuffer::new(b.width as u32, b.height as u32);
+              tmp.clear(0);
+              self.backend.blit_buffer(&mut tmp, b, 0, 0);
+              tmp.pixels.iter().filter(|&&v| v >> 24 != 0).count()
+            }
+          );
+        }
+      }
+      eprintln!(
+        "[luna-frame] path={} planes={} gpu={:.2}ms commits={:?} cursor={}",
+        path,
+        gpu_surfaces.len(),
+        gpu_try_at.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
+        std::mem::take(&mut self.commit_trace),
+        self.cursor_dirty,
+      );
+    }
 
     if !direct_scanout && !gpu_scanout {
       // Anything under a screen-filling opaque window can never be seen.
@@ -8684,6 +9692,9 @@ impl Server {
       let mut sig: u64 = 0xcbf2_9ce4_8422_2325;
       sig = Self::sig_mix(sig, occluder.map(|i| i as u64 + 1).unwrap_or(0));
       sig = Self::sig_mix(sig, ((w as u64) << 32) | h as u64);
+      if let Some((_, _, ix, iy)) = drag_icon {
+        sig = Self::sig_mix(sig, 0x1c0d ^ ((ix as u32 as u64) << 32) ^ iy as u32 as u64);
+      }
       sig = Self::sig_mix(sig, self.wm_titlebar_style as u64);
       sig = Self::sig_mix(sig, self.wm_ssd_bar_h as u64);
       sig = Self::sig_mix(sig, self.wm_titlebar_controls_left as u64);
@@ -8754,7 +9765,7 @@ impl Server {
       }
 
       let full_rect = self.fb.full_rect();
-      let reuse = self.fb_valid && self.last_present_software && self.scene_sig == sig;
+      let reuse = !self.capturing && self.fb_valid && self.last_present_software && self.scene_sig == sig;
       self.scene_sig = sig;
 
       // A matching fingerprint with a different set of boxes means toplevels
@@ -8819,7 +9830,7 @@ impl Server {
           for group in [&layers[0], &layers[1]] {
             for (fd, sid, dx, dy) in group {
               if let Some(client) = self.clients.get(fd) {
-                Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, *sid, *dx, *dy, 0);
+                Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, &mut *self.backend, *sid, *dx, *dy, 0);
               }
             }
           }
@@ -8827,7 +9838,7 @@ impl Server {
 
         for (fd, sid, dx, dy) in &toplevels[occluder.unwrap_or(0)..] {
           if let Some(client) = self.clients.get(fd) {
-            Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, *sid, *dx, *dy, 0);
+            Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, &mut *self.backend, *sid, *dx, *dy, 0);
           }
           // Modeless shell dialogs already paint their own chrome and live at
           // layer-shell margins, not surface.x/y.  Framing them as xdg_toplevels
@@ -8855,7 +9866,8 @@ impl Server {
                 .unwrap_or((640, 480));
               (*dx, *dy, tw, th)
             });
-            self.draw_ssd_titlebar(fx, fy, fw, focused);
+            let title = self.toplevel_title(*fd, *sid);
+            self.draw_ssd_titlebar(fx, fy, fw, focused, &title);
             if !maxed_or_full {
               self.draw_window_frame(fx, fy, fw, fh, true, focused);
             }
@@ -8868,17 +9880,22 @@ impl Server {
         }
         for (fd, sid, dx, dy) in &layers[2] {
           if let Some(client) = self.clients.get(fd) {
-            Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, *sid, *dx, *dy, 0);
+            Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, &mut *self.backend, *sid, *dx, *dy, 0);
           }
         }
         for (fd, sid, dx, dy) in &popups {
           if let Some(client) = self.clients.get(fd) {
-            Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, *sid, *dx, *dy, 0);
+            Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, &mut *self.backend, *sid, *dx, *dy, 0);
           }
         }
         for (fd, sid, dx, dy) in &layers[3] {
           if let Some(client) = self.clients.get(fd) {
-            Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, *sid, *dx, *dy, 0);
+            Self::blit_surface_tree(client, &subs, *fd, &mut self.fb, &mut *self.backend, *sid, *dx, *dy, 0);
+          }
+        }
+        if let Some((ifd, isid, ix, iy)) = drag_icon {
+          if let Some(client) = self.clients.get(&ifd) {
+            Self::blit_surface_tree(client, &subs, ifd, &mut self.fb, &mut *self.backend, isid, ix, iy, 0);
           }
         }
 
@@ -8888,8 +9905,12 @@ impl Server {
         self.draw_software_cursor();
 
         let new_cursor = self.cursor_damage();
-        self.backend.present_damage(&self.fb, clip.union(&old_cursor).union(&new_cursor));
-        self.fb_valid = true;
+        // A capture frame is composed for the file only; an inactive VT does
+        // not own the display, so do not push it to scanout.
+        if !self.capturing || self.backend.is_active() {
+          self.backend.present_damage(&self.fb, clip.union(&old_cursor).union(&new_cursor));
+        }
+        self.fb_valid = !self.capturing;
       }
       if let Some(t0) = trace_at {
         eprintln!(
@@ -8930,6 +9951,7 @@ impl Server {
     // allocation instead of asking the allocator for a fresh one.
     gpu_surfaces.clear();
     self.compose_gpu_surfaces = gpu_surfaces;
+    self.snapshot_sessions(false);
     self.compose_layers = layers;
     self.compose_toplevels = toplevels;
     self.compose_popups = popups;
@@ -9053,6 +10075,15 @@ impl Server {
     // the matching press can land before we clear last_button_pressed.
     let mut deferred_left_release = false;
     while let Ok(ev) = rx.try_recv() {
+      if !matches!(ev, InputEvent::Reset | InputEvent::VtSwitch(_)) {
+        self.last_input = std::time::Instant::now();
+        if self.idle_active {
+          self.idle_active = false;
+          if let Some(ipc) = self.shell_ipc.as_ref() {
+            ipc.send_shell_action("idle_stop");
+          }
+        }
+      }
       match ev {
         InputEvent::PointerMotion { x, y } => {
           self.ptr_x = x.clamp(0.0, 1.0);
@@ -9533,6 +10564,16 @@ impl Server {
             }
           }
         }
+        // A CSD client's buffer carries a transparent shadow around the visible
+        // window (window_geometry).  That margin is not part of the window: a
+        // click there belongs to whatever lies underneath, so the hit area is
+        // exactly the geometry (plus the SSD titlebar above it).
+        if let Some((gx, gy, gw, gh)) = Self::surface_geometry_in(client, surf_id) {
+          let top = gy - if ssd { self.wm_ssd_bar_h } else { 0 };
+          if px < gx || px >= gx + gw || py < top || py >= gy + gh {
+            continue;
+          }
+        }
         // Prefer a child with a real input region (libdecor titlebar).  If
         // none, still hit by buffer pixels — Firefox/WebRender children often
         // advertise an empty input_region, and that must not punch a hole
@@ -9744,6 +10785,9 @@ impl Server {
     let (fx, fy) = self.to_surface_fixed(nx, ny, ox, oy);
     let ts = now_ms();
     let entered = self.ptr_entered && self.ptr_client_fd == fd && self.ptr_surface_id == surf_id;
+    if self.xwl_trace && !entered {
+      eprintln!("[luna-xwl] pointer enter fd={} surface={} at {},{} origin {},{}", fd, surf_id, fx >> 8, fy >> 8, ox, oy);
+    }
     if !entered {
       // Leave the previous surface (same or other client) before entering.
       self.send_pointer_leave();
@@ -10961,6 +12005,8 @@ fn role_for(iface: &str) -> Role {
     "zwp_text_input_manager_v3" => Role::TextInputManager,
     "zwp_input_method_manager_v2" => Role::InputMethodManager,
     "zwp_virtual_keyboard_manager_v1" => Role::VirtualKeyboardManager,
+    "xx_session_manager_v1" => Role::SessionManager { xdg: false },
+    "xdg_session_manager_v1" => Role::SessionManager { xdg: true },
     "xdg_wm_base" => Role::WmBase,
     "zwp_linux_dmabuf_v1" => Role::Dmabuf,
     "zwlr_layer_shell_v1" => Role::LayerShell,
@@ -11123,9 +12169,111 @@ fn create_signal_fd() -> std::io::Result<RawFd> {
   }
 }
 
+/// Subtract a hole from a region without dropping partially overlapped input.
+fn subtract_region(rects: &mut Vec<(i32, i32, i32, i32)>, hole: Rect) {
+  if hole.is_empty() { return; }
+  let mut remaining = Vec::with_capacity(rects.len());
+  for &(x, y, w, h) in rects.iter() {
+    let r = Rect::new(x, y, x.saturating_add(w), y.saturating_add(h));
+    let cut = r.intersect(&hole);
+    if cut.is_empty() { remaining.push((x,y,w,h)); continue; }
+    for part in [Rect::new(r.x0,r.y0,r.x1,cut.y0), Rect::new(r.x0,cut.y1,r.x1,r.y1),
+                 Rect::new(r.x0,cut.y0,cut.x0,cut.y1), Rect::new(cut.x1,cut.y0,r.x1,cut.y1)] {
+      if !part.is_empty() { remaining.push((part.x0,part.y0,part.x1-part.x0,part.y1-part.y0)); }
+    }
+  }
+  *rects = remaining;
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn region_subtraction_preserves_every_pixel_outside_the_hole() {
+    let mut rects = vec![(0, 0, 10, 10), (20, 20, 5, 5)];
+    subtract_region(&mut rects, Rect::new(2, 3, 7, 8));
+    for y in -1..27 {
+      for x in -1..27 {
+        let contains = rects.iter().any(|&(rx,ry,w,h)| x >= rx && x < rx+w && y >= ry && y < ry+h);
+        assert_eq!(contains, (x >= 0 && x < 10 && y >= 0 && y < 10
+          && !(x >= 2 && x < 7 && y >= 3 && y < 8)) || (x >= 20 && x < 25 && y >= 20 && y < 25));
+      }
+    }
+    subtract_region(&mut rects, Rect::new(-20,-20,100,100));
+    assert!(rects.is_empty());
+  }
+
+  struct TestBackend;
+  impl Backend for TestBackend {
+    fn size(&self) -> (u32, u32) { (1000, 1000) }
+    fn present(&mut self, _: &Framebuffer) {}
+  }
+
+  #[test]
+  fn window_grabs_respect_occlusion_geometry_and_clicks() {
+    std::env::set_var("XDG_RUNTIME_DIR", "/tmp");
+    let mut server = Server::new(&format!("luna-wm-test-{}", std::process::id()), Box::new(TestBackend)).unwrap();
+    let mut client = Client::new(-1);
+    for (sid, x, y, w, h) in [(10, 100, 100, 200, 200), (20, 200, 200, 300, 300)] {
+      let mut surface = crate::object::Surface::default();
+      surface.x = x;
+      surface.y = y;
+      surface.window_geom = Some((0, 0, w, h));
+      surface.xdg_surface_id = Some(sid + 1);
+      client.objects.insert(sid, Object::new(&protocol::WL_SURFACE, 4, Role::Surface(surface)));
+      client.objects.insert(sid + 1, Object::new(&protocol::XDG_SURFACE, 1, Role::XdgSurface { surface_id: sid, configured: true }));
+      server.req_xdg_surface(&mut client, sid + 1, 1, &[Arg::NewId(sid + 2)]);
+    }
+    server.clients.insert(-1, client);
+    server.window_stack = vec![(-1, 10), (-1, 20)];
+    assert_eq!(server.hit_resize_edge(302, 250), None);
+    // No frame of ours around a CSD window: nothing to grab outside it, so a
+    // neighbour's pixels (or the desktop) never turn into a resize.
+    assert_eq!(server.hit_resize_edge(98, 150), None);
+    assert_eq!(server.hit_resize_edge(502, 400), None);
+    // A server-decorated window gets exactly its 3 px frame.
+    if let Role::XdgToplevel { decoration_mode, .. } = &mut server.clients.get_mut(&-1).unwrap().objects.get_mut(&12).unwrap().role {
+      *decoration_mode = 2;
+    }
+    assert_eq!(server.hit_resize_edge(98, 150), Some((-1, 10, RESIZE_EDGE_LEFT)));
+    assert_eq!(server.hit_resize_edge(96, 150), None);
+    for flag in [0, 1] {
+      if let Role::XdgToplevel { maximized, fullscreen, .. } = &mut server.clients.get_mut(&-1).unwrap().objects.get_mut(&22).unwrap().role {
+        *maximized = flag == 0;
+        *fullscreen = flag == 1;
+      }
+      assert_eq!(server.hit_resize_edge(302, 250), None);
+    }
+
+    // A click on an SSD titlebar near the top edge must not maximize it.
+    server.ptr_x = 0.15;
+    server.ptr_y = 0.01;
+    server.wm_top_edge_maximize = true;
+    server.wm_grab = WmGrab::Move { fd: -1, surface_id: 10, grab_px: 150, grab_py: 10,
+      orig_x: 100, orig_y: 100, siblings: Vec::new() };
+    server.end_wm_grab();
+    assert!(matches!(server.clients[&-1].objects[&12].role, Role::XdgToplevel { maximized: false, .. }));
+
+    // Buffer-less roots with window geometry can initiate a client resize.
+    let mut client = server.clients.remove(&-1).unwrap();
+    server.pointer_grab = Some((-1, 10, 0, 100, 100));
+    server.last_button_serial = 42;
+    server.last_button_pressed = true;
+    server.req_xdg_toplevel(&mut client, 22, 6, &[Arg::Object(0), Arg::Uint(42), Arg::Uint(8)]);
+    assert!(matches!(server.wm_grab, WmGrab::None));
+    server.req_xdg_toplevel(&mut client, 12, 6, &[Arg::Object(0), Arg::Uint(42), Arg::Uint(3)]);
+    assert!(matches!(server.wm_grab, WmGrab::None));
+    server.req_xdg_toplevel(&mut client, 12, 6, &[Arg::Object(0), Arg::Uint(42), Arg::Uint(8)]);
+    assert!(matches!(server.wm_grab, WmGrab::Resize { orig_w: 200, orig_h: 200, .. }));
+    server.clients.insert(-1, client);
+    server.ptr_x = 0.152;
+    server.update_wm_grab();
+    assert_eq!(server.pending_resize_configure, Some((-1, 10, 202, 200)));
+    server.ptr_x = 0.15;
+    server.update_wm_grab();
+    assert_eq!(server.pending_resize_configure, Some((-1, 10, 200, 200)));
+  }
 
   fn r(x0: i32, y0: i32, x1: i32, y1: i32) -> Rect {
     Rect::new(x0, y0, x1, y1)
@@ -11337,4 +12485,70 @@ mod tests {
     // anchor top-left (0,0), gravity top-left → top-left = anchor - popup size.
     assert_eq!((rx, ry), (-100 + 5, -100 + 7));
   }
+}
+
+/// Minimal PNG writer (RGB8, stored deflate blocks): no dependencies, and fast
+/// enough for an on-demand screenshot.  `pixels` are 0xAARRGGBB.
+fn write_png_rgb(path: &str, w: u32, h: u32, pixels: &[u32]) -> std::io::Result<()> {
+  use std::io::Write;
+  fn crc32(data: &[u8], mut crc: u32) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let t = TABLE.get_or_init(|| {
+      let mut t = [0u32; 256];
+      for n in 0..256u32 {
+        let mut c = n;
+        for _ in 0..8 {
+          c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+        }
+        t[n as usize] = c;
+      }
+      t
+    });
+    for &b in data {
+      crc = t[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc
+  }
+  fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let c = !crc32(data, crc32(kind, 0xFFFF_FFFF));
+    out.extend_from_slice(&c.to_be_bytes());
+  }
+  if pixels.len() < (w as usize) * (h as usize) {
+    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "framebuffer smaller than its size"));
+  }
+  let mut raw = Vec::with_capacity((w as usize * 3 + 1) * h as usize);
+  for y in 0..h as usize {
+    raw.push(0);
+    for &p in &pixels[y * w as usize..(y + 1) * w as usize] {
+      raw.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+    }
+  }
+  let mut z = vec![0x78, 0x01];
+  let mut chunks = raw.chunks(65535).peekable();
+  while let Some(c) = chunks.next() {
+    z.push(chunks.peek().is_none() as u8);
+    z.extend_from_slice(&(c.len() as u16).to_le_bytes());
+    z.extend_from_slice(&(!(c.len() as u16)).to_le_bytes());
+    z.extend_from_slice(c);
+  }
+  let (mut a, mut b) = (1u32, 0u32);
+  for &v in &raw {
+    a = (a + v as u32) % 65521;
+    b = (b + a) % 65521;
+  }
+  z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+  let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+  let mut ihdr = Vec::new();
+  ihdr.extend_from_slice(&w.to_be_bytes());
+  ihdr.extend_from_slice(&h.to_be_bytes());
+  ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+  chunk(&mut out, b"IHDR", &ihdr);
+  chunk(&mut out, b"IDAT", &z);
+  chunk(&mut out, b"IEND", &[]);
+  let tmp = format!("{}.tmp", path);
+  std::fs::File::create(&tmp)?.write_all(&out)?;
+  std::fs::rename(&tmp, path)
 }

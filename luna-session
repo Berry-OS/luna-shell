@@ -5,10 +5,35 @@
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+TEST_VT=
+case "${1:-}" in
+    --vt)
+        [[ $# == 2 && $2 =~ ^[0-9]+$ && ${#2} -le 2 ]] || {
+            printf 'usage: luna-session --vt N (1..63)\n' >&2; exit 1;
+        }
+        TEST_VT=$((10#$2))
+        ((TEST_VT >= 1 && TEST_VT <= 63)) || exit 1
+        ;;
+    -h|--help)
+        printf '%s\n' 'usage: luna-session [--vt N]' \
+            '  --vt N  Run on an unused Linux VT and return on exit (requires openvt/device access).' \
+            '          Use Ctrl+Alt+Fn to switch between Wayback and Luna.' \
+            '  LUNA_REBUILD=0 skips incremental source builds; LUNA_BIN uses installed binaries.'
+        exit 0
+        ;;
+    '') ;;
+    *) printf 'luna-session: unknown argument: %s\n' "$1" >&2; exit 1 ;;
+esac
 PROFILE="${PROFILE:-release}"
 TARGET="$ROOT/target/$PROFILE"
 BACKEND="${BACKEND:-dri}"
 SOCKET="${LUNA_SOCKET:-wayland-0}"
+if [[ -n $TEST_VT ]]; then
+    SOCKET="${LUNA_SOCKET:-wayland-luna-$TEST_VT}"
+fi
+[[ $SOCKET != */* && $SOCKET != . && $SOCKET != .. && -n $SOCKET ]] || {
+    printf 'luna-session: LUNA_SOCKET must be a socket basename\n' >&2; exit 1;
+}
 PORT="${LUNA_WEBGL_PORT:-8081}"
 PIDS=()
 COMPOSITOR_PID=
@@ -23,7 +48,7 @@ cleanup() {
     ((${#PIDS[@]})) || return 0
 
     kill -TERM "${PIDS[@]}" 2>/dev/null || true
-    for _ in {1..20}; do
+    for _ in {1..60}; do
         alive_any=0
         for p in "${PIDS[@]}"; do alive "$p" && alive_any=1; done
         ((alive_any)) || break
@@ -31,8 +56,6 @@ cleanup() {
     done
     for p in "${PIDS[@]}"; do alive "$p" && kill -KILL "$p" 2>/dev/null || true; done
     for p in "${PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
-    rm -f -- "${XDG_RUNTIME_DIR:-/tmp}/$SOCKET" \
-        "${XDG_RUNTIME_DIR:-/tmp}/$SOCKET.lock" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -43,6 +66,16 @@ trap 'exit 129' HUP
 # instead of returning control to the display manager.
 trap 'exit 0' USR1
 
+# Re-exec under openvt before owning a socket or starting the compositor.
+# openvt refuses occupied VTs (no -f) and restores the prior VT on exit.
+if [[ -n $TEST_VT ]]; then
+    command -v openvt >/dev/null 2>&1 || fail 'openvt is required for --vt'
+    [[ ${BACKEND:-dri} == dri ]] || fail '--vt requires BACKEND=dri'
+    exec openvt -s -w -c "$TEST_VT" -- env \
+        LUNA_TTY="/dev/tty$TEST_VT" LUNA_SOCKET="$SOCKET" \
+        XDG_CURRENT_DESKTOP=Luna XDG_SESSION_DESKTOP=luna "$ROOT/luna-session"
+fi
+
 # Runtime directory ---------------------------------------------------------
 if [[ -z ${XDG_RUNTIME_DIR:-} ]]; then
     XDG_RUNTIME_DIR="/run/user/$(id -u)"
@@ -51,17 +84,23 @@ fi
 install -d -m 700 "$XDG_RUNTIME_DIR"
 export XDG_RUNTIME_DIR
 
-# Own the socket name before removing a stale endpoint.  A session killed
-# without running cleanup leaves wayland-N behind; the compositor then fails
-# its first bind and the next invocation mysteriously succeeds.  The lock also
-# prevents a second live luna-session from stealing the active compositor's
-# socket.
+# On a test VT, openvt hands us the console as stdin/stdout/stderr.  Every app
+# the shell launches would inherit it and keep /dev/ttyN open after logout, so
+# openvt could neither deallocate the VT nor the kernel reset its modes.
+# Detach all session processes from the console and log to a file instead.
+if [[ -n ${LUNA_TTY:-} ]]; then
+    exec </dev/null >>"$XDG_RUNTIME_DIR/luna-session-${LUNA_SOCKET:-vt}.log" 2>&1
+fi
+
+# Prevent two supervisors from managing the same Luna session. The compositor
+# separately owns the standard Wayland lock shared with other desktops.
 command -v flock >/dev/null 2>&1 || fail 'flock is required to own the Wayland socket'
 exec {SESSION_LOCK_FD}>"$XDG_RUNTIME_DIR/luna-session-$SOCKET.lock"
 flock -n "$SESSION_LOCK_FD" || fail "another Luna session owns $SOCKET"
-rm -f -- "$XDG_RUNTIME_DIR/$SOCKET" "$XDG_RUNTIME_DIR/$SOCKET.lock"
+# The compositor owns Wayland's standard socket lock and stale-file cleanup.
+# Removing endpoints here could disconnect a live Wayback/other compositor.
 
-# Resolve binaries.  A source checkout builds once when needed; an installed
+# Resolve binaries. A source checkout builds incrementally; an installed
 # session simply uses PATH.  There is no build/stat polling after launch.
 if [[ -n ${LUNA_BIN:-} ]]; then
     BIN="$LUNA_BIN"
@@ -71,7 +110,8 @@ else
     BIN="$ROOT"
 fi
 
-if [[ ! -x $BIN/luna-compositor || ! -x $BIN/luna-shell ]]; then
+if [[ ! -x $BIN/luna-compositor || ! -x $BIN/luna-shell ]] || \
+   [[ -z ${LUNA_BIN:-} && -f $ROOT/wayland-server-rs/Cargo.toml && ${LUNA_REBUILD:-1} != 0 ]]; then
     if [[ -f $ROOT/Makefile ]]; then
         printf '→ Building Luna desktop\n'
         make -C "$ROOT" build-desktop-system PROFILE="$PROFILE"
@@ -125,16 +165,16 @@ case "$saved_numlock" in 0|1) export LUNA_NUMLOCK="$saved_numlock" ;; esac
 # Native Wayland environment ------------------------------------------------
 unset LD_PRELOAD LUNA_WAYLAND_CLIENT_PRELOAD LUNA_WAYLAND_CLIENT_LIBPATH DISPLAY
 export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-Luna}"
-export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-luna}"
-export GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland MOZ_ENABLE_WAYLAND=1
+export XDG_CURRENT_DESKTOP="${LUNA_CURRENT_DESKTOP:-Luna}"
+export XDG_SESSION_DESKTOP=luna
+export GDK_BACKEND=wayland 'QT_QPA_PLATFORM=wayland;xcb' MOZ_ENABLE_WAYLAND=1
 export MOZ_GTK_TITLEBAR_DECORATION="${MOZ_GTK_TITLEBAR_DECORATION:-client}"
 # DOSBox / sdl12-compat: native Wayland + compositor SSD (no X11, no libdecor).
 export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-wayland}"
 export SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR="${SDL_VIDEO_WAYLAND_ALLOW_LIBDECOR:-0}"
 export SDL_VIDEO_WAYLAND_PREFER_LIBDECOR="${SDL_VIDEO_WAYLAND_PREFER_LIBDECOR:-0}"
 export SDL12COMPAT_ALLOW_SYSWM="${SDL12COMPAT_ALLOW_SYSWM:-0}"
-export GDK_SCALE="${LUNA_GDK_SCALE:-0.8}" GDK_DPI_SCALE="${LUNA_GDK_DPI_SCALE:-1}"
+export GDK_SCALE="${LUNA_GDK_SCALE:-1}" GDK_DPI_SCALE="${LUNA_GDK_DPI_SCALE:-1}"
 export QT_SCALE_FACTOR="${LUNA_QT_SCALE_FACTOR:-1}" QT_AUTO_SCREEN_SCALE_FACTOR=0
 export LUNA_BACKEND="$BACKEND" LUNA_OUTPUT_DPI="${LUNA_OUTPUT_DPI:-96}"
 # New monitor defaults to silent background sampling.  Set to 1 only when
@@ -201,6 +241,7 @@ case "${LUNA_IM_WAYLAND:-1}" in
 esac
 if [[ -z ${DBUS_SESSION_BUS_ADDRESS:-} ]] && command -v dbus-launch >/dev/null 2>&1; then
     eval "$(dbus-launch --sh-syntax)"
+    [[ -z ${DBUS_SESSION_BUS_PID:-} ]] || PIDS+=("$DBUS_SESSION_BUS_PID")
 fi
 
 # Compositor ---------------------------------------------------------------
@@ -215,6 +256,7 @@ elif [[ -e /dev/fb0 && ( $BACKEND == dri || $BACKEND == software ) ]]; then
     ARGS+=(--fbdev /dev/fb0)
 fi
 
+rm -f "$XDG_RUNTIME_DIR/luna-xdisplay-$SOCKET"
 printf '→ compositor: %s %s\n' "$COMPOSITOR" "${ARGS[*]}"
 "$COMPOSITOR" "${ARGS[@]}" & COMPOSITOR_PID=$!; PIDS+=("$COMPOSITOR_PID")
 
@@ -227,6 +269,17 @@ for _ in {1..400}; do
 done
 [[ -S $XDG_RUNTIME_DIR/$SOCKET ]] || fail "Wayland socket not created: $SOCKET"
 export WAYLAND_DISPLAY="$SOCKET"
+# The compositor starts a rootless Xwayland and publishes its display name once
+# it listens.  X11 clients (and XEmbed tray icons) need DISPLAY; wait briefly,
+# then carry on without X if it does not come up.
+XDISPLAY_FILE="$XDG_RUNTIME_DIR/luna-xdisplay-$SOCKET"
+if [[ -z ${LUNA_NO_XWAYLAND:-} ]]; then
+    for _ in {1..200}; do
+        [[ -s $XDISPLAY_FILE ]] && { DISPLAY="$(<"$XDISPLAY_FILE")"; export DISPLAY; break; }
+        alive "$COMPOSITOR_PID" || break
+        sleep 0.01
+    done
+fi
 export PATH="$BIN:$ROOT:$PATH"
 
 # Shell and optional helpers -----------------------------------------------

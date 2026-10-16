@@ -16,7 +16,8 @@ Environment=XDG_RUNTIME_DIR=/run/user/0
 Environment=BACKEND=dri
 Environment=LUNA_TTY=/dev/tty1
 Environment=LUNA_USE_SYSTEM_WAYLAND=1
-Environment=LUNA_EGL_SOFTWARE=1
+# Leave LUNA_EGL_SOFTWARE unset: luna-session picks gpu when /dev/dri/renderD*
+# is usable, otherwise forces software itself.
 ExecStart=/usr/local/bin/luna-session
 Restart=on-failure
 RestartSec=2

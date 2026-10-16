@@ -38,6 +38,13 @@ RPM_DIST     := $(CURDIR)/.rpm-dist
 # Local rustup toolchains are not the distro rust/cargo RPMs listed in the spec.
 RPMBUILD_FLAGS ?= $(shell rpm -q rust cargo >/dev/null 2>&1 || echo --nodeps)
 
+# FairPlay helper program (GPL-3.0), started by the AirPlay widget.
+.PHONY: airplay-fairplay
+airplay-fairplay: airplay-fairplayd
+airplay-fairplayd: widget/airplay_fairplayd.c widget/airplay_playfair.h
+	@echo "→ Building the FairPlay helper (GPL-3.0)"
+	$(CC) -O2 -w -o $@ $< -lm
+
 .PHONY: all build build-dri build-webgl build-desktop build-desktop-system build-shell \
         symlinks symlinks-system run server demo webgl run-gtk desktop desktop-system \
         luna-session install install-system stop clean dist rpm srpm luna-shell \
@@ -114,13 +121,24 @@ $(UI_DIR)/luna-shell-widgets.html.h: skins/widgets.html $(UI_DIR)/gen_include.sh
 $(UI_DIR)/luna-shell.html.h: $(DEFAULT_SKIN_DIR)/layout.html $(UI_DIR)/gen_include.sh
 	cd $(UI_DIR) && sh ./gen_include.sh -o luna-shell.html.h ../$(DEFAULT_SKIN_DIR)/layout.html
 
-SHELL_CFLAGS := -pthread \
+# AirPlay receiver widget.  FairPlay (GPL-3.0) runs in a SEPARATE PROGRAM: build it with
+# `make airplay-fairplay` (airplay-fairplayd, GPL-3.0) and put it next to luna-shell or into
+# $(LUNA_LIB); the widget starts it and talks to it over a pipe, so no GPL code is linked or
+# loaded into luna-shell.  AIRPLAY_PLAYFAIR=1 links the same code statically instead — the
+# shell binary is then GPL-3.0.
+AIRPLAY          ?= 1
+AIRPLAY_PLAYFAIR ?= 0
+# AirDrop widget (needs OpenSSL at run time only; MPL-2.0 code, no GPL involved).
+AIRDROP          ?= 1
+SHELL_AIRPLAY    := $(if $(filter 1,$(AIRPLAY)),-DLUNA_WITH_AIRPLAY $(if $(filter 1,$(AIRPLAY_PLAYFAIR)),-DLUNA_AIRPLAY_PLAYFAIR),)
+SHELL_AIRDROP    := $(if $(filter 1,$(AIRDROP)),-DLUNA_WITH_AIRDROP,)
+SHELL_CFLAGS := -pthread $(SHELL_AIRPLAY) $(SHELL_AIRDROP) \
                 $(shell pkg-config --cflags libdrm 2>/dev/null) \
                 $(SHELL_WL_CFLAGS) \
                 $(shell pkg-config --cflags xkbcommon 2>/dev/null) \
                 $(shell pkg-config --cflags dbus-1 2>/dev/null) \
                 $(shell pkg-config --cflags openssl 2>/dev/null)
-SHELL_LIBS   := -pthread -lm -lEGL -lgbm -ldrm -linput -ludev -lxkbcommon \
+SHELL_LIBS   := -pthread -ldl -lm -lEGL -lgbm -ldrm -linput -ludev -lxkbcommon \
                 $(SHELL_WL_LIBS) -lwayland-egl -lGL \
                 $(shell pkg-config --libs dbus-1 2>/dev/null) \
                 $(shell pkg-config --libs openssl 2>/dev/null || echo -lssl -lcrypto)
@@ -139,8 +157,8 @@ luna-shell: $(SHELL_WL_DEPS) $(UI_DIR)/luna-shell.c $(UI_DIR)/xdg-shell-protocol
             $(LAYER_SHELL_HDR) $(LAYER_SHELL_SRC) \
             $(UI_DIR)/luna-ui/luna-ui.h $(UI_DIR)/luna-wifi.h $(UI_DIR)/luna-ethernet.h \
             $(UI_DIR)/luna-bluetooth.h $(UI_DIR)/luna-sni.h $(UI_DIR)/luna-weather.h $(UI_DIR)/luna-monitor.h \
-            $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h \
-            $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h \
+            $(UI_DIR)/luna-ui/stb_truetype.h $(UI_DIR)/luna-ui/stb_image_write.h widget/airplay.h widget/airdrop.h \
+            widget/airplay_playfair.h $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h \
             $(UI_DIR)/luna-shell-widgets.css.h $(UI_DIR)/luna-shell-widgets.html.h
 	@echo "→ Building luna-shell (Luna Desktop shell, $(SHELL_WL_LABEL))"
 	# luna-shell's layout, animation and draw-list walks are hot on every KMS \
@@ -263,6 +281,7 @@ install: build-desktop
 	install -m 755 luna-session $(PREFIX)/bin/luna-session
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
+	@if [ -f airplay-fairplayd ]; then install -m 755 airplay-fairplayd $(LUNA_LIB)/; fi
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
 	install -m 4755 luna-wifi-helper $(PREFIX)/bin/luna-wifi-helper
@@ -320,6 +339,7 @@ install-system: build-desktop-system
 	install -m 755 luna-session $(PREFIX)/bin/luna-session
 	install -m 755 $(TARGET)/luna-compositor $(PREFIX)/bin/luna-compositor
 	install -m 755 luna-shell $(PREFIX)/bin/luna-shell
+	@if [ -f airplay-fairplayd ]; then install -m 755 airplay-fairplayd $(LUNA_LIB)/; fi
 	install -m 755 luna-clipboard $(PREFIX)/bin/luna-clipboard
 	install -m 755 luna-tray-notify $(PREFIX)/bin/luna-tray-notify
 	install -m 4755 luna-wifi-helper $(PREFIX)/bin/luna-wifi-helper
@@ -355,6 +375,7 @@ stop:
 	fi
 
 clean:
+	rm -f airplay-fairplayd
 	cargo clean
 	rm -f luna-shell luna-clipboard luna-tray-notify luna-wifi-helper \
 	  $(UI_DIR)/luna-shell.css.h $(UI_DIR)/luna-shell.html.h \
